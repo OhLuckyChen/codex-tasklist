@@ -650,11 +650,16 @@
   }
 
   async function waitForActiveThread(threadId, timeoutMs = 1_200) {
+    const normalizedThreadId = normalizeThreadId(threadId);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const row = findThreadRow(threadId);
+      const row = findThreadRow(normalizedThreadId);
+      const activeThreadId = normalizeThreadId(
+        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
+      ) || normalizeThreadId(threadIdFromLocation());
       if (
-        row?.getAttribute("data-app-action-sidebar-thread-active") === "true"
+        activeThreadId === normalizedThreadId
+        || row?.getAttribute("data-app-action-sidebar-thread-active") === "true"
         || ["page", "true"].includes(row?.getAttribute("aria-current"))
       ) return true;
       await new Promise((resolve) => window.setTimeout(resolve, 40));
@@ -683,19 +688,6 @@
         path: routeForThread(normalizedThreadId),
       });
     } catch (_) {}
-  }
-
-  async function waitForActiveThread(threadId) {
-    const normalizedThreadId = normalizeThreadId(threadId);
-    const deadline = Date.now() + 8_000;
-    while (Date.now() < deadline) {
-      const activeThreadId = normalizeThreadId(
-        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
-      ) || normalizeThreadId(threadIdFromLocation());
-      if (activeThreadId === normalizedThreadId) return;
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-    }
-    throw new Error("Codex 没有打开所选会话");
   }
 
   function projectRowById(projectId) {
@@ -853,7 +845,9 @@
     pendingThreadCreation = taskId;
     try {
       await openThread(threadId);
-      await waitForActiveThread(threadId);
+      if (!await waitForActiveThread(threadId, 8_000)) {
+        throw new Error("Codex 没有打开所选会话");
+      }
       await requestHostTaskComposerPrefill({
         instruction,
         skillDisplayName,
