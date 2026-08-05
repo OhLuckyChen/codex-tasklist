@@ -735,8 +735,8 @@ done
   assert.equal(result.response.status, 200);
   assert.deepEqual(result.body, {
     skills: [
-      { id: "repo-skill", label: "Repository Skill", scope: "repo" },
-      { id: "user-skill", label: "user-skill", scope: "user" },
+      { id: "repo-skill", label: "Repository Skill", scope: "repo", description: "", path: "" },
+      { id: "user-skill", label: "user-skill", scope: "user", description: "", path: "" },
     ],
     mcpServers: [
       { id: "context7", label: "context7", transport: "streamable_http" },
@@ -821,11 +821,11 @@ test("existing task and comment thread attribution remains content-specific", as
       INSERT INTO projects VALUES ('local', 'Local', NULL, 2, '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z');
       INSERT INTO tasks VALUES (
         'legacy-task', 'LOCAL-1', 'local', 'Legacy task', '', 'todo', 'none', '[]', 1000,
-        'legacy-thread', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1,
+        '00000000-0000-4000-8000-000000000001', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1,
         '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z'
       );
       INSERT INTO comments VALUES (
-        'legacy-comment', 'legacy-task', 'Legacy comment', 'legacy-comment-thread', 'local', '本地用户', 1,
+        'legacy-comment', 'legacy-task', 'Legacy comment', '00000000-0000-4000-8000-000000000002', 'local', '本地用户', 1,
         '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z'
       );
       INSERT INTO attachments VALUES (
@@ -839,7 +839,11 @@ test("existing task and comment thread attribution remains content-specific", as
 
   const result = await request(baseUrl, "/api/tasks/legacy-task");
   assert.equal(result.response.status, 200);
-  assert.equal(result.body.task.threadId, "legacy-thread");
+  assert.equal(result.body.task.threadId, "00000000-0000-4000-8000-000000000001");
+  assert.deepEqual(result.body.task.threadIds, [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000002",
+  ]);
   assert.equal(result.body.task.creatorType, "agent");
   assert.equal(result.body.task.creatorId, "codex-agent");
   assert.equal(result.body.task.creatorName, "Codex Agent");
@@ -862,9 +866,9 @@ test("existing task and comment thread attribution remains content-specific", as
   const taskThreads = runningApps.at(-1).app.database.database.prepare(`
     SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_threads'
   `).get();
-  assert.equal(taskThreads, undefined);
+  assert.equal(taskThreads?.[1], 1);
   const comments = await request(baseUrl, "/api/tasks/legacy-task/comments");
-  assert.equal(comments.body.comments[0].threadId, "legacy-comment-thread");
+  assert.equal(comments.body.comments[0].threadId, "00000000-0000-4000-8000-000000000002");
   assert.equal(comments.body.comments[0].authorType, "agent");
   assert.equal(comments.body.comments[0].authorId, "codex-agent");
   assert.equal(comments.body.comments[0].authorName, "Codex Agent");
@@ -894,7 +898,7 @@ test("existing task and comment thread attribution remains content-specific", as
   assert.equal(commentForeignKeys.some((foreignKey) => foreignKey.table === "tasks"), true);
 });
 
-test("task thread migration excludes comment-only aggregate entries", async () => {
+test("task thread migration preserves aggregate and comment-only entries", async () => {
   const baseUrl = await startServer(async (directory) => {
     const databasePath = path.join(directory, "taskboard.sqlite");
     const database = new DatabaseSync(databasePath);
@@ -951,10 +955,10 @@ test("task thread migration excludes comment-only aggregate entries", async () =
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1,
         '2026-07-20T00:00:00.000Z', '2026-07-20T03:00:00.000Z'
       );
-      INSERT INTO task_threads VALUES ('aggregate-task', 'thread-subject', '2026-07-20T01:00:00.000Z');
-      INSERT INTO task_threads VALUES ('aggregate-task', 'thread-comment-only', '2026-07-20T02:00:00.000Z');
+      INSERT INTO task_threads VALUES ('aggregate-task', '00000000-0000-4000-8000-000000000003', '2026-07-20T01:00:00.000Z');
+      INSERT INTO task_threads VALUES ('aggregate-task', '00000000-0000-4000-8000-000000000004', '2026-07-20T02:00:00.000Z');
       INSERT INTO comments VALUES (
-        'aggregate-comment', 'aggregate-task', 'Comment', 'thread-comment-only', 'local', '本地用户', 1,
+        'aggregate-comment', 'aggregate-task', 'Comment', '00000000-0000-4000-8000-000000000004', 'local', '本地用户', 1,
         '2026-07-20T02:00:00.000Z', '2026-07-20T02:00:00.000Z'
       );
     `);
@@ -963,13 +967,22 @@ test("task thread migration excludes comment-only aggregate entries", async () =
   });
 
   const task = await request(baseUrl, "/api/tasks/aggregate-task");
-  assert.equal(task.body.task.threadId, "thread-subject");
+  assert.equal(task.body.task.threadId, "00000000-0000-4000-8000-000000000003");
+  assert.deepEqual(task.body.task.threadIds, [
+    "00000000-0000-4000-8000-000000000003",
+    "00000000-0000-4000-8000-000000000004",
+  ]);
   const taskThreads = runningApps.at(-1).app.database.database.prepare(`
     SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_threads'
   `).get();
-  assert.equal(taskThreads, undefined);
+  assert.equal(taskThreads?.[1], 1);
+  const taskThreadColumns = runningApps.at(-1).app.database.database
+    .prepare("PRAGMA table_info(task_threads)")
+    .all();
+  assert.equal(taskThreadColumns.some((column) => column.name === "linked_at"), true);
+  assert.equal(taskThreadColumns.some((column) => column.name === "created_at"), false);
   const comments = await request(baseUrl, "/api/tasks/aggregate-task/comments");
-  assert.equal(comments.body.comments[0].threadId, "thread-comment-only");
+  assert.equal(comments.body.comments[0].threadId, "00000000-0000-4000-8000-000000000004");
 });
 
 test("development context scan resolves the current Codex conversation workspace", async () => {
@@ -1075,7 +1088,7 @@ test("project and task CRUD flow", async () => {
       status: "todo",
       priority: "high",
       labels: ["frontend", "mvp"],
-      threadId: "thread-123",
+      threadId: "00000000-0000-4000-8000-000000000123",
       developmentContext: {
         type: "worktree",
         path: "/work/website/.worktrees/taskboard",
@@ -1092,7 +1105,7 @@ test("project and task CRUD flow", async () => {
   assert.equal(created.sortOrder, 1000);
   assert.equal(created.archivedAt, null);
   assert.deepEqual(created.labels, ["frontend", "mvp"]);
-  assert.equal(created.threadId, "thread-123");
+  assert.equal(created.threadId, "00000000-0000-4000-8000-000000000123");
   assert.equal(created.creatorType, "user");
   assert.equal(created.creatorId, "local-user");
   assert.equal(created.creatorName, "本地用户");
@@ -1126,7 +1139,7 @@ test("project and task CRUD flow", async () => {
       version: created.version,
       title: "Build polished task board",
       priority: "urgent",
-      threadId: "thread-456",
+      threadId: "00000000-0000-4000-8000-000000000456",
       developmentContext: { type: "branch", branch: "feature/polish" },
     },
   });
@@ -1134,17 +1147,17 @@ test("project and task CRUD flow", async () => {
   const updated = patchResult.body.task;
   assert.equal(updated.title, "Build polished task board");
   assert.equal(updated.priority, "urgent");
-  assert.equal(updated.threadId, "thread-456");
+  assert.equal(updated.threadId, "00000000-0000-4000-8000-000000000456");
   assert.deepEqual(updated.developmentContext, { type: "branch", branch: "feature/polish" });
   assert.equal(updated.version, 2);
 
   const archiveResult = await request(baseUrl, `/api/tasks/${created.id}/archive`, {
     method: "POST",
-    body: { version: updated.version, threadId: "thread-archive" },
+    body: { version: updated.version, threadId: "00000000-0000-4000-8000-000000000005" },
   });
   assert.equal(archiveResult.response.status, 200);
   assert.equal(archiveResult.body.task.version, 3);
-  assert.equal(archiveResult.body.task.threadId, "thread-archive");
+  assert.equal(archiveResult.body.task.threadId, "00000000-0000-4000-8000-000000000005");
   assert.match(archiveResult.body.task.archivedAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const activeList = await request(baseUrl, "/api/tasks?projectId=website");
@@ -1158,12 +1171,12 @@ test("project and task CRUD flow", async () => {
 
   const restoreResult = await request(baseUrl, `/api/tasks/${created.id}/restore`, {
     method: "POST",
-    body: { version: archiveResult.body.task.version, threadId: "thread-restore" },
+    body: { version: archiveResult.body.task.version, threadId: "00000000-0000-4000-8000-000000000006" },
   });
   assert.equal(restoreResult.response.status, 200);
   assert.equal(restoreResult.body.task.archivedAt, null);
   assert.equal(restoreResult.body.task.version, 4);
-  assert.equal(restoreResult.body.task.threadId, "thread-restore");
+  assert.equal(restoreResult.body.task.threadId, "00000000-0000-4000-8000-000000000006");
 
   const activeAfterRestore = await request(baseUrl, "/api/tasks?projectId=website");
   assert.deepEqual(activeAfterRestore.body.tasks.map((task) => task.id), [created.id]);
@@ -1182,12 +1195,12 @@ test("moving a task updates its status and sort order", async () => {
 
   const moveResult = await request(baseUrl, `/api/tasks/${task.id}/move`, {
     method: "POST",
-    body: { version: task.version, status: "in_progress", sortOrder: 2500.5, threadId: "thread-move" },
+    body: { version: task.version, status: "in_progress", sortOrder: 2500.5, threadId: "00000000-0000-4000-8000-000000000007" },
   });
   assert.equal(moveResult.response.status, 200);
   assert.equal(moveResult.body.task.status, "in_progress");
   assert.equal(moveResult.body.task.sortOrder, 2500.5);
-  assert.equal(moveResult.body.task.threadId, "thread-move");
+  assert.equal(moveResult.body.task.threadId, "00000000-0000-4000-8000-000000000007");
   assert.equal(moveResult.body.task.version, 2);
 });
 
@@ -1251,7 +1264,7 @@ test("issues support parent, sub-issue, blocking, and related issue relationship
       `/api/tasks/${encodeURIComponent(task.id)}/relations/${type}/${encodeURIComponent(related.id)}`,
       {
         method,
-        body: { version, threadId: "thread-relations" },
+        body: { version, threadId: "00000000-0000-4000-8000-000000000008" },
       },
     )
   );
@@ -1265,7 +1278,7 @@ test("issues support parent, sub-issue, blocking, and related issue relationship
   const parentAdded = await mutateRelation("POST", child, "parent", parent);
   assert.equal(parentAdded.response.status, 200);
   assert.equal(parentAdded.body.task.version, child.version + 1);
-  assert.equal(parentAdded.body.task.threadId, "thread-relations");
+  assert.equal(parentAdded.body.task.threadId, "00000000-0000-4000-8000-000000000008");
   assert.equal(parentAdded.body.task.relations.parent.id, parent.id);
   assert.equal(parentAdded.body.relatedTask.id, parent.id);
 
@@ -1367,7 +1380,7 @@ test("issue relationship changes are broadcast in realtime", async () => {
     `/api/tasks/${first.id}/relations/related/${second.id}`,
     {
       method: "POST",
-      body: { version: first.version, threadId: "thread-realtime-relation" },
+      body: { version: first.version, threadId: "00000000-0000-4000-8000-000000000009" },
     },
   );
   assert.equal(changed.response.status, 200);
@@ -1417,33 +1430,98 @@ test("task and comment mutations keep content-specific conversation attribution"
   const baseUrl = await startServer();
   const createResult = await request(baseUrl, "/api/tasks", {
     method: "POST",
-    body: { title: "Keep attribution", threadId: "thread-original" },
+    body: { title: "Keep attribution", threadId: "00000000-0000-4000-8000-000000000010" },
   });
   const task = createResult.body.task;
   const updateResult = await request(baseUrl, `/api/tasks/${task.id}`, {
     method: "PATCH",
     body: { version: task.version, title: "Still attributed" },
   });
-  assert.equal(updateResult.body.task.threadId, "thread-original");
+  assert.equal(updateResult.body.task.threadId, "00000000-0000-4000-8000-000000000010");
 
   const repeatedUpdate = await request(baseUrl, `/api/tasks/${task.id}`, {
     method: "PATCH",
-    body: { version: updateResult.body.task.version, title: "Still attributed again", threadId: "thread-original" },
+    body: { version: updateResult.body.task.version, title: "Still attributed again", threadId: "00000000-0000-4000-8000-000000000010" },
   });
-  assert.equal(repeatedUpdate.body.task.threadId, "thread-original");
+  assert.equal(repeatedUpdate.body.task.threadId, "00000000-0000-4000-8000-000000000010");
 
   const commentCreate = await request(baseUrl, `/api/tasks/${task.id}/comments`, {
     method: "POST",
-    body: { body: "Attributed comment", threadId: "thread-comment" },
+    body: { body: "Attributed comment", threadId: "00000000-0000-4000-8000-000000000011" },
   });
   const comment = commentCreate.body.comment;
   const commentUpdate = await request(baseUrl, `/api/comments/${comment.id}`, {
     method: "PATCH",
     body: { version: comment.version, body: "Edited from the UI" },
   });
-  assert.equal(commentUpdate.body.comment.threadId, "thread-comment");
+  assert.equal(commentUpdate.body.comment.threadId, "00000000-0000-4000-8000-000000000011");
   const taskAfterComment = await request(baseUrl, `/api/tasks/${task.id}`);
-  assert.equal(taskAfterComment.body.task.threadId, "thread-original");
+  assert.equal(taskAfterComment.body.task.threadId, "00000000-0000-4000-8000-000000000010");
+});
+
+test("issues retain multiple processing conversations while one remains current", async () => {
+  const baseUrl = await startServer();
+  const threadOne = "00000000-0000-4000-8000-000000000101";
+  const threadTwo = "00000000-0000-4000-8000-000000000102";
+  const threadThree = "00000000-0000-4000-8000-000000000103";
+  const threadFour = "00000000-0000-4000-8000-000000000104";
+  const threadFive = "00000000-0000-4000-8000-000000000105";
+  const staleThread = "00000000-0000-4000-8000-000000000199";
+  const created = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { title: "Multiple conversations", threadId: threadOne },
+  });
+  const updated = await request(baseUrl, `/api/tasks/${created.body.task.id}`, {
+    method: "PATCH",
+    body: {
+      version: created.body.task.version,
+      title: "Handled again",
+      threadId: threadTwo,
+    },
+  });
+  assert.equal(updated.body.task.threadId, threadTwo);
+  assert.equal(updated.body.task.threadIds[0], threadTwo);
+  assert.deepEqual(new Set(updated.body.task.threadIds), new Set([threadOne, threadTwo]));
+  const stale = await request(baseUrl, `/api/tasks/${created.body.task.id}`, {
+    method: "PATCH",
+    body: { version: created.body.task.version, threadId: staleThread },
+  });
+  assert.equal(stale.response.status, 409);
+  const afterStale = await request(baseUrl, `/api/tasks/${created.body.task.id}`);
+  assert.equal(afterStale.body.task.threadIds.includes(staleThread), false);
+
+  const commentCreated = await request(baseUrl, `/api/tasks/${created.body.task.id}/comments`, {
+    method: "POST",
+    body: { body: "Review from another conversation", threadId: threadThree },
+  });
+  const commentUpdated = await request(baseUrl, `/api/comments/${commentCreated.body.comment.id}`, {
+    method: "PATCH",
+    body: {
+      version: commentCreated.body.comment.version,
+      body: "Review updated elsewhere",
+      threadId: threadFour,
+    },
+  });
+  await request(baseUrl, `/api/comments/${commentCreated.body.comment.id}`, {
+    method: "DELETE",
+    body: { version: commentUpdated.body.comment.version, threadId: threadFive },
+  });
+  const afterComment = await request(baseUrl, `/api/tasks/${created.body.task.id}`);
+  assert.equal(afterComment.body.task.threadId, threadTwo);
+  assert.equal(afterComment.body.task.threadIds[0], threadTwo);
+  assert.deepEqual(
+    new Set(afterComment.body.task.threadIds),
+    new Set([threadOne, threadTwo, threadThree, threadFour, threadFive]),
+  );
+
+  const relinked = await request(baseUrl, `/api/tasks/${created.body.task.id}`, {
+    method: "PATCH",
+    body: { version: afterComment.body.task.version, threadId: threadOne },
+  });
+  assert.equal(relinked.response.status, 200);
+  assert.equal(relinked.body.task.threadId, threadOne);
+  assert.equal(relinked.body.task.threadIds[0], threadOne);
+  assert.equal(relinked.body.task.threadIds.length, 5);
 });
 
 test("stale updates receive a version conflict", async () => {
@@ -1486,13 +1564,13 @@ test("issue comments can be created, edited, listed, and deleted", async () => {
 
   const createResult = await request(baseUrl, `/api/tasks/${task.id}/comments`, {
     method: "POST",
-    body: { body: "First comment", threadId: "thread-comment-create" },
+    body: { body: "First comment", threadId: "00000000-0000-4000-8000-000000000012" },
   });
   assert.equal(createResult.response.status, 201);
   const comment = createResult.body.comment;
   assert.equal(comment.taskId, task.id);
   assert.equal(comment.body, "First comment");
-  assert.equal(comment.threadId, "thread-comment-create");
+  assert.equal(comment.threadId, "00000000-0000-4000-8000-000000000012");
   assert.deepEqual(comment.attachments, []);
   assert.equal(comment.authorType, "user");
   assert.equal(comment.authorId, "local-user");
@@ -1504,12 +1582,12 @@ test("issue comments can be created, edited, listed, and deleted", async () => {
 
   const updateResult = await request(baseUrl, `/api/comments/${comment.id}`, {
     method: "PATCH",
-    body: { version: comment.version, body: "Edited comment", threadId: "thread-comment-update" },
+    body: { version: comment.version, body: "Edited comment", threadId: "00000000-0000-4000-8000-000000000013" },
   });
   assert.equal(updateResult.response.status, 200);
   const updated = updateResult.body.comment;
   assert.equal(updated.body, "Edited comment");
-  assert.equal(updated.threadId, "thread-comment-update");
+  assert.equal(updated.threadId, "00000000-0000-4000-8000-000000000013");
   assert.equal(updated.version, 2);
 
   const taskAfterUpdate = await request(baseUrl, `/api/tasks/${task.id}`);
@@ -1524,7 +1602,7 @@ test("issue comments can be created, edited, listed, and deleted", async () => {
 
   const deleteResult = await request(baseUrl, `/api/comments/${comment.id}`, {
     method: "DELETE",
-    body: { version: updated.version, threadId: "thread-comment-delete" },
+    body: { version: updated.version, threadId: "00000000-0000-4000-8000-000000000014" },
   });
   assert.equal(deleteResult.response.status, 204);
 
@@ -1545,7 +1623,7 @@ test("taskctl issue creation and comments use the Codex Agent identity", async (
   const createTaskResult = await request(baseUrl, "/api/tasks", {
     method: "POST",
     headers: agentHeaders,
-    body: { title: "Created by Codex", threadId: "thread-agent-create" },
+    body: { title: "Created by Codex", threadId: "00000000-0000-4000-8000-000000000015" },
   });
   assert.equal(createTaskResult.response.status, 201);
   const task = createTaskResult.body.task;
@@ -1563,7 +1641,7 @@ test("taskctl issue creation and comments use the Codex Agent identity", async (
   const createCommentResult = await request(baseUrl, `/api/tasks/${task.id}/comments`, {
     method: "POST",
     headers: agentHeaders,
-    body: { body: "Implemented by Codex", threadId: "thread-agent-comment" },
+    body: { body: "Implemented by Codex", threadId: "00000000-0000-4000-8000-000000000016" },
   });
   assert.equal(createCommentResult.response.status, 201);
   const comment = createCommentResult.body.comment;
@@ -1571,7 +1649,7 @@ test("taskctl issue creation and comments use the Codex Agent identity", async (
   assert.equal(comment.authorId, "codex-agent");
   assert.equal(comment.authorName, "Codex Agent");
   assert.equal(comment.authorAvatarUrl, null);
-  assert.equal(comment.threadId, "thread-agent-comment");
+  assert.equal(comment.threadId, "00000000-0000-4000-8000-000000000016");
 });
 
 test("Codex-hosted user mutations persist the current account identity and avatar", async () => {
@@ -1744,7 +1822,7 @@ test("comments support attachments and deleting a comment removes its files", as
   const task = createTaskResult.body.task;
   const createCommentResult = await request(baseUrl, `/api/tasks/${task.id}/comments`, {
     method: "POST",
-    body: { body: "", threadId: "thread-attachment" },
+    body: { body: "", threadId: "00000000-0000-4000-8000-000000000017" },
   });
   assert.equal(createCommentResult.response.status, 201);
   const comment = createCommentResult.body.comment;
@@ -1775,7 +1853,7 @@ test("comments support attachments and deleting a comment removes its files", as
   await access(storagePath);
   const deleteResult = await request(baseUrl, `/api/comments/${comment.id}`, {
     method: "DELETE",
-    body: { version: comment.version, threadId: "thread-delete-comment" },
+    body: { version: comment.version, threadId: "00000000-0000-4000-8000-000000000018" },
   });
   assert.equal(deleteResult.response.status, 204);
   await assert.rejects(access(storagePath), { code: "ENOENT" });

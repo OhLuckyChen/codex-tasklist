@@ -7,6 +7,14 @@ const runtimeSource = await readFile(
   new URL("../scripts/codex-injector-runtime.mjs", import.meta.url),
   "utf8",
 );
+const launcherSource = await readFile(
+  new URL("../scripts/codex-taskboard-launcher.sh", import.meta.url),
+  "utf8",
+);
+const supervisorSource = await readFile(
+  new URL("../scripts/codex-taskboard-supervisor.sh", import.meta.url),
+  "utf8",
+);
 const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
@@ -24,7 +32,7 @@ test("the CDP bridge accepts only service ensure and native Skill composer prefi
   assert.match(source, /const hostBindingName = "__codexTaskboardHostV1"/);
   assert.match(runtimeSource, /request\.action === "ensure"/);
   assert.match(runtimeSource, /request\.action === "prefill-task-composer"/);
-  assert.match(runtimeSource, /request\.instruction\.length <= 1_024/);
+  assert.match(runtimeSource, /request\.instruction\.length <= 8_192/);
   assert.match(runtimeSource, /request\.skillPath\.length <= 1_024/);
   assert.match(source, /function prefillTaskComposerViaCdp/);
   assert.match(source, /cdp\.send\("Input\.insertText", \{ text: "\$" \}\)/);
@@ -69,6 +77,31 @@ test("the package injection command remains resident for tab-triggered recovery"
   assert.match(source, /__codexTaskboardHostStartupTokenV1/);
 });
 
+test("the macOS Dock launcher enables loopback-only CDP before Codex starts", () => {
+  assert.match(launcherSource, /--remote-debugging-address=127\.0\.0\.1/);
+  assert.match(launcherSource, /--remote-debugging-port=\$cdp_port/);
+  assert.match(launcherSource, /--remote-allow-origins=http:\/\/127\.0\.0\.1:/);
+  assert.match(launcherSource, /if codex_is_running; then/);
+  assert.match(launcherSource, /inject_current_codex/);
+  assert.match(launcherSource, /--port "\$cdp_port" --open/);
+  assert.match(launcherSource, /leaving the current session untouched/);
+  assert.doesNotMatch(launcherSource, /osascript/);
+  assert.doesNotMatch(launcherSource, /kill -TERM/);
+});
+
+test("the login supervisor is passive and never requests a Codex restart", () => {
+  assert.match(supervisorSource, /--watch --open/);
+  assert.match(supervisorSource, /attached_cdp_signature/);
+  assert.match(supervisorSource, /Detected a new Codex CDP instance/);
+  assert.match(supervisorSource, /function stop_duplicate_injectors|stop_duplicate_injectors\(\)/);
+  assert.match(supervisorSource, /Stopping duplicate Taskboard injector/);
+  assert.match(supervisorSource, /targets_port = explicit_port \|\| !has_any_port/);
+  assert.match(supervisorSource, /waiting without restarting or quitting it/);
+  assert.doesNotMatch(supervisorSource, /osascript/);
+  assert.doesNotMatch(supervisorSource, /--launch/);
+  assert.doesNotMatch(supervisorSource, /tell application/);
+});
+
 test("attach reconciles the renderer against a hashed current injection source", () => {
   assert.match(source, /createHash\("sha256"\)/);
   assert.match(source, /__CODEX_TASKBOARD_SOURCE_HASH__/);
@@ -94,7 +127,7 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
   assert.match(source, /--remote-debugging-port=/);
   assert.match(source, /taskboard\.reloadFrame\(\)/);
   assert.match(source, /__codex_taskboard_refresh/);
-  assert.match(source, /await restartResidentInjectorForRefresh\(port\)/);
+  assert.doesNotMatch(source, /if \(options\.refreshIfRunning\) await restartResidentInjectorForRefresh\(port\)/);
 });
 
 test("the injected iframe follows the configured local service port", () => {

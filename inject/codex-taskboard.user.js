@@ -41,6 +41,7 @@
   ];
   const PROJECT_SECTION_LABELS = ["projects", "项目"];
   const TASK_SECTION_LABELS = ["tasks", "任务", "chats", "对话"];
+  const CODEX_THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   const previous = window[SENTINEL_KEY];
   if (previous?.sourceHash === SOURCE_HASH && typeof previous.refresh === "function") {
@@ -80,7 +81,18 @@
   }
 
   function normalizeThreadId(value) {
-    return String(value || "").trim().replace(/^(?:local|cloud):/i, "");
+    let normalized = String(value || "").trim();
+    if (!normalized) return "";
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch (_) {
+      return "";
+    }
+    normalized = normalized
+      .replace(/^(?:local|cloud):/i, "")
+      .replace(/^urn:uuid:/i, "")
+      .toLowerCase();
+    return CODEX_THREAD_ID_PATTERN.test(normalized) ? normalized : "";
   }
 
   function resolveTaskboardUrl() {
@@ -597,19 +609,24 @@
       : liveContext;
     postToFrame({ type: "taskboard:host-context", payload });
     postToFrame({ type: "taskboard:theme", theme: payload.theme });
-    if (pendingTaskThreadLink && payload.threadId) {
-      const currentThread = (payload.threads || []).find((thread) => thread.id === payload.threadId);
+    if (pendingTaskThreadLink) {
+      const activePendingThreadId = normalizeThreadId(
+        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
+      ) || normalizeThreadId(threadIdFromLocation());
+      const currentThread = (payload.threads || [])
+        .find((thread) => thread.id === activePendingThreadId);
       const identifier = normalizedLabel(pendingTaskThreadLink.identifier);
       const taskContextVisible = normalizedLabel(findPageMount()?.surface?.textContent).includes(identifier);
       if (
-        payload.threadId !== pendingTaskThreadLink.previousThreadId
+        activePendingThreadId
+        && activePendingThreadId !== pendingTaskThreadLink.previousThreadId
         && (normalizedLabel(currentThread?.title).includes(identifier) || taskContextVisible)
       ) {
         postToFrame({
           type: "taskboard:thread-created",
           payload: {
             taskId: pendingTaskThreadLink.taskId,
-            threadId: payload.threadId,
+            threadId: activePendingThreadId,
           },
         });
         pendingTaskThreadLink = null;
@@ -626,16 +643,38 @@
     return `/local/${encodeURIComponent(threadId)}`;
   }
 
+  function waitForNativePaint() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+    });
+  }
+
+  async function waitForActiveThread(threadId, timeoutMs = 1_200) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const row = findThreadRow(threadId);
+      if (
+        row?.getAttribute("data-app-action-sidebar-thread-active") === "true"
+        || ["page", "true"].includes(row?.getAttribute("aria-current"))
+      ) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 40));
+    }
+    return false;
+  }
+
   async function openThread(threadId) {
     if (typeof threadId !== "string" || !threadId.trim()) return;
     const normalizedThreadId = normalizeThreadId(threadId);
+    if (!normalizedThreadId) return;
     lastNativeThreadId = normalizedThreadId;
-    const row = findThreadRow(normalizedThreadId);
     closeTaskboard(false);
+    await waitForNativePaint();
 
+    const row = findThreadRow(normalizedThreadId);
     if (row?.isConnected) {
+      row.scrollIntoView?.({ block: "nearest" });
       row.click?.();
-      return;
+      if (await waitForActiveThread(normalizedThreadId)) return;
     }
 
     try {
@@ -644,6 +683,19 @@
         path: routeForThread(normalizedThreadId),
       });
     } catch (_) {}
+  }
+
+  async function waitForActiveThread(threadId) {
+    const normalizedThreadId = normalizeThreadId(threadId);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      const activeThreadId = normalizeThreadId(
+        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
+      ) || normalizeThreadId(threadIdFromLocation());
+      if (activeThreadId === normalizedThreadId) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+    throw new Error("Codex 没有打开所选会话");
   }
 
   function projectRowById(projectId) {
@@ -719,6 +771,9 @@
       if (!bridge || typeof bridge.sendMessageFromView !== "function") {
         throw new Error("当前 Codex 版本没有提供原生对话导航能力");
       }
+      const previousThreadId = normalizeThreadId(
+        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
+      ) || normalizeThreadId(threadIdFromLocation()) || lastNativeThreadId;
 
       if (workspacePath) {
         await bridge.sendMessageFromView({
@@ -762,14 +817,55 @@
       pendingTaskThreadLink = {
         taskId,
         identifier,
-        previousThreadId: normalizeThreadId(activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"))
-          || lastNativeThreadId,
+        previousThreadId,
       };
       postToFrame({ type: "taskboard:thread-prepared", payload: { taskId } });
     } catch (error) {
       postToFrame({
         type: "taskboard:thread-create-error",
         payload: { taskId, error: error instanceof Error ? error.message : "无法创建 Codex 对话" },
+      });
+    } finally {
+      pendingThreadCreation = null;
+    }
+  }
+
+  async function followUpThreadForTask(payload) {
+    const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
+    const threadId = normalizeThreadId(payload?.threadId);
+    const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
+    const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
+    const skillName = typeof payload?.skillName === "string" ? payload.skillName.trim() : "";
+    const skillDisplayName = typeof payload?.skillDisplayName === "string"
+      ? payload.skillDisplayName.trim()
+      : "";
+    const skillPath = typeof payload?.skillPath === "string" ? payload.skillPath.trim() : "";
+    if (
+      !taskId
+      || !threadId
+      || !identifier
+      || !instruction
+      || !skillName
+      || !skillDisplayName
+      || !skillPath
+      || pendingThreadCreation
+    ) return;
+    pendingThreadCreation = taskId;
+    try {
+      await openThread(threadId);
+      await waitForActiveThread(threadId);
+      await requestHostTaskComposerPrefill({
+        instruction,
+        skillDisplayName,
+        skillName,
+        skillPath,
+      });
+      await waitForPreparedComposer(identifier, skillPath);
+      postToFrame({ type: "taskboard:thread-prepared", payload: { taskId } });
+    } catch (error) {
+      postToFrame({
+        type: "taskboard:thread-create-error",
+        payload: { taskId, error: error instanceof Error ? error.message : "无法继续 Codex 会话" },
       });
     } finally {
       pendingThreadCreation = null;
@@ -865,7 +961,11 @@
       void handleAutomationRequest(message.payload);
       return;
     }
-    if (message.type === "taskboard:create-thread") void createThreadForTask(message.payload);
+    if (message.type === "taskboard:create-thread") {
+      void createThreadForTask(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:follow-up-thread") void followUpThreadForTask(message.payload);
   }
 
   function updateDragRegion(payload) {

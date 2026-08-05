@@ -15,6 +15,7 @@ import {
   isTaskPriority,
   isTaskStatus,
 } from "../shared/domain.mjs";
+import { normalizeCodexThreadId } from "../shared/codex-thread-id.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
@@ -486,7 +487,12 @@ function parseProjectCreate(body) {
 
 function parseThreadId(value) {
   if (value === undefined) return undefined;
-  return stringField(value, "threadId", { required: true, maxLength: 256 });
+  const raw = stringField(value, "threadId", { required: true, maxLength: 256 });
+  const threadId = normalizeCodexThreadId(raw);
+  if (!threadId) {
+    throw new ApiError(400, "INVALID_FIELD", "'threadId' must be a finalized Codex UUID");
+  }
+  return threadId;
 }
 
 function requestHeader(request, name) {
@@ -574,7 +580,7 @@ function parseTaskCreate(body) {
     projectId,
     title: stringField(body.title, "title", { required: true, maxLength: 240 }),
     description: stringField(body.description ?? "", "description", { maxLength: 100_000 }),
-    status: parseStatus(body.status, "backlog"),
+    status: parseStatus(body.status, "todo"),
     priority: parsePriority(body.priority, "none"),
     labels: body.labels === undefined ? [] : parseLabels(body.labels),
     sortOrder: body.sortOrder === undefined ? undefined : parseSortOrder(body.sortOrder),
@@ -1808,8 +1814,8 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 200, { comment });
         }
         if (request.method === "DELETE") {
-          const { version } = parseArchive(await readJson(request));
-          const comment = database.deleteComment(id, version);
+          const { version, threadId } = parseArchive(await readJson(request));
+          const comment = database.deleteComment(id, version, threadId);
           for (const attachment of comment.attachments) {
             try {
               await unlink(path.join(resolved.attachmentsDirectory, attachment.id));

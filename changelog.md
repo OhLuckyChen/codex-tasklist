@@ -1,43 +1,59 @@
 # Changelog
 
-## 2026-08-05 — Codex 重启后自动恢复任务面板
+## 2026-08-06 — Codex Taskboard 持久启动与会话可靠性修复
 
-### 处理目标
+### 启动与恢复
 
-- 电脑重启并登录后，用户正常打开 Codex，任务面板入口能够自动出现。
-- Codex 关闭后再次打开，任务面板入口能够自动恢复。
-- 保留已有 SQLite 任务数据，不修改 Codex 客户端文件。
+- 新增 `Codex Taskboard` macOS Dock 启动器，在 Codex 启动前启用仅监听 `127.0.0.1:9229` 的 CDP。
+- 新增被动 `LaunchAgent` 监督程序：只观察 Codex/CDP 状态并注入任务面板，不再请求退出、重启或强制关闭 Codex。
+- Dock 入口在 Codex 已运行时兼作手动“恢复任务面板”入口。
+- 监督程序使用完整 CDP 实例签名识别 Codex 重启，即使端口不变也会重新注入。
+- 强制同一 CDP 端口只保留一个常驻注入器，避免重复宿主事件和重复输入。
+- `npm run build` 只刷新已打开的 iframe，不再创建第二个常驻注入器。
+- 保留官方 Codex 应用本体，不修改、不替换、不重新签名应用文件。
 
-### 已完成
+### 会话关联可靠性
 
-- 新增 macOS 常驻监督器 `scripts/codex-taskboard-supervisor.sh`。
-- 监督器在 Codex 未运行时保持等待，不会因为登录自启而主动打开 Codex。
-- 检测到普通方式启动、未启用 CDP 的 Codex 后，监督器会执行一次受控重启，并使用仅监听本机的 CDP 端口重新启动。
-- Codex 已使用 CDP 启动时，监督器会自动连接并注入任务面板入口。
-- Codex 关闭后，监督器返回等待状态；下一次打开时重新执行相同恢复链路。
-- 修复常驻注入器在 CDP 端口消失后仍无限等待的问题。现在 CDP 关闭时注入器会退出，由监督器接管下一轮启动。
-- 将 Codex 进程识别从不稳定的进程短名称匹配改为完整可执行路径匹配。
-- 安装并启用登录自启项 `com.lincya.codex-taskboard.supervisor`，配置为 `RunAtLoad` 和 `KeepAlive`。
-- 卸载旧的单次重启任务 `com.lincya.codex-taskboard.restart.once`。
-- 安装时保留当前正在使用的 Codex 会话；自动接管从下一次关闭并重新打开 Codex 开始生效。
+- 统一 Codex 会话 ID 为小写裸 UUID；兼容读取 `local:`、`cloud:` 和 `urn:uuid:` 前缀。
+- 拒绝 `client-new-thread:*` 等临时会话 ID，防止无法恢复的 ID 写入任务和评论。
+- 新会话建立关联时只接受当前激活会话产生的最终 UUID，不再回退并继承上一个会话，修复议题串会话。
+- 打开关联会话时等待 Codex 原生内容恢复，验证目标会话确实激活；首次点击未生效时走原生路由兜底，修复白板状态。
+- 新增 `scripts/repair-codex-thread-ids.mjs`，支持只读扫描和显式 `--apply` 修复旧数据。
+- 本地 SQLite 和云端 D1 增加 `task_threads` 历史关联；`threadId` 保持当前会话，`threadIds` 返回去重、有序的会话历史。
+- 评论会话进入议题历史，但不会覆盖议题当前会话。
 
-### 数据边界
+### 看板功能
 
-- 任务数据仍保存在 `.data/taskboard.sqlite`。
-- 登录自启配置位于 `~/Library/LaunchAgents/com.lincya.codex-taskboard.supervisor.plist`。
-- 未修改、替换或重新签名 Codex 应用。
-- CDP 仅监听 `127.0.0.1:9229`。
+- 议题详情展示“当前会话”和可展开的历史相关会话，并支持在已有会话中继续跟进。
+- 子议题区域支持直接打开完整议题编辑器创建子议题，保存后自动建立父子关系。
+- 项目首页支持收藏优先、拖拽排序、本地别名、归档与分类/收藏排序视图。
+- 默认新建议题状态统一为 `todo`。
+- 标签选择器、任务筛选、会话筛选和详情页交互同步适配当前数据模型。
 
-### 验证结果
+### 已修复的用户可见问题
 
-- LaunchAgent 配置通过 `plutil -lint`。
-- LaunchAgent 已加载，状态为 `running`，并确认包含 `runatload` 与 `keepalive`。
-- 旧的 `restart.once` 任务已不存在。
-- 监督器脚本通过 `zsh -n` 语法检查。
-- 注入器通过 `node --check` 语法检查。
-- 注入器相关定向测试共 13 项，全部通过。
-- 全量测试仍存在与本次启动链路无关的既有失败，包括 AI Chat 导出、附件和云代理相关断言；本次未修改这些模块。
+- Codex 关闭重开后任务面板入口消失。
+- 旧监督程序重复弹出“退出 ChatGPT?”对话框。
+- 两个注入器同时输入导致新会话出现 `$$`，随后 Skill 选择超时。
+- 临时会话 ID 造成“未找到对话”和 `invalid session id`。
+- 新议题错误继承旧议题会话。
+- 关闭任务面板后原生会话首次点击丢失，主区域显示白板。
 
-### 运行说明
+### 数据与安全边界
 
-首次安装不会中断正在进行的 Codex 会话。关闭当前 Codex 后，下一次从 Dock、访达或其他普通入口打开 Codex，监督器会自动完成一次 CDP 重启和任务面板注入。后续每次关闭、重新打开以及电脑重启后的首次打开均走同一链路。
+- 任务数据仍保存在 `.data/taskboard.sqlite`，数据库、备份、日志和截图不进入 Git。
+- 安装器会备份修改前的 Dock 配置。
+- 本次数据修复前已创建 SQLite 一致性备份，修复后 `PRAGMA integrity_check` 为 `ok`。
+- 已交叉审计现有任务、历史和评论的 9 组会话关联，修复后错误关联为 0。
+
+### 验证
+
+- `npm run typecheck` 通过。
+- `npm run build` 通过。
+- 启动、注入、会话 ID、本地/云端多会话、子议题和看板交互定向测试：87/87 通过。
+- 三个 shell 脚本通过 `zsh -n`。
+- LaunchAgent 和 App Bundle plist 均通过 `plutil -lint`。
+- `git diff --check` 通过。
+- 已通过真实 Codex 关闭/重开、任务面板重新注入和用户界面复验。
+- 尚未执行真实 macOS 整机重启验收；电脑重启后的最终验证仍待完成。
+- 全仓 `npm test` 仍存在 AI Chat、自动化、样式和工作流等既有宽泛断言失败，因此发布为 Draft PR；上述本次核心路径定向测试均已通过。

@@ -233,6 +233,13 @@ export class TaskboardDatabase {
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
         ON tasks(project_id, archived_at, status, sort_order, created_at);
 
+      CREATE TABLE IF NOT EXISTS task_threads (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL,
+        linked_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, thread_id)
+      );
+
       CREATE TABLE IF NOT EXISTS comments (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -449,10 +456,11 @@ export class TaskboardDatabase {
       WHERE author_id = 'local'
     `);
 
-    const hasTaskThreads = this.database.prepare(`
-      SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_threads'
-    `).get();
-    if (hasTaskThreads) {
+    const taskThreadColumns = this.database.prepare("PRAGMA table_info(task_threads)").all();
+    if (
+      taskThreadColumns.some((column) => column.name === "created_at")
+      && !taskThreadColumns.some((column) => column.name === "linked_at")
+    ) {
       this.database.exec(`
         UPDATE tasks
         SET thread_id = COALESCE(thread_id, (
@@ -460,20 +468,35 @@ export class TaskboardDatabase {
           FROM task_threads
           WHERE task_threads.task_id = tasks.id
           ORDER BY
-            CASE WHEN EXISTS (
-              SELECT 1
-              FROM comments
-              WHERE comments.task_id = tasks.id
-                AND comments.thread_id = task_threads.thread_id
+            CASE WHEN task_threads.thread_id IN (
+              SELECT comments.thread_id FROM comments
+              WHERE comments.task_id = task_threads.task_id
             ) THEN 1 ELSE 0 END,
             task_threads.created_at DESC,
             task_threads.thread_id DESC
           LIMIT 1
         ))
-        WHERE thread_id IS NULL
+        WHERE thread_id IS NULL;
+        ALTER TABLE task_threads RENAME TO legacy_task_threads;
+        CREATE TABLE task_threads (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          thread_id TEXT NOT NULL,
+          linked_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, thread_id)
+        );
+        INSERT INTO task_threads (task_id, thread_id, linked_at)
+        SELECT task_id, thread_id, created_at FROM legacy_task_threads;
+        DROP TABLE legacy_task_threads;
       `);
-      this.database.exec("DROP TABLE task_threads");
     }
+    this.database.exec(`
+      CREATE INDEX IF NOT EXISTS task_threads_task_linked
+        ON task_threads(task_id, linked_at DESC, thread_id);
+      INSERT OR IGNORE INTO task_threads (task_id, thread_id, linked_at)
+      SELECT id, thread_id, updated_at FROM tasks WHERE thread_id IS NOT NULL;
+      INSERT OR IGNORE INTO task_threads (task_id, thread_id, linked_at)
+      SELECT task_id, thread_id, updated_at FROM comments WHERE thread_id IS NOT NULL;
+    `);
 
     const attachmentColumns = this.database.prepare("PRAGMA table_info(attachments)").all();
     if (!attachmentColumns.some((column) => column.name === "comment_id")) {
@@ -1018,6 +1041,7 @@ export class TaskboardDatabase {
         timestamp,
         timestamp,
       );
+      this.#linkTaskThread(id, input.threadId, timestamp);
       this.database.exec("COMMIT");
       return this.getTask(id);
     } catch (error) {
@@ -1090,6 +1114,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1124,6 +1149,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1146,6 +1172,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1171,6 +1198,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1280,23 +1308,31 @@ export class TaskboardDatabase {
     const task = this.#requireTask(taskId);
     const id = randomUUID();
     const timestamp = now();
-    this.database.prepare(`
-      INSERT INTO comments (
-        id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
-        version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(
-      id,
-      task.id,
-      input.body,
-      input.threadId ?? null,
-      input.actor.type,
-      input.actor.id,
-      input.actor.name,
-      input.actor.avatarUrl,
-      timestamp,
-      timestamp,
-    );
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO comments (
+          id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
+          version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        task.id,
+        input.body,
+        input.threadId ?? null,
+        input.actor.type,
+        input.actor.id,
+        input.actor.name,
+        input.actor.avatarUrl,
+        timestamp,
+        timestamp,
+      );
+      this.#linkTaskThread(task.id, input.threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
     return this.getComment(id);
   }
 
@@ -1308,25 +1344,43 @@ export class TaskboardDatabase {
   updateComment(id, version, body, threadId) {
     const current = this.#requireComment(id);
     this.#requireCommentVersion(current, version);
-    const result = this.database.prepare(`
-      UPDATE comments
-      SET body = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
-      WHERE id = ? AND version = ?
-    `).run(body, threadId ?? null, now(), id, version);
-    if (result.changes !== 1) {
-      this.#throwMissingCommentOrConflict(id, version);
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        UPDATE comments
+        SET body = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(body, threadId ?? null, timestamp, id, version);
+      if (result.changes !== 1) {
+        this.#throwMissingCommentOrConflict(id, version);
+      }
+      this.#linkTaskThread(current.taskId, threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
     }
     return this.getComment(id);
   }
 
-  deleteComment(id, version) {
+  deleteComment(id, version, threadId) {
     const current = this.#requireComment(id);
     this.#requireCommentVersion(current, version);
-    const result = this.database.prepare(`
-      DELETE FROM comments WHERE id = ? AND version = ?
-    `).run(id, version);
-    if (result.changes !== 1) {
-      this.#throwMissingCommentOrConflict(id, version);
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        DELETE FROM comments WHERE id = ? AND version = ?
+      `).run(id, version);
+      if (result.changes !== 1) {
+        this.#throwMissingCommentOrConflict(id, version);
+      }
+      this.#linkTaskThread(current.taskId, threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
     }
     return current;
   }
@@ -1408,6 +1462,12 @@ export class TaskboardDatabase {
 
   #taskWithRelations(row) {
     const task = taskFromRow(row);
+    task.threadIds = this.database.prepare(`
+      SELECT thread_id
+      FROM task_threads
+      WHERE task_id = ?
+      ORDER BY CASE WHEN thread_id = ? THEN 0 ELSE 1 END, linked_at DESC, thread_id DESC
+    `).all(task.id, task.threadId).map((item) => item.thread_id);
     const parent = this.database.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1518,14 +1578,25 @@ export class TaskboardDatabase {
   }
 
   #touchTask(id, version, threadId) {
+    const timestamp = now();
     const result = this.database.prepare(`
       UPDATE tasks
       SET thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
       WHERE id = ? AND version = ?
-    `).run(threadId ?? null, now(), id, version);
+    `).run(threadId ?? null, timestamp, id, version);
     if (result.changes !== 1) {
       this.#throwMissingOrConflict(id, version);
     }
+    this.#linkTaskThread(id, threadId, timestamp);
+  }
+
+  #linkTaskThread(taskId, threadId, linkedAt) {
+    if (threadId === undefined || threadId === null) return;
+    this.database.prepare(`
+      INSERT INTO task_threads (task_id, thread_id, linked_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(task_id, thread_id) DO UPDATE SET linked_at = excluded.linked_at
+    `).run(taskId, threadId, linkedAt);
   }
 
   #requireTask(id) {

@@ -18,6 +18,7 @@ import {
   type AutomationModel,
   type AutomationReasoningEffort,
 } from "../../shared/taskboard-automation-options.mjs";
+import { normalizeCodexThreadId } from "../../shared/codex-thread-id.mjs";
 import {
   ApiError,
   addTaskRelation,
@@ -102,6 +103,7 @@ const WorkflowBoard = lazy(() => import("./components/WorkflowBoard").then((modu
 interface EditorState {
   task: Task | null;
   status: TaskStatus;
+  parentTaskId?: string;
 }
 
 interface ContextMenuState {
@@ -113,9 +115,12 @@ interface ContextMenuState {
 interface ProjectChoice {
   id: string;
   name: string;
+  sourceName: string;
   issueCount: number;
   inCodex: boolean;
   persisted: boolean;
+  createdAt: string;
+  sourceOrder: number;
 }
 
 interface UndoOperation {
@@ -195,6 +200,10 @@ const DEFAULT_USER_ACTOR: ActorIdentity = {
 
 const LAST_PROJECT_KEY = "taskboard.lastProjectId";
 const FAVORITE_PROJECTS_KEY = "taskboard.favoriteProjectIds";
+const PROJECT_ALIASES_KEY = "taskboard.projectAliases.v1";
+const PROJECT_ORDER_KEY = "taskboard.projectOrder.v1";
+const ARCHIVED_PROJECTS_KEY = "taskboard.archivedProjectIds.v1";
+const PROJECT_HOME_MODE_KEY = "taskboard.projectHomeMode.v1";
 const DEVICE_WORKSPACE_PATHS_KEY = "taskboard.deviceWorkspacePaths.v1";
 const SHOW_EMPTY_COLUMNS_KEY = "taskboard.showEmptyColumns.v1";
 const COLUMN_VISIBILITY_KEY = "taskboard.columnVisibility.v1";
@@ -242,6 +251,40 @@ function readFavoriteProjectIds(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+function readProjectAliases(): Record<string, string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(PROJECT_ALIASES_KEY) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => (
+      typeof entry[1] === "string" && entry[1].trim().length > 0
+    )));
+  } catch {
+    return {};
+  }
+}
+
+function readProjectOrder(): string[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(PROJECT_ORDER_KEY) ?? "[]");
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function readArchivedProjectIds(): Set<string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(ARCHIVED_PROJECTS_KEY) ?? "[]");
+    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function readProjectHomeMode(): "groups" | "priority" {
+  return window.localStorage.getItem(PROJECT_HOME_MODE_KEY) === "priority" ? "priority" : "groups";
 }
 
 function readDeviceWorkspacePaths(): Record<string, string> {
@@ -573,6 +616,14 @@ export function App() {
   const [openingThreadTaskId, setOpeningThreadTaskId] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
+  const [projectAliases, setProjectAliases] = useState(readProjectAliases);
+  const [projectOrder, setProjectOrder] = useState(readProjectOrder);
+  const [archivedProjectIds, setArchivedProjectIds] = useState(readArchivedProjectIds);
+  const [projectHomeMode, setProjectHomeMode] = useState(readProjectHomeMode);
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [deviceWorkspacePaths, setDeviceWorkspacePaths] = useState(readDeviceWorkspacePaths);
   const [projectAutomations, setProjectAutomations] = useState(readProjectAutomations);
   const [automationPending, setAutomationPending] = useState(false);
@@ -677,38 +728,76 @@ export function App() {
     const persistedById = new Map(projects.map((project) => [project.id, project]));
     const seen = new Set<string>();
     const choices: ProjectChoice[] = [];
-    for (const project of hostContext?.projects ?? []) {
+    for (const [sourceOrder, project] of (hostContext?.projects ?? []).entries()) {
       if (!project.id || !project.name || seen.has(project.id)) continue;
       seen.add(project.id);
+      const persisted = persistedById.get(project.id);
       choices.push({
         id: project.id,
-        name: persistedById.get(project.id)?.name ?? project.name,
-        issueCount: persistedById.get(project.id)?.issueCount ?? 0,
+        name: projectAliases[project.id] ?? persisted?.name ?? project.name,
+        sourceName: persisted?.name ?? project.name,
+        issueCount: persisted?.issueCount ?? 0,
         inCodex: true,
-        persisted: persistedById.has(project.id),
+        persisted: Boolean(persisted),
+        createdAt: persisted?.createdAt ?? "",
+        sourceOrder,
       });
     }
-    for (const project of projects) {
+    for (const [index, project] of projects.entries()) {
       if (seen.has(project.id)) continue;
       choices.push({
         id: project.id,
-        name: project.name,
+        name: projectAliases[project.id] ?? project.name,
+        sourceName: project.name,
         issueCount: project.issueCount,
         inCodex: false,
         persisted: true,
+        createdAt: project.createdAt,
+        sourceOrder: (hostContext?.projects?.length ?? 0) + index,
       });
     }
-    return choices.sort((left, right) => (
-      Number(favoriteProjectIds.has(right.id)) - Number(favoriteProjectIds.has(left.id))
-    ));
-  }, [favoriteProjectIds, hostContext?.projects, projects]);
+    return choices;
+  }, [hostContext?.projects, projectAliases, projects]);
+  const orderedProjectChoices = useMemo(() => {
+    const manualIndex = new Map(projectOrder.map((projectId, index) => [projectId, index]));
+    return [...projectChoices].sort((left, right) => {
+      const favoriteDifference = Number(favoriteProjectIds.has(right.id))
+        - Number(favoriteProjectIds.has(left.id));
+      if (favoriteDifference !== 0) return favoriteDifference;
+      const leftManualIndex = manualIndex.get(left.id);
+      const rightManualIndex = manualIndex.get(right.id);
+      if (leftManualIndex !== undefined || rightManualIndex !== undefined) {
+        if (leftManualIndex === undefined) return 1;
+        if (rightManualIndex === undefined) return -1;
+        if (leftManualIndex !== rightManualIndex) return leftManualIndex - rightManualIndex;
+      }
+      if (left.createdAt !== right.createdAt) return right.createdAt.localeCompare(left.createdAt);
+      return right.sourceOrder - left.sourceOrder;
+    });
+  }, [favoriteProjectIds, projectChoices, projectOrder]);
+  const activeProjectChoices = useMemo(
+    () => orderedProjectChoices.filter((project) => !archivedProjectIds.has(project.id)),
+    [archivedProjectIds, orderedProjectChoices],
+  );
+  const archivedProjectChoices = useMemo(
+    () => orderedProjectChoices.filter((project) => archivedProjectIds.has(project.id)),
+    [archivedProjectIds, orderedProjectChoices],
+  );
   const projectsWithIssues = useMemo(
-    () => projectChoices.filter((project) => project.issueCount > 0),
-    [projectChoices],
+    () => activeProjectChoices.filter((project) => project.issueCount > 0),
+    [activeProjectChoices],
   );
   const projectsWithoutIssues = useMemo(
-    () => projectChoices.filter((project) => project.issueCount === 0),
-    [projectChoices],
+    () => activeProjectChoices.filter((project) => project.issueCount === 0),
+    [activeProjectChoices],
+  );
+  const favoriteProjectChoices = useMemo(
+    () => activeProjectChoices.filter((project) => favoriteProjectIds.has(project.id)),
+    [activeProjectChoices, favoriteProjectIds],
+  );
+  const otherProjectChoices = useMemo(
+    () => activeProjectChoices.filter((project) => !favoriteProjectIds.has(project.id)),
+    [activeProjectChoices, favoriteProjectIds],
   );
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
@@ -1035,9 +1124,11 @@ export function App() {
       if (message.type === "taskboard:thread-created" && message.payload) {
         const payload = message.payload as { taskId?: unknown; threadId?: unknown };
         if (typeof payload.taskId !== "string" || typeof payload.threadId !== "string") return;
+        const threadId = normalizeCodexThreadId(payload.threadId);
+        if (!threadId) return;
         const task = tasksRef.current.find((candidate) => candidate.id === payload.taskId);
-        if (!task || task.threadId === payload.threadId) return;
-        void linkTaskThreadRequest(task, payload.threadId)
+        if (!task || task.threadId === threadId) return;
+        void linkTaskThreadRequest(task, threadId)
           .then((updated) => {
             setTasks((current) => sortTasks(current.map((candidate) => (
               candidate.id === updated.id ? updated : candidate
@@ -1050,7 +1141,7 @@ export function App() {
                 if (selectedProjectIdRef.current === task.projectId) {
                   setTasks(sortTasks(latestTasks));
                 }
-                if (latestTasks.find((candidate) => candidate.id === task.id)?.threadId === payload.threadId) {
+                if (latestTasks.find((candidate) => candidate.id === task.id)?.threadId === threadId) {
                   return;
                 }
               } catch {}
@@ -1355,7 +1446,7 @@ export function App() {
         && boardView === "issues"
       ) {
         event.preventDefault();
-        setEditor({ task: null, status: "backlog" });
+        setEditor({ task: null, status: "todo" });
       }
       if (event.key === "/" && !detailTaskId && selectedProjectId && boardView === "issues") {
         event.preventDefault();
@@ -1470,8 +1561,14 @@ export function App() {
           saved = await updateTaskRequest(saved, { ...draft, description });
         }
       }
+      const relationResult = creating && editor.parentTaskId
+        ? await addTaskRelation(saved, "parent", editor.parentTaskId)
+        : null;
+      if (relationResult) saved = relationResult.task;
       setTasks((current) => sortTasks([
-        ...current.filter((task) => task.id !== saved.id),
+        ...current
+          .filter((task) => task.id !== saved.id)
+          .map((task) => task.id === relationResult?.relatedTask.id ? relationResult.relatedTask : task),
         saved,
       ]));
       setEditor(null);
@@ -1727,12 +1824,20 @@ export function App() {
   }
 
   function openThread(threadId: string) {
+    const normalizedThreadId = normalizeCodexThreadId(threadId);
+    if (!normalizedThreadId) {
+      setActionError("该任务关联的是旧版临时会话 ID，尚未形成可打开的 Codex 会话。");
+      return;
+    }
     if (embedded && window.parent !== window) {
-      window.parent.postMessage({ type: "taskboard:open-thread", payload: { threadId } }, "*");
+      window.parent.postMessage({
+        type: "taskboard:open-thread",
+        payload: { threadId: normalizedThreadId },
+      }, "*");
       return;
     }
 
-    window.location.assign(`codex://threads/${encodeURIComponent(threadId.trim())}`);
+    window.location.assign(`codex://threads/${encodeURIComponent(normalizedThreadId)}`);
   }
 
   function expandCodexSidebar() {
@@ -1740,7 +1845,15 @@ export function App() {
     window.parent.postMessage({ type: "taskboard:expand-sidebar" }, "*");
   }
 
-  function openTaskInThread(task: Task) {
+  function taskThreadInstruction(task: Task, followUp?: string) {
+    const instruction = `e-taskboard Addressing the issues mentioned in ${task.identifier}`;
+    const normalizedFollowUp = followUp?.trim();
+    return normalizedFollowUp
+      ? `${instruction}\n\n请重点跟进这条评论：\n${normalizedFollowUp}`
+      : instruction;
+  }
+
+  function openTaskInThread(task: Task, followUp?: string) {
     if (!manageTaskboardSkillPath) {
       setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
       return;
@@ -1752,7 +1865,7 @@ export function App() {
       ?? selectedDeviceWorkspacePath
       ?? developmentScan.workspacePath
       ?? hostContext?.workspacePath;
-    const instruction = `e-taskboard Addressing the issues mentioned in ${task.identifier}`;
+    const instruction = taskThreadInstruction(task, followUp);
     const prompt = `[$manage-taskboard](${manageTaskboardSkillPath}) ${instruction}`;
 
     if (!embedded || window.parent === window) {
@@ -1779,6 +1892,37 @@ export function App() {
         projectName: selectedProject?.name,
         workspacePath,
         workspaceLabel: worktreePath ? workspaceName(worktreePath) : undefined,
+      },
+    }, "*");
+  }
+
+  function followUpTaskInThread(task: Task, threadId: string, followUp: string) {
+    const normalizedThreadId = normalizeCodexThreadId(threadId);
+    if (!normalizedThreadId) {
+      setActionError("该议题关联的是旧版临时会话 ID，无法继续跟进。");
+      return;
+    }
+    if (!manageTaskboardSkillPath) {
+      setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
+      return;
+    }
+    if (!embedded || window.parent === window) {
+      openThread(normalizedThreadId);
+      return;
+    }
+    if (openingThreadTaskId) return;
+    setOpeningThreadTaskId(task.id);
+    setActionError(null);
+    window.parent.postMessage({
+      type: "taskboard:follow-up-thread",
+      payload: {
+        taskId: task.id,
+        threadId: normalizedThreadId,
+        identifier: task.identifier,
+        instruction: taskThreadInstruction(task, followUp),
+        skillName: "manage-taskboard",
+        skillDisplayName: "Manage Taskboard",
+        skillPath: manageTaskboardSkillPath,
       },
     }, "*");
   }
@@ -1815,17 +1959,71 @@ export function App() {
     void loadProjectList();
   }
 
-  function toggleFavoriteProject() {
-    if (!selectedProjectId) return;
-    const shouldFavorite = !favoriteProjectIds.has(selectedProjectId);
+  function toggleFavoriteProjectById(projectId: string, projectName: string) {
+    const shouldFavorite = !favoriteProjectIds.has(projectId);
     setFavoriteProjectIds((current) => {
       const next = new Set(current);
-      if (shouldFavorite) next.add(selectedProjectId);
-      else next.delete(selectedProjectId);
+      if (shouldFavorite) next.add(projectId);
+      else next.delete(projectId);
       window.localStorage.setItem(FAVORITE_PROJECTS_KEY, JSON.stringify([...next]));
       return next;
     });
-    setAnnouncement(`${selectedProject?.name ?? "项目"}${shouldFavorite ? "已收藏。" : "已取消收藏。"}`);
+    setAnnouncement(`${projectName}${shouldFavorite ? "已收藏。" : "已取消收藏。"}`);
+  }
+
+  function toggleFavoriteProject() {
+    if (!selectedProjectId) return;
+    toggleFavoriteProjectById(
+      selectedProjectId,
+      projectAliases[selectedProjectId] ?? selectedProject?.name ?? "项目",
+    );
+  }
+
+  function saveProjectName(project: ProjectChoice) {
+    const nextName = projectNameDraft.trim();
+    setRenamingProjectId(null);
+    if (!nextName || nextName === project.name) return;
+    setProjectAliases((current) => {
+      const next = { ...current };
+      if (nextName === project.sourceName) delete next[project.id];
+      else next[project.id] = nextName;
+      window.localStorage.setItem(PROJECT_ALIASES_KEY, JSON.stringify(next));
+      return next;
+    });
+    setAnnouncement(`${project.name} 已重命名为 ${nextName}，项目目录未改变。`);
+  }
+
+  function setProjectArchived(project: ProjectChoice, archived: boolean) {
+    setArchivedProjectIds((current) => {
+      const next = new Set(current);
+      if (archived) next.add(project.id);
+      else next.delete(project.id);
+      window.localStorage.setItem(ARCHIVED_PROJECTS_KEY, JSON.stringify([...next]));
+      return next;
+    });
+    setAnnouncement(`${project.name}${archived ? "已归档。" : "已恢复。"}`);
+  }
+
+  function reorderProject(draggedId: string, targetId: string) {
+    if (draggedId === targetId) return;
+    const dragged = activeProjectChoices.find((project) => project.id === draggedId);
+    const target = activeProjectChoices.find((project) => project.id === targetId);
+    if (!dragged || !target || favoriteProjectIds.has(draggedId) !== favoriteProjectIds.has(targetId)) return;
+    const favorite = favoriteProjectIds.has(draggedId);
+    const groupIds = activeProjectChoices
+      .filter((project) => favoriteProjectIds.has(project.id) === favorite)
+      .map((project) => project.id);
+    const fromIndex = groupIds.indexOf(draggedId);
+    const targetIndex = groupIds.indexOf(targetId);
+    groupIds.splice(fromIndex, 1);
+    groupIds.splice(targetIndex, 0, draggedId);
+    setProjectOrder((current) => {
+      const groupSet = new Set(groupIds);
+      const next = [...current.filter((projectId) => !groupSet.has(projectId)), ...groupIds];
+      window.localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next));
+      return next;
+    });
+    setAnnouncement(`${dragged.name} 的顺序已调整。`);
   }
 
   async function selectProject(choice: ProjectChoice) {
@@ -1838,7 +2036,7 @@ export function App() {
         try {
           project = await createProjectRequest({
             id: choice.id,
-            name: choice.name,
+            name: choice.sourceName,
             workspacePath: null,
           });
           setProjects((current) => [...current, project!]);
@@ -1858,8 +2056,134 @@ export function App() {
     }
   }
 
+  function renderProjectCard(project: ProjectChoice, options: { archived?: boolean; draggable?: boolean } = {}) {
+    const archived = options.archived === true;
+    const draggable = options.draggable === true && renamingProjectId !== project.id;
+    const editing = renamingProjectId === project.id;
+    const cardContent = (
+      <>
+        <span className="project-card-avatar" aria-hidden="true">
+          {project.name.slice(0, 1).toUpperCase()}
+        </span>
+        <span className="project-card-copy">
+          {editing ? (
+            <input
+              className="project-card-name-input"
+              type="text"
+              value={projectNameDraft}
+              maxLength={200}
+              autoFocus
+              aria-label={`重命名 ${project.name}`}
+              onChange={(event) => setProjectNameDraft(event.currentTarget.value)}
+              onBlur={() => saveProjectName(project)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+                if (event.key === "Escape") {
+                  setRenamingProjectId(null);
+                  setProjectNameDraft("");
+                }
+              }}
+            />
+          ) : <strong>{project.name}</strong>}
+          <span>
+            {project.inCodex ? "Codex 项目" : "已保存的项目"}
+            {project.issueCount > 0 ? ` · ${project.issueCount} 个议题` : ""}
+          </span>
+        </span>
+        {favoriteProjectIds.has(project.id) && (
+          <span className="project-card-favorite" aria-label="已收藏"><LinearIcon name="favorite" /></span>
+        )}
+        {!editing && !archived && (
+          <span className="project-card-action" aria-hidden="true">
+            {openingProjectId === project.id ? "正在打开…" : <LinearIcon name="chevronRight" />}
+          </span>
+        )}
+      </>
+    );
+
+    return (
+      <div
+        className={`project-card${draggedProjectId === project.id ? " dragging" : ""}`}
+        key={project.id}
+        draggable={draggable}
+        onDragStart={(event) => {
+          if (!draggable) return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", project.id);
+          setDraggedProjectId(project.id);
+        }}
+        onDragEnd={() => setDraggedProjectId(null)}
+        onDragOver={(event) => {
+          if (
+            !draggedProjectId
+            || favoriteProjectIds.has(draggedProjectId) !== favoriteProjectIds.has(project.id)
+          ) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          const sourceId = draggedProjectId ?? event.dataTransfer.getData("text/plain");
+          if (sourceId) reorderProject(sourceId, project.id);
+          setDraggedProjectId(null);
+        }}
+      >
+        <div className="project-card-main">
+          {archived || editing ? (
+            <div className="project-card-open">{cardContent}</div>
+          ) : (
+            <button
+              className="project-card-open"
+              type="button"
+              disabled={openingProjectId !== null}
+              onClick={() => void selectProject(project)}
+            >
+              {cardContent}
+            </button>
+          )}
+          <div className="project-card-controls" aria-label={`${project.name} 项目操作`}>
+            {archived ? (
+              <button type="button" onClick={() => setProjectArchived(project, false)}>恢复</button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenamingProjectId(project.id);
+                    setProjectNameDraft(project.name);
+                  }}
+                >重命名</button>
+                <button
+                  type="button"
+                  onClick={() => toggleFavoriteProjectById(project.id, project.name)}
+                >{favoriteProjectIds.has(project.id) ? "取消收藏" : "收藏"}</button>
+                <button type="button" onClick={() => setProjectArchived(project, true)}>归档</button>
+              </>
+            )}
+          </div>
+        </div>
+        {!archived && (
+          <label className="project-card-directory">
+            <LinearIcon name="folder" />
+            <input
+              key={deviceWorkspacePaths[project.id] ?? ""}
+              type="text"
+              defaultValue={deviceWorkspacePaths[project.id] ?? ""}
+              placeholder="设置此设备的项目目录"
+              aria-label={`${project.name} 在此设备上的项目目录`}
+              onBlur={(event) => rememberDeviceWorkspacePath(project.id, event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+            />
+          </label>
+        )}
+      </div>
+    );
+  }
+
   const contextName = workspaceName(hostContext?.workspacePath);
-  const headerProjectName = selectedProject?.name ?? "任务面板";
+  const headerProjectName = projectAliases[selectedProjectId] ?? selectedProject?.name ?? "任务面板";
   const appShellStyle = embedded
     ? { "--codex-titlebar-left-inset": `${hostContext?.titlebarLeftInset ?? 0}px` } as CSSProperties
     : undefined;
@@ -1935,17 +2259,6 @@ export function App() {
           <header className="workspace-header">
           <div className="workspace-title">
             <div className="workspace-kicker">
-              {detailTask && (
-                <button
-                  className="detail-back-button"
-                  type="button"
-                  aria-label="返回议题看板"
-                  title="返回议题看板 (Esc)"
-                  onClick={closeTaskDetail}
-                >
-                  <LinearIcon name="chevronLeft" />
-                </button>
-              )}
               {embedded && hostContext?.sidebarCollapsed && (
                 <button
                   className="detail-back-button codex-sidebar-expand-button"
@@ -1989,7 +2302,7 @@ export function App() {
                   {projectMenuOpen && (
                     <div className="header-project-menu" role="menu" aria-label="项目">
                       <span>切换项目</span>
-                      {projectChoices.map((project) => (
+                      {activeProjectChoices.map((project) => (
                         <button
                           type="button"
                           role="menuitemradio"
@@ -2017,6 +2330,18 @@ export function App() {
                   </span>
                   <span className="project-name">{headerProjectName}</span>
                 </>
+              )}
+              {detailTask && (
+                <button
+                  className="header-board-return"
+                  type="button"
+                  aria-label="返回议题看板"
+                  title="返回议题看板 (Esc)"
+                  onClick={closeTaskDetail}
+                >
+                  <LinearIcon name="chevronLeft" />
+                  <span>返回看板</span>
+                </button>
               )}
               {!selectedProjectId && (
                 <>
@@ -2057,7 +2382,7 @@ export function App() {
               <button
                 className="icon-button header-create-button"
                 type="button"
-                onClick={() => setEditor({ task: null, status: "backlog" })}
+                onClick={() => setEditor({ task: null, status: "todo" })}
                 aria-label="新建议题"
                 title="新建议题 (C)"
               >
@@ -2150,7 +2475,29 @@ export function App() {
           <section className="project-home">
             <div className="project-home-heading">
               <span>任务面板</span>
-              <h1>选择项目</h1>
+              <div className="project-home-heading-row">
+                <h1>选择项目</h1>
+                <div className="project-home-mode-switch" role="group" aria-label="项目展示模式">
+                  <button
+                    className={projectHomeMode === "groups" ? "active" : ""}
+                    type="button"
+                    aria-pressed={projectHomeMode === "groups"}
+                    onClick={() => {
+                      setProjectHomeMode("groups");
+                      window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "groups");
+                    }}
+                  >分类</button>
+                  <button
+                    className={projectHomeMode === "priority" ? "active" : ""}
+                    type="button"
+                    aria-pressed={projectHomeMode === "priority"}
+                    onClick={() => {
+                      setProjectHomeMode("priority");
+                      window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "priority");
+                    }}
+                  >收藏排序</button>
+                </div>
+              </div>
               <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
             </div>
             {projectsLoading ? (
@@ -2159,62 +2506,51 @@ export function App() {
               </div>
             ) : projectChoices.length > 0 ? (
               <div className="project-home-groups">
-                {[
+                {(projectHomeMode === "groups" ? [
                   { id: "with-issues", title: "已有议题", projects: projectsWithIssues },
                   { id: "without-issues", title: "尚未添加议题", projects: projectsWithoutIssues },
-                ].map((group) => (
+                ] : [
+                  { id: "favorites", title: "收藏项目", projects: favoriteProjectChoices },
+                  { id: "others", title: "其他项目", projects: otherProjectChoices },
+                ]).map((group) => (
                   <section className="project-home-group" key={group.id} aria-labelledby={`project-group-${group.id}`}>
                     <div className="project-group-heading">
                       <h2 id={`project-group-${group.id}`}>{group.title}</h2>
                       <span>{group.projects.length}</span>
+                      {projectHomeMode === "priority" && group.projects.length > 1 && (
+                        <small>拖动卡片调整顺序</small>
+                      )}
                     </div>
                     {group.projects.length > 0 ? (
                       <div className="project-grid">
-                        {group.projects.map((project) => (
-                          <div className="project-card" key={project.id}>
-                            <button
-                              className="project-card-open"
-                              type="button"
-                              disabled={openingProjectId !== null}
-                              onClick={() => void selectProject(project)}
-                            >
-                              <span className="project-card-avatar" aria-hidden="true">
-                                {project.name.slice(0, 1).toUpperCase()}
-                              </span>
-                              <span className="project-card-copy">
-                                <strong>{project.name}</strong>
-                                <span>
-                                  {project.inCodex ? "Codex 项目" : "已保存的项目"}
-                                  {project.issueCount > 0 ? ` · ${project.issueCount} 个议题` : ""}
-                                </span>
-                              </span>
-                              {favoriteProjectIds.has(project.id) && <span className="project-card-favorite" aria-label="已收藏"><LinearIcon name="favorite" /></span>}
-                              <span className="project-card-action" aria-hidden="true">
-                                {openingProjectId === project.id ? "正在打开…" : <LinearIcon name="chevronRight" />}
-                              </span>
-                            </button>
-                            <label className="project-card-directory">
-                              <LinearIcon name="folder" />
-                              <input
-                                key={deviceWorkspacePaths[project.id] ?? ""}
-                                type="text"
-                                defaultValue={deviceWorkspacePaths[project.id] ?? ""}
-                                placeholder="设置此设备的项目目录"
-                                aria-label={`${project.name} 在此设备上的项目目录`}
-                                onBlur={(event) => rememberDeviceWorkspacePath(project.id, event.currentTarget.value)}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") event.currentTarget.blur();
-                                }}
-                              />
-                            </label>
-                          </div>
-                        ))}
+                        {group.projects.map((project) => renderProjectCard(project, {
+                          draggable: projectHomeMode === "priority",
+                        }))}
                       </div>
                     ) : (
                       <p className="project-group-empty">暂无项目</p>
                     )}
                   </section>
                 ))}
+                {archivedProjectChoices.length > 0 && (
+                  <section className="project-home-group archived-project-group" aria-labelledby="project-group-archived">
+                    <button
+                      className="project-group-heading archived-project-toggle"
+                      type="button"
+                      aria-expanded={showArchivedProjects}
+                      onClick={() => setShowArchivedProjects((current) => !current)}
+                    >
+                      <h2 id="project-group-archived">已归档项目</h2>
+                      <span>{archivedProjectChoices.length}</span>
+                      <LinearIcon name={showArchivedProjects ? "chevronDown" : "chevronRight"} />
+                    </button>
+                    {showArchivedProjects && (
+                      <div className="project-grid">
+                        {archivedProjectChoices.map((project) => renderProjectCard(project, { archived: true }))}
+                      </div>
+                    )}
+                  </section>
+                )}
               </div>
             ) : (
               <div className="project-home-empty">
@@ -2238,6 +2574,11 @@ export function App() {
             attachmentsRevision={attachmentsRevision}
             onUpdate={(current, changes) => updateTaskProperties(current, changes)}
             onOpenTask={openTaskDetail}
+            onCreateSubIssue={(parent) => setEditor({
+              task: null,
+              status: "todo",
+              parentTaskId: parent.id,
+            })}
             onAddRelation={(current, type, relatedTaskId) => (
               mutateTaskRelation("add", current, type, relatedTaskId)
             )}
@@ -2249,6 +2590,7 @@ export function App() {
             codexThreads={projectCodexThreads}
             onLinkThread={linkTaskToThread}
             onOpenInThread={openTaskInThread}
+            onFollowUpInThread={followUpTaskInThread}
             openingThread={openingThreadTaskId === detailTask.id}
             onError={setActionError}
             onAnnounce={setAnnouncement}
@@ -2344,7 +2686,7 @@ export function App() {
 
       {editor && (
         <TaskEditor
-          key={editor.task?.id ?? `new-${editor.status}`}
+          key={editor.task?.id ?? `new-${editor.status}-${editor.parentTaskId ?? "root"}`}
           task={editor.task}
           initialStatus={editor.status}
           labels={availableLabels}

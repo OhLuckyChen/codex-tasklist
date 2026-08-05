@@ -626,7 +626,13 @@ async function hydrateComment(env, row) {
 
 async function hydrateTask(env, row) {
   const task = taskFromRow(row);
-  const [parent, subIssues, blockedBy, blocks, related] = await Promise.all([
+  const [threadRows, parent, subIssues, blockedBy, blocks, related] = await Promise.all([
+    all(env.DB.prepare(`
+      SELECT thread_id
+      FROM task_threads
+      WHERE task_id = ?
+      ORDER BY CASE WHEN thread_id = ? THEN 0 ELSE 1 END, linked_at DESC, thread_id DESC
+    `).bind(task.id, task.threadId)),
     env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -673,6 +679,7 @@ async function hydrateTask(env, row) {
       ORDER BY tasks.sort_order, tasks.created_at, tasks.id
     `).bind(task.id, task.id, task.id)),
   ]);
+  task.threadIds = threadRows.map((item) => item.thread_id);
   task.relations = {
     parent: parent ? taskRelationSummaryFromRow(parent) : null,
     subIssues: subIssues.map(taskRelationSummaryFromRow),
@@ -681,6 +688,43 @@ async function hydrateTask(env, row) {
     related: related.map(taskRelationSummaryFromRow),
   };
   return task;
+}
+
+function linkTaskThreadStatement(env, taskId, threadId, linkedAt, taskVersion) {
+  if (threadId === undefined || threadId === null) return null;
+  if (taskVersion === undefined) {
+    return env.DB.prepare(`
+      INSERT INTO task_threads (task_id, thread_id, linked_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(task_id, thread_id) DO UPDATE SET linked_at = excluded.linked_at
+    `).bind(taskId, threadId, linkedAt);
+  }
+  return env.DB.prepare(`
+    INSERT INTO task_threads (task_id, thread_id, linked_at)
+    SELECT ?, ?, ?
+    WHERE EXISTS (
+      SELECT 1 FROM tasks
+      WHERE id = ? AND version = ? AND updated_at = ? AND thread_id = ?
+    )
+    ON CONFLICT(task_id, thread_id) DO UPDATE SET linked_at = excluded.linked_at
+  `).bind(taskId, threadId, linkedAt, taskId, taskVersion, linkedAt, threadId);
+}
+
+function linkTaskThreadForCommentStatement(
+  env,
+  taskId,
+  threadId,
+  linkedAt,
+  commentId,
+  commentVersion,
+) {
+  if (threadId === undefined || threadId === null) return null;
+  return env.DB.prepare(`
+    INSERT INTO task_threads (task_id, thread_id, linked_at)
+    SELECT ?, ?, ?
+    WHERE EXISTS (SELECT 1 FROM comments WHERE id = ? AND version = ?)
+    ON CONFLICT(task_id, thread_id) DO UPDATE SET linked_at = excluded.linked_at
+  `).bind(taskId, threadId, linkedAt, commentId, commentVersion);
 }
 
 async function getTask(env, id) {
@@ -726,7 +770,7 @@ function parseTaskCreate(body) {
     projectId: validateProjectId(body.projectId ?? "local"),
     title: stringField(body.title, "title", { required: true, maxLength: 240 }),
     description: stringField(body.description ?? "", "description", { maxLength: 100_000 }),
-    status: parseStatus(body.status, "backlog"),
+    status: parseStatus(body.status, "todo"),
     priority: parsePriority(body.priority, "none"),
     labels: body.labels === undefined ? [] : parseLabels(body.labels),
     sortOrder: body.sortOrder === undefined ? undefined : parseSortOrder(body.sortOrder),
@@ -776,13 +820,14 @@ function parseTaskPatch(body) {
   if (body.dueDate !== undefined) changes.dueDate = parseDueDate(body.dueDate);
   if (body.recurrence !== undefined) changes.recurrence = parseRecurrence(body.recurrence);
   const assigneeTarget = parseAssigneeTarget(body.assigneeTarget);
-  if (Object.keys(changes).length === 0 && assigneeTarget === undefined) {
+  const threadId = parseThreadId(body.threadId);
+  if (Object.keys(changes).length === 0 && assigneeTarget === undefined && threadId === undefined) {
     throw new ApiError(400, "INVALID_BODY", "PATCH requires at least one task field");
   }
   return {
     version: parseVersion(body.version),
     changes,
-    threadId: parseThreadId(body.threadId),
+    threadId,
     assigneeTarget,
   };
 }
@@ -1090,7 +1135,7 @@ async function createTask(env, input, actor) {
   const id = uuid();
   const timestamp = now();
   const assignee = resolveAssignee(input.assigneeTarget, actor);
-  const results = await env.DB.batch([
+  const statements = [
     env.DB.prepare(`
       INSERT INTO tasks (
         id, identifier, project_id, title, description, status, priority, labels,
@@ -1142,7 +1187,10 @@ async function createTask(env, input, actor) {
       SET next_task_number = next_task_number + 1, updated_at = ?
       WHERE id = ?
     `).bind(timestamp, input.projectId),
-  ]);
+  ];
+  const threadStatement = linkTaskThreadStatement(env, id, input.threadId, timestamp);
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
   if (!changed(results[0]) || !changed(results[1])) {
     throw new ApiError(
       404,
@@ -1205,13 +1253,23 @@ async function updateTask(env, id, input, actor) {
     values.push(input.threadId);
   }
   assignments.push("version = version + 1", "updated_at = ?");
-  values.push(now(), current.id, input.version);
-  const result = await env.DB.prepare(`
+  const timestamp = now();
+  values.push(timestamp, current.id, input.version);
+  const statements = [env.DB.prepare(`
     UPDATE tasks
     SET ${assignments.join(", ")}
     WHERE id = ? AND version = ?
-  `).bind(...values).run();
-  if (!changed(result)) {
+  `).bind(...values)];
+  const threadStatement = linkTaskThreadStatement(
+    env,
+    current.id,
+    input.threadId,
+    timestamp,
+    input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
     const latest = await requireTaskRow(env, current.id);
     throw new ApiError(
       409,
@@ -1238,7 +1296,8 @@ async function moveTask(env, id, input) {
     `).bind(current.project_id, input.status, current.id).first();
     sortOrder = row.maximum + 1000;
   }
-  const result = await env.DB.prepare(`
+  const timestamp = now();
+  const statements = [env.DB.prepare(`
     UPDATE tasks
     SET
       status = ?,
@@ -1251,11 +1310,16 @@ async function moveTask(env, id, input) {
     input.status,
     sortOrder,
     input.threadId ?? null,
-    now(),
+    timestamp,
     current.id,
     input.version,
-  ).run();
-  if (!changed(result)) {
+  )];
+  const threadStatement = linkTaskThreadStatement(
+    env, current.id, input.threadId, timestamp, input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
     const latest = await requireTaskRow(env, current.id);
     throw new ApiError(
       409,
@@ -1271,7 +1335,7 @@ async function archiveTask(env, id, input) {
   const current = await requireTaskRow(env, id);
   assertTaskVersion(current, input.version);
   const timestamp = now();
-  const result = await env.DB.prepare(`
+  const statements = [env.DB.prepare(`
     UPDATE tasks
     SET
       archived_at = ?,
@@ -1279,8 +1343,13 @@ async function archiveTask(env, id, input) {
       version = version + 1,
       updated_at = ?
     WHERE id = ? AND version = ?
-  `).bind(timestamp, input.threadId ?? null, timestamp, current.id, input.version).run();
-  if (!changed(result)) {
+  `).bind(timestamp, input.threadId ?? null, timestamp, current.id, input.version)];
+  const threadStatement = linkTaskThreadStatement(
+    env, current.id, input.threadId, timestamp, input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
     const latest = await requireTaskRow(env, current.id);
     throw new ApiError(
       409,
@@ -1298,7 +1367,8 @@ async function restoreTask(env, id, input) {
   if (current.archived_at === null) {
     throw new ApiError(409, "TASK_NOT_ARCHIVED", "Only archived tasks can be restored");
   }
-  const result = await env.DB.prepare(`
+  const timestamp = now();
+  const statements = [env.DB.prepare(`
     UPDATE tasks
     SET
       archived_at = NULL,
@@ -1306,8 +1376,13 @@ async function restoreTask(env, id, input) {
       version = version + 1,
       updated_at = ?
     WHERE id = ? AND version = ?
-  `).bind(input.threadId ?? null, now(), current.id, input.version).run();
-  if (!changed(result)) {
+  `).bind(input.threadId ?? null, timestamp, current.id, input.version)];
+  const threadStatement = linkTaskThreadStatement(
+    env, current.id, input.threadId, timestamp, input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
     const latest = await requireTaskRow(env, current.id);
     throw new ApiError(
       409,
@@ -1429,6 +1504,7 @@ async function addRelation(env, taskId, type, relatedTaskId, input) {
       throw new ApiError(409, "RELATION_EXISTS", "This issue relation already exists");
     }
   }
+  const timestamp = now();
   statements.push(
     env.DB.prepare(`
       INSERT INTO task_relations (
@@ -1442,7 +1518,7 @@ async function addRelation(env, taskId, type, relatedTaskId, input) {
       endpoints.relationType,
       endpoints.sourceTaskId,
       endpoints.targetTaskId,
-      now(),
+      timestamp,
       task.id,
       input.version,
     ),
@@ -1453,8 +1529,13 @@ async function addRelation(env, taskId, type, relatedTaskId, input) {
         version = version + 1,
         updated_at = ?
       WHERE id = ? AND version = ?
-    `).bind(input.threadId ?? null, now(), task.id, input.version),
+    `).bind(input.threadId ?? null, timestamp, task.id, input.version),
   );
+  const taskUpdateIndex = statements.length - 1;
+  const threadStatement = linkTaskThreadStatement(
+    env, task.id, input.threadId, timestamp, input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
   let results;
   try {
     results = await env.DB.batch(statements);
@@ -1471,7 +1552,7 @@ async function addRelation(env, taskId, type, relatedTaskId, input) {
     }
     throw error;
   }
-  if (!changed(results.at(-1))) {
+  if (!changed(results[taskUpdateIndex])) {
     const latest = await requireTaskRow(env, task.id);
     throw new ApiError(
       409,
@@ -1506,7 +1587,8 @@ async function removeRelation(env, taskId, type, relatedTaskId, input) {
   if (!exists) {
     throw new ApiError(404, "RELATION_NOT_FOUND", "This issue relation does not exist");
   }
-  const results = await env.DB.batch([
+  const timestamp = now();
+  const statements = [
     env.DB.prepare(`
       DELETE FROM task_relations
       WHERE relation_type = ?
@@ -1529,9 +1611,14 @@ async function removeRelation(env, taskId, type, relatedTaskId, input) {
         version = version + 1,
         updated_at = ?
       WHERE id = ? AND version = ?
-    `).bind(input.threadId ?? null, now(), task.id, input.version),
-  ]);
-  if (!changed(results.at(-1))) {
+    `).bind(input.threadId ?? null, timestamp, task.id, input.version),
+  ];
+  const threadStatement = linkTaskThreadStatement(
+    env, task.id, input.threadId, timestamp, input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[1])) {
     const latest = await requireTaskRow(env, task.id);
     throw new ApiError(
       409,
@@ -1638,7 +1725,7 @@ async function createComment(env, taskId, input, actor) {
   const task = await requireTaskRow(env, taskId);
   const id = uuid();
   const timestamp = now();
-  await env.DB.prepare(`
+  const statements = [env.DB.prepare(`
     INSERT INTO comments (
       id, task_id, body, thread_id, author_type, author_id, author_name,
       author_avatar_url, version, created_at, updated_at
@@ -1654,7 +1741,10 @@ async function createComment(env, taskId, input, actor) {
     actor.avatarUrl,
     timestamp,
     timestamp,
-  ).run();
+  )];
+  const threadStatement = linkTaskThreadStatement(env, task.id, input.threadId, timestamp);
+  if (threadStatement) statements.push(threadStatement);
+  await env.DB.batch(statements);
   const row = await env.DB.prepare("SELECT * FROM comments WHERE id = ?").bind(id).first();
   return hydrateComment(env, row);
 }
@@ -1681,7 +1771,8 @@ function assertCommentVersion(row, expectedVersion) {
 async function updateComment(env, id, input) {
   const current = await requireCommentRow(env, id);
   assertCommentVersion(current, input.version);
-  const result = await env.DB.prepare(`
+  const timestamp = now();
+  const statements = [env.DB.prepare(`
     UPDATE comments
     SET
       body = ?,
@@ -1692,11 +1783,21 @@ async function updateComment(env, id, input) {
   `).bind(
     input.body,
     input.threadId ?? null,
-    now(),
+    timestamp,
     current.id,
     input.version,
-  ).run();
-  if (!changed(result)) {
+  )];
+  const threadStatement = linkTaskThreadForCommentStatement(
+    env,
+    current.task_id,
+    input.threadId,
+    timestamp,
+    current.id,
+    input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
     const latest = await requireCommentRow(env, current.id);
     throw new ApiError(
       409,
@@ -1709,14 +1810,26 @@ async function updateComment(env, id, input) {
   return hydrateComment(env, row);
 }
 
-async function deleteComment(env, id, expectedVersion) {
+async function deleteComment(env, id, expectedVersion, threadId) {
   const current = await requireCommentRow(env, id);
   assertCommentVersion(current, expectedVersion);
   const attachments = await attachmentsForComment(env, current.id);
-  const result = await env.DB.prepare(`
+  const statements = [];
+  const threadStatement = linkTaskThreadForCommentStatement(
+    env,
+    current.task_id,
+    threadId,
+    now(),
+    current.id,
+    expectedVersion,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const deleteIndex = statements.length;
+  statements.push(env.DB.prepare(`
     DELETE FROM comments WHERE id = ? AND version = ?
-  `).bind(current.id, expectedVersion).run();
-  if (!changed(result)) {
+  `).bind(current.id, expectedVersion));
+  const results = await env.DB.batch(statements);
+  if (!changed(results[deleteIndex])) {
     const latest = await requireCommentRow(env, current.id);
     throw new ApiError(
       409,
@@ -2048,8 +2161,8 @@ async function routeApi(request, env, actor, url) {
       });
     }
     if (request.method === "DELETE") {
-      const { version } = parseVersionMutation(await readJson(request));
-      await deleteComment(env, commentId, version);
+      const { version, threadId } = parseVersionMutation(await readJson(request));
+      await deleteComment(env, commentId, version, threadId);
       return empty(204);
     }
     methodNotAllowed(["PATCH", "DELETE"]);

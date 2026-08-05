@@ -203,6 +203,7 @@ export interface Task {
   labels: string[];
   sortOrder: number;
   threadId: string | null;
+  threadIds: string[];
   creatorType: ActorType;
   creatorId: string;
   creatorName: string;

@@ -1,0 +1,7 @@
+#!/bin/zsh
+set -u
+
+executable_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+project_root="$(CDPATH= cd -- "$executable_dir/../../../.." && pwd)"
+
+exec "$project_root/scripts/codex-taskboard-launcher.sh"

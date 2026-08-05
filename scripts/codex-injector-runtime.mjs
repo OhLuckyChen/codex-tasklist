@@ -2,7 +2,7 @@ const HOST_REQUEST_ERROR = "自动认领配置暂时无法应用，请刷新后�
 const AUTOMATION_SCHEMA_DIAGNOSTIC = "AUTOMATION_SCHEMA_MISMATCH";
 
 function parseHostRequest(payload, parseAutomationRequest) {
-  if (typeof payload !== "string" || payload.length > 4_096) {
+  if (typeof payload !== "string" || payload.length > 16_384) {
     return { id: null, request: null, error: HOST_REQUEST_ERROR };
   }
 
@@ -35,7 +35,7 @@ function parseHostRequest(payload, parseAutomationRequest) {
     request.action === "prefill-task-composer"
     && typeof request.instruction === "string"
     && request.instruction.length > 0
-    && request.instruction.length <= 1_024
+    && request.instruction.length <= 8_192
     && typeof request.skillName === "string"
     && /^[a-z0-9][a-z0-9-]{0,79}$/i.test(request.skillName)
     && typeof request.skillDisplayName === "string"

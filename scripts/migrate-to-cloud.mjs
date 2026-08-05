@@ -20,6 +20,7 @@ const WRANGLER_D1_STATEMENT_MAX_BYTES = 90_000;
 const TABLE_ORDER = [
   "projects",
   "tasks",
+  "task_threads",
   "comments",
   "task_relations",
   "attachments",
@@ -29,6 +30,7 @@ const LOCAL_WORKFLOW_PATH_FIELDS = new Set(["gitWorktreePath"]);
 const SORT_FIELDS = {
   projects: ["id"],
   tasks: ["project_id", "identifier", "id"],
+  task_threads: ["task_id", "linked_at", "thread_id"],
   comments: ["task_id", "created_at", "id"],
   task_relations: ["source_task_id", "target_task_id", "relation_type"],
   attachments: ["task_id", "comment_id", "created_at", "id"],
@@ -87,6 +89,7 @@ function buildProjectCounts(tables) {
     counts[project.id] = {
       projects: 1,
       tasks: 0,
+      task_threads: 0,
       comments: 0,
       attachments: 0,
       task_relations: 0,
@@ -106,6 +109,13 @@ function buildProjectCounts(tables) {
     const projectId = taskProjects.get(comment.task_id);
     if (!projectId) throw new Error(`Comment '${comment.id}' references unknown task '${comment.task_id}'`);
     counts[projectId].comments += 1;
+  }
+  for (const thread of tables.task_threads) {
+    const projectId = taskProjects.get(thread.task_id);
+    if (!projectId) {
+      throw new Error(`Task thread references unknown task '${thread.task_id}'`);
+    }
+    counts[projectId].task_threads += 1;
   }
   for (const attachment of tables.attachments) {
     const projectId = taskProjects.get(attachment.task_id);
@@ -218,12 +228,30 @@ async function readSnapshot(databasePath) {
         `SQLite snapshot failed PRAGMA foreign_key_check (${foreignKeyViolations.length} violation(s))`,
       );
     }
-    const tables = Object.fromEntries(
-      TABLE_ORDER.map((table) => [
-        table,
-        sortRows(table, snapshot.prepare(`SELECT * FROM "${table}"`).all()),
-      ]),
-    );
+    const tables = Object.fromEntries(TABLE_ORDER.map((table) => {
+      if (table !== "task_threads") {
+        return [table, sortRows(table, snapshot.prepare(`SELECT * FROM "${table}"`).all())];
+      }
+      const exists = snapshot.prepare(`
+        SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_threads'
+      `).get();
+      if (exists) {
+        return [table, sortRows(table, snapshot.prepare("SELECT * FROM task_threads").all())];
+      }
+      const byTaskAndThread = new Map();
+      for (const row of snapshot.prepare(`
+        SELECT id AS task_id, thread_id, updated_at AS linked_at
+        FROM tasks WHERE thread_id IS NOT NULL
+        UNION ALL
+        SELECT task_id, thread_id, updated_at AS linked_at
+        FROM comments WHERE thread_id IS NOT NULL
+      `).all()) {
+        const key = `${row.task_id}\0${row.thread_id}`;
+        const previous = byTaskAndThread.get(key);
+        if (!previous || previous.linked_at < row.linked_at) byTaskAndThread.set(key, row);
+      }
+      return [table, sortRows(table, [...byTaskAndThread.values()])];
+    }));
     snapshot.close();
     snapshot = null;
     return tables;
@@ -355,6 +383,7 @@ const CLOUD_COLUMNS = {
     "due_date", "recurrence_interval", "recurrence_unit", "archived_at", "version",
     "created_at", "updated_at",
   ],
+  task_threads: ["task_id", "thread_id", "linked_at"],
   comments: [
     "id", "task_id", "body", "thread_id", "author_type", "author_id", "author_name",
     "author_avatar_url", "version", "created_at", "updated_at",
@@ -449,6 +478,8 @@ export function createCloudD1ImportSql(tables) {
 export const CLOUD_PROJECT_COUNTS_SQL = `
   SELECT p.id AS project_id, 1 AS projects,
     (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) AS tasks,
+    (SELECT COUNT(*) FROM task_threads tt JOIN tasks t ON t.id = tt.task_id
+      WHERE t.project_id = p.id) AS task_threads,
     (SELECT COUNT(*) FROM comments c JOIN tasks t ON t.id = c.task_id
       WHERE t.project_id = p.id) AS comments,
     (SELECT COUNT(*) FROM attachments a JOIN tasks t ON t.id = a.task_id
