@@ -26,8 +26,10 @@
   const MACOS_TITLEBAR_SAFE_LEFT = 80;
   const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh";
   const THREAD_LINK_RECEIPT_STORAGE_KEY = "codex-taskboard.pendingThreadLinkReceipt.v1";
+  const THREAD_LINK_REQUEST_STORAGE_KEY = "codex-taskboard.pendingThreadLinkRequest.v2";
   const THREAD_LINK_RECEIPT_TTL_MS = 24 * 60 * 60 * 1_000;
   const THREAD_LINK_RECEIPT_RETRY_MS = 1_000;
+  const THREAD_LINK_RESOLVE_RETRY_MS = 500;
   const PLUGIN_LABELS = ["插件", "plugins"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
@@ -75,6 +77,7 @@
   let openGeneration = 0;
   let pendingThreadCreation = null;
   let pendingTaskThreadLink = null;
+  let pendingThreadResolutionInFlight = false;
   let pendingThreadCheckTimer = null;
   let pendingThreadLinkReceipt = null;
   let pendingThreadLinkReceiptTimer = null;
@@ -133,6 +136,40 @@
     }
   }
 
+  function readPendingTaskThreadLink() {
+    try {
+      const request = JSON.parse(window.localStorage.getItem(THREAD_LINK_REQUEST_STORAGE_KEY) || "null");
+      if (
+        !request
+        || typeof request !== "object"
+        || typeof request.requestId !== "string"
+        || typeof request.taskId !== "string"
+        || (request.commentId !== undefined && typeof request.commentId !== "string")
+        || typeof request.marker !== "string"
+        || request.marker.length < 8
+        || request.marker.length > 200
+        || typeof request.startedAt !== "number"
+        || request.startedAt < Date.now() - THREAD_LINK_RECEIPT_TTL_MS
+      ) {
+        window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
+        return null;
+      }
+      return request;
+    } catch (_) {
+      window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
+      return null;
+    }
+  }
+
+  function persistPendingTaskThreadLink(request) {
+    pendingTaskThreadLink = request;
+    if (request) {
+      window.localStorage.setItem(THREAD_LINK_REQUEST_STORAGE_KEY, JSON.stringify(request));
+    } else {
+      window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
+    }
+  }
+
   function schedulePendingThreadLinkReceipt() {
     if (!pendingThreadLinkReceipt || pendingThreadLinkReceiptTimer !== null) return;
     pendingThreadLinkReceiptTimer = window.setTimeout(() => {
@@ -149,6 +186,7 @@
   }
 
   pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
+  pendingTaskThreadLink = readPendingTaskThreadLink();
 
   function resolveTaskboardUrl() {
     const configured = typeof window.__CODEX_TASKBOARD_URL__ === "string"
@@ -664,84 +702,49 @@
       : liveContext;
     postToFrame({ type: "taskboard:host-context", payload });
     postToFrame({ type: "taskboard:theme", theme: payload.theme });
-    if (pendingTaskThreadLink) {
-      const knownThreadIds = new Set(pendingTaskThreadLink.knownThreadIds);
-      const currentThreadRows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
-      const newlyCreatedRows = currentThreadRows
-        .filter((row) => !pendingTaskThreadLink.knownThreadRows.includes(row));
-      if (pendingTaskThreadLink.candidateThreadRow?.isConnected !== true) {
-        pendingTaskThreadLink.candidateThreadRow = newlyCreatedRows.length === 1
-          ? newlyCreatedRows[0]
-          : null;
-      }
-      const newRowThreadId = normalizeThreadId(
-        pendingTaskThreadLink.candidateThreadRow
-          ?.getAttribute("data-app-action-sidebar-thread-id"),
-      );
-      const routeThreadId = normalizeThreadId(threadIdFromLocation());
-      const candidateThreadId = routeThreadId && !knownThreadIds.has(routeThreadId)
-        ? routeThreadId
-        : newRowThreadId;
-      const ambiguitySignature = (!routeThreadId || knownThreadIds.has(routeThreadId))
-        && newlyCreatedRows.length > 1
-        ? newlyCreatedRows
-          .map((row) => row.getAttribute("data-app-action-sidebar-thread-id") || "")
-          .sort()
-          .join(",")
-        : "";
+    void resolvePendingTaskThreadLink();
+  }
 
-      if (candidateThreadId) {
-        if (candidateThreadId === pendingTaskThreadLink.candidateThreadId) {
-          pendingTaskThreadLink.candidateSeenCount += 1;
-        } else {
-          pendingTaskThreadLink.candidateThreadId = candidateThreadId;
-          pendingTaskThreadLink.candidateSeenCount = 1;
-        }
-        pendingTaskThreadLink.ambiguitySignature = "";
-        pendingTaskThreadLink.ambiguitySeenCount = 0;
-      } else {
-        pendingTaskThreadLink.candidateThreadId = "";
-        pendingTaskThreadLink.candidateSeenCount = 0;
-        if (ambiguitySignature === pendingTaskThreadLink.ambiguitySignature) {
-          pendingTaskThreadLink.ambiguitySeenCount += 1;
-        } else {
-          pendingTaskThreadLink.ambiguitySignature = ambiguitySignature;
-          pendingTaskThreadLink.ambiguitySeenCount = ambiguitySignature ? 1 : 0;
-        }
-      }
+  function schedulePendingTaskThreadResolution(requestId) {
+    if (pendingThreadCheckTimer !== null) return;
+    pendingThreadCheckTimer = window.setTimeout(() => {
+      pendingThreadCheckTimer = null;
+      if (pendingTaskThreadLink?.requestId === requestId) void resolvePendingTaskThreadLink();
+    }, THREAD_LINK_RESOLVE_RETRY_MS);
+  }
 
-      if (pendingTaskThreadLink.candidateSeenCount >= 3) {
+  async function resolvePendingTaskThreadLink() {
+    if (!pendingTaskThreadLink || pendingThreadResolutionInFlight) return;
+    const request = pendingTaskThreadLink;
+    pendingThreadResolutionInFlight = true;
+    try {
+      const result = await requestHost("resolve-task-thread", {
+        marker: request.marker,
+        startedAt: request.startedAt,
+      });
+      if (pendingTaskThreadLink?.requestId !== request.requestId) return;
+      const threadId = normalizeThreadId(result?.threadId);
+      if (result?.status === "resolved" && threadId) {
         persistPendingThreadLinkReceipt({
-          requestId: pendingTaskThreadLink.requestId,
-          taskId: pendingTaskThreadLink.taskId,
-          commentId: pendingTaskThreadLink.commentId || undefined,
-          threadId: candidateThreadId,
+          requestId: request.requestId,
+          taskId: request.taskId,
+          commentId: request.commentId || undefined,
+          threadId,
           createdAt: Date.now(),
         });
-        pendingTaskThreadLink = null;
+        persistPendingTaskThreadLink(null);
         if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
         pendingThreadCheckTimer = null;
         deliverPendingThreadLinkReceipt();
-      } else if (pendingTaskThreadLink.ambiguitySeenCount >= 3) {
-        postToFrame({
-          type: "taskboard:thread-create-error",
-          payload: {
-            requestId: pendingTaskThreadLink.requestId,
-            taskId: pendingTaskThreadLink.taskId,
-            commentId: pendingTaskThreadLink.commentId || undefined,
-            error: "检测到多个新会话，未自动关联。请在评论中手动选择正确会话。",
-          },
-        });
-        pendingTaskThreadLink = null;
-        if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
-        pendingThreadCheckTimer = null;
-      } else if ((candidateThreadId || ambiguitySignature) && pendingThreadCheckTimer === null) {
-        const requestId = pendingTaskThreadLink.requestId;
-        pendingThreadCheckTimer = window.setTimeout(() => {
-          pendingThreadCheckTimer = null;
-          if (pendingTaskThreadLink?.requestId === requestId) postHostContext();
-        }, 120);
+        return;
       }
+    } catch (_) {
+      // The resident injector can restart independently. Keep the durable request and retry.
+    } finally {
+      pendingThreadResolutionInFlight = false;
+    }
+    if (pendingTaskThreadLink?.requestId === request.requestId) {
+      schedulePendingTaskThreadResolution(request.requestId);
     }
   }
 
@@ -883,6 +886,16 @@
       return;
     }
     pendingThreadCreation = requestId;
+    const startedAt = Date.now();
+    const marker = `[taskboard-request:${requestId}]`;
+    const correlatedInstruction = `${instruction}\n\n${marker}`;
+    persistPendingTaskThreadLink({
+      requestId,
+      taskId,
+      ...(commentId ? { commentId } : {}),
+      marker,
+      startedAt,
+    });
     try {
       const bridge = window.electronBridge;
       if (!bridge || typeof bridge.sendMessageFromView !== "function") {
@@ -912,16 +925,6 @@
         if (selectProject) await new Promise((resolve) => window.setTimeout(resolve, 120));
       }
 
-      const knownThreadIds = new Set([
-        ...(hostContextSnapshot?.threads || []).map((thread) => normalizeThreadId(thread.id)),
-        ...readCodexThreads().map((thread) => normalizeThreadId(thread.id)),
-        normalizeThreadId(threadIdFromLocation()),
-        normalizeThreadId(lastNativeThreadId),
-      ].filter(Boolean));
-      const knownThreadRows = Array.from(
-        document.querySelectorAll("[data-app-action-sidebar-thread-id]"),
-      );
-
       closeTaskboard(false);
       await dispatchHostMessage({
         type: "navigate-to-route",
@@ -931,26 +934,18 @@
         },
       });
       await requestHostTaskComposerPrefill({
-        instruction,
+        instruction: correlatedInstruction,
         skillDisplayName,
         skillName,
         skillPath,
       });
       await waitForPreparedComposer(identifier, skillPath);
-      pendingTaskThreadLink = {
-        requestId,
-        taskId,
-        commentId,
-        knownThreadIds: [...knownThreadIds],
-        knownThreadRows,
-        candidateThreadRow: null,
-        candidateThreadId: "",
-        candidateSeenCount: 0,
-        ambiguitySignature: "",
-        ambiguitySeenCount: 0,
-      };
+      void resolvePendingTaskThreadLink();
       postToFrame({ type: "taskboard:thread-prepared", payload: { requestId, taskId } });
     } catch (error) {
+      if (pendingTaskThreadLink?.requestId === requestId) persistPendingTaskThreadLink(null);
+      if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+      pendingThreadCheckTimer = null;
       postToFrame({
         type: "taskboard:thread-create-error",
         payload: {

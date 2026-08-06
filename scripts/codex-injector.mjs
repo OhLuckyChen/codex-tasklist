@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import path from "node:path";
 
 import { resolvePort } from "../server/app.mjs";
@@ -18,6 +19,7 @@ import {
   restartResidentInjector,
 } from "./codex-injector-runtime.mjs";
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
+import { resolveCodexSessionByMarker } from "./codex-session-resolver.mjs";
 
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
@@ -972,6 +974,15 @@ async function installTaskboardHostBinding(cdp, supervisor) {
       prefill: (request, executionContextId) => (
         prefillTaskComposerViaCdp(cdp, executionContextId, request)
       ),
+      resolveTaskThread: async (request) => {
+        const sessionsRoot = path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions");
+        const threadId = await resolveCodexSessionByMarker({
+          sessionsRoot,
+          marker: request.marker,
+          startedAt: request.startedAt,
+        });
+        return threadId ? { status: "resolved", threadId } : { status: "pending" };
+      },
       sendResponse: (executionContextId, response) => (
         sendHostResponse(cdp, executionContextId, response)
       ),

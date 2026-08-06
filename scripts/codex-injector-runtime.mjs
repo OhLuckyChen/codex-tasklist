@@ -20,6 +20,16 @@ function parseHostRequest(payload, parseAutomationRequest) {
   ) ? request.id : null;
   if (!id) return { id: null, request: null, error: HOST_REQUEST_ERROR };
   if (request.action === "ensure") return { id, request, error: null };
+  if (
+    request.action === "resolve-task-thread"
+    && typeof request.marker === "string"
+    && request.marker.length >= 8
+    && request.marker.length <= 200
+    && Number.isFinite(request.startedAt)
+    && request.startedAt > 0
+  ) {
+    return { id, request, error: null };
+  }
   if (request.action === "automation") {
     const parsed = parseAutomationRequest(request);
     return parsed
@@ -69,6 +79,8 @@ export async function handleHostBindingPayload(params, handlers) {
       result = await handlers.ensure();
     } else if (parsed.request.action === "automation") {
       result = await handlers.runAutomation(parsed.request, params.executionContextId);
+    } else if (parsed.request.action === "resolve-task-thread") {
+      result = await handlers.resolveTaskThread(parsed.request);
     } else {
       result = await handlers.prefill(parsed.request, params.executionContextId);
     }

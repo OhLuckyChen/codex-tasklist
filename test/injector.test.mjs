@@ -34,13 +34,15 @@ test("the resident injector supervises the fixed local Taskboard service", () =>
   assert.match(source, /CODEX_TASKBOARD_PORT: String\(resolvePort\(\)\)/);
 });
 
-test("the CDP bridge accepts only service ensure and native Skill composer prefill actions", () => {
+test("the CDP bridge accepts service, composer, and exact thread correlation actions", () => {
   assert.match(source, /const hostBindingName = "__codexTaskboardHostV1"/);
   assert.match(runtimeSource, /request\.action === "ensure"/);
   assert.match(runtimeSource, /request\.action === "prefill-task-composer"/);
+  assert.match(runtimeSource, /request\.action === "resolve-task-thread"/);
   assert.match(runtimeSource, /request\.instruction\.length <= 8_192/);
   assert.match(runtimeSource, /request\.skillPath\.length <= 1_024/);
   assert.match(source, /function prefillTaskComposerViaCdp/);
+  assert.match(source, /resolveCodexSessionByMarker/);
   assert.match(source, /cdp\.send\("Input\.insertText", \{ text: "\$" \}\)/);
   assert.match(source, /data-composer-overlay-floating-ui/);
   assert.match(source, /button\[data-list-navigation-item="true"\]/);
@@ -53,6 +55,14 @@ test("the CDP bridge accepts only service ensure and native Skill composer prefi
   assert.match(source, /if \(keepAlive\) await installTaskboardHostBinding/);
   assert.match(source, /publishHostHeartbeat/);
   assert.match(source, /__codexTaskboardHostHeartbeatV1/);
+});
+
+test("new task threads use a durable request marker instead of sidebar ordering", () => {
+  assert.match(injectionSource, /pendingThreadLinkRequest\.v2/);
+  assert.match(injectionSource, /\[taskboard-request:\$\{requestId\}\]/);
+  assert.match(injectionSource, /requestHost\("resolve-task-thread"/);
+  assert.doesNotMatch(injectionSource, /检测到多个新会话/);
+  assert.doesNotMatch(injectionSource, /ambiguitySeenCount/);
 });
 
 test("the CDP bridge exposes only the fixed Taskboard automation operations", () => {
