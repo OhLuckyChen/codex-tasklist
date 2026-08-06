@@ -44,6 +44,7 @@ const INLINE_ATTACHMENT_TYPES = new Set([
 ]);
 const PROJECT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TRUSTED_EMBED_ORIGINS = new Set(["app://-"]);
+const DIRECTORY_PICKER_SCRIPT = 'POSIX path of (choose folder with prompt "选择本地项目目录")';
 const CODEX_AGENT_ACTOR = {
   type: "agent",
   id: "codex-agent",
@@ -184,6 +185,19 @@ function assertLoopbackRequest(request) {
     && address !== "::ffff:127.0.0.1"
   ) {
     throw new ApiError(403, "LOCAL_ONLY", "This endpoint is only available on this device");
+  }
+}
+
+async function chooseLocalDirectory() {
+  if (process.platform !== "darwin") {
+    throw new ApiError(501, "DIRECTORY_PICKER_UNAVAILABLE", "当前系统不支持文件夹选择器");
+  }
+  try {
+    const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", DIRECTORY_PICKER_SCRIPT]);
+    return path.resolve(stdout.trim());
+  } catch (error) {
+    if (String(error.stderr ?? error.message).includes("-128")) return null;
+    throw new ApiError(500, "DIRECTORY_PICKER_FAILED", "无法打开文件夹选择器");
   }
 }
 
@@ -765,7 +779,7 @@ function parseTaskFilters(searchParams) {
 
   const projectIdValue = searchParams.get("projectId");
   const statusValue = searchParams.get("status");
-  const archived = searchParams.get("archived") ?? "false";
+  const archived = searchParams.get("archived") ?? "all";
   if (statusValue !== null && !isTaskStatus(statusValue)) {
     throw new ApiError(400, "INVALID_QUERY_PARAMETER", "Invalid task status");
   }
@@ -1365,6 +1379,13 @@ export function createTaskboardServer(options = {}) {
       if (pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
         return sendJson(response, 200, { status: "ok" });
+      }
+
+      if (pathname === "/api/local/directory-picker") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/directory-picker");
+        await assertEmptyRequestBody(request, "POST /api/local/directory-picker");
+        return sendJson(response, 200, { workspacePath: await chooseLocalDirectory() });
       }
 
       if (pathname === "/api/local/cloud-session") {

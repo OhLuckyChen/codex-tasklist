@@ -342,6 +342,7 @@ test("task lifecycle keeps optimistic versions and never persists a worktree pat
     json: { version: moved.body.task.version },
   });
   assert.equal(archived.response.status, 200);
+  assert.equal(archived.body.task.status, "archived");
   assert.ok(archived.body.task.archivedAt);
 
   const restored = await cloud.request(`/api/tasks/${created.body.task.id}/restore`, {
@@ -350,6 +351,7 @@ test("task lifecycle keeps optimistic versions and never persists a worktree pat
     json: { version: archived.body.task.version },
   });
   assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.task.status, "todo");
   assert.equal(restored.body.task.archivedAt, null);
 });
 

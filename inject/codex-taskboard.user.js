@@ -832,6 +832,84 @@
     }
   }
 
+  function workspaceLabelFromPath(workspacePath) {
+    return String(workspacePath || "").split(/[\\/]/).filter(Boolean).at(-1) || "";
+  }
+
+  function activeProjectRow() {
+    return document.querySelector('[data-app-action-sidebar-project-row][data-app-action-sidebar-project-active="true"]')
+      || document.querySelector(`[data-app-action-sidebar-project-row][${NATIVE_SELECTED_ATTRIBUTE}="true"]`)
+      || document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
+  }
+
+  function projectFromRow(row) {
+    if (!row) return null;
+    const id = row.getAttribute("data-app-action-sidebar-project-id")?.trim();
+    const name = (
+      row.getAttribute("data-app-action-sidebar-project-label")
+      || row.getAttribute("aria-label")
+      || ""
+    ).trim();
+    return id && name ? { id, name } : null;
+  }
+
+  async function activateProjectFromTaskboard(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
+    const projectName = typeof payload?.projectName === "string" ? payload.projectName.trim() : "";
+    const workspacePath = typeof payload?.workspacePath === "string" ? payload.workspacePath.trim() : "";
+    if (!requestId) return;
+    if (!isLocalTaskboardOrigin(frameOrigin)) {
+      postToFrame({
+        type: "taskboard:project-activated",
+        payload: { requestId, ok: false, error: "仅本地任务面板可新增 Codex 项目" },
+      });
+      return;
+    }
+    try {
+      const bridge = window.electronBridge;
+      if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+        throw new Error("当前 Codex 版本没有提供本地项目注册能力");
+      }
+      await ensureProjectRows();
+      const beforeIds = new Set(readCodexProjects().map((project) => project.id));
+      const beforeActiveProjectId = projectFromRow(activeProjectRow())?.id || "";
+      await bridge.sendMessageFromView({
+        type: "electron-set-active-workspace-root",
+        root: workspacePath,
+      });
+
+      const workspaceLabel = workspaceLabelFromPath(workspacePath);
+      const deadline = Date.now() + 4_000;
+      let project = null;
+      while (!project && Date.now() < deadline) {
+        const projects = readCodexProjects();
+        const activeProject = projectFromRow(activeProjectRow());
+        project = projects.find((candidate) => !beforeIds.has(candidate.id))
+          || projects.find((candidate) => normalizedLabel(candidate.name) === normalizedLabel(workspaceLabel))
+          || projects.find((candidate) => normalizedLabel(candidate.name) === normalizedLabel(projectName))
+          || (activeProject?.id !== beforeActiveProjectId ? activeProject : null);
+        if (!project) await new Promise((resolve) => window.setTimeout(resolve, 60));
+      }
+      if (!project) throw new Error("Codex 未能从该目录创建或识别项目，请确认目录存在");
+
+      hostContextSnapshot = await captureHostContext();
+      postHostContext();
+      postToFrame({
+        type: "taskboard:project-activated",
+        payload: { requestId, ok: true, project },
+      });
+    } catch (error) {
+      postToFrame({
+        type: "taskboard:project-activated",
+        payload: {
+          requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : "无法新增 Codex 项目",
+        },
+      });
+    }
+  }
+
   async function waitForPreparedComposer(identifier, skillPath) {
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
@@ -1092,6 +1170,10 @@
     }
     if (message.type === "taskboard:automation-request") {
       void handleAutomationRequest(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:activate-project") {
+      void activateProjectFromTaskboard(message.payload);
       return;
     }
     if (message.type === "taskboard:create-thread") {

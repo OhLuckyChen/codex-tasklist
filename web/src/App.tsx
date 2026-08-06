@@ -23,6 +23,7 @@ import {
   ApiError,
   addTaskRelation,
   archiveTask as archiveTaskRequest,
+  chooseLocalDirectory,
   createProject as createProjectRequest,
   createTask as createTaskRequest,
   getTaskboardRevision,
@@ -36,7 +37,6 @@ import {
   listTasks,
   moveTask as moveTaskRequest,
   removeTaskRelation,
-  restoreTask as restoreTaskRequest,
   setCurrentUserActor,
   uploadAttachment,
   updateComment as updateCommentRequest,
@@ -56,6 +56,7 @@ import {
 } from "./components/InlineMediaComposer";
 import { LinearIcon } from "./components/LinearIcon";
 import { ProjectAutomationMenu } from "./components/ProjectAutomationMenu";
+import { ProjectCreator, type ProjectCreateDraft } from "./components/ProjectCreator";
 import { TaskContextMenu } from "./components/TaskContextMenu";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskEditor } from "./components/TaskEditor";
@@ -201,6 +202,19 @@ interface PendingAutomationRequest {
   timeoutId: number;
 }
 
+interface CodexProjectActivationResponse {
+  requestId: string;
+  ok: boolean;
+  project?: { id: string; name: string };
+  error?: string;
+}
+
+interface PendingProjectActivation {
+  resolve: (response: CodexProjectActivationResponse) => void;
+  reject: (error: Error) => void;
+  timeoutId: number;
+}
+
 const DEFAULT_USER_ACTOR: ActorIdentity = {
   type: "user",
   id: "local-user",
@@ -219,6 +233,7 @@ const PROJECT_HOME_MODE_KEY = "taskboard.projectHomeMode.v1";
 const DEVICE_WORKSPACE_PATHS_KEY = "taskboard.deviceWorkspacePaths.v1";
 const SHOW_EMPTY_COLUMNS_KEY = "taskboard.showEmptyColumns.v1";
 const COLUMN_VISIBILITY_KEY = "taskboard.columnVisibility.v1";
+const GLOBAL_COLUMN_VISIBILITY_KEY = "taskboard.globalColumnVisibility.v1";
 const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
 const DEFAULT_AUTOMATION_OPTIONS = {
   enabledByUser: false,
@@ -451,10 +466,31 @@ function readColumnVisibilityByProject(): ColumnVisibilityByProject {
   }
 }
 
+function readGlobalColumnVisibility(): Partial<Record<TaskStatus, boolean>> | null {
+  try {
+    const raw = window.localStorage.getItem(GLOBAL_COLUMN_VISIBILITY_KEY);
+    if (raw === null) return null;
+    const value = JSON.parse(raw);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const visibility: Partial<Record<TaskStatus, boolean>> = {};
+    for (const status of TASK_STATUSES) {
+      const visible = (value as Record<string, unknown>)[status];
+      if (typeof visible === "boolean") visibility[status] = visible;
+    }
+    return visibility;
+  } catch {
+    return null;
+  }
+}
+
 function workspaceName(path?: string): string | null {
   if (!path) return null;
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? path;
+}
+
+function isAbsoluteWorkspacePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
 }
 
 function errorMessage(error: unknown): string {
@@ -642,8 +678,9 @@ export function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState(readTaskFilters);
-  const [showEmptyColumns, setShowEmptyColumns] = useState(readShowEmptyColumns);
+  const [showEmptyColumns] = useState(readShowEmptyColumns);
   const [columnVisibilityByProject, setColumnVisibilityByProject] = useState(readColumnVisibilityByProject);
+  const [globalColumnVisibility, setGlobalColumnVisibility] = useState(readGlobalColumnVisibility);
   const [boardView, setBoardView] = useState<BoardView>("issues");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
@@ -669,6 +706,8 @@ export function App() {
   const [projectOrder, setProjectOrder] = useState(readProjectOrder);
   const [archivedProjectIds, setArchivedProjectIds] = useState(readArchivedProjectIds);
   const [projectHomeMode, setProjectHomeMode] = useState(readProjectHomeMode);
+  const [projectCreatorOpen, setProjectCreatorOpen] = useState(false);
+  const [projectCreatePending, setProjectCreatePending] = useState(false);
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -690,6 +729,7 @@ export function App() {
 
   const revisionPollingInterval = getRevisionPollingInterval(taskboardMetadata);
   const pendingAutomationRequestsRef = useRef(new Map<string, PendingAutomationRequest>());
+  const pendingProjectActivationsRef = useRef(new Map<string, PendingProjectActivation>());
   const automationRequestInFlightRef = useRef(false);
   const projectAutomationsRef = useRef(projectAutomations);
 
@@ -697,6 +737,28 @@ export function App() {
     setUndoNotice(null);
     setAnnouncementValue(message);
   }, []);
+
+  const activateCodexProject = useCallback((draft: ProjectCreateDraft) => {
+    if (!embedded || window.parent === window) {
+      return Promise.resolve<CodexProjectActivationResponse>({ requestId: "standalone", ok: true });
+    }
+    const requestId = crypto.randomUUID();
+    return new Promise<CodexProjectActivationResponse>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingProjectActivationsRef.current.delete(requestId);
+        reject(new Error("Codex 项目同步超时，请确认目录存在后重试。"));
+      }, 8_000);
+      pendingProjectActivationsRef.current.set(requestId, { resolve, reject, timeoutId });
+      window.parent.postMessage({
+        type: "taskboard:activate-project",
+        payload: {
+          requestId,
+          projectName: draft.name,
+          workspacePath: draft.workspacePath,
+        },
+      }, "*");
+    });
+  }, [embedded]);
 
   const rememberDeviceWorkspacePath = useCallback((projectId: string, workspacePath: string) => {
     const normalizedPath = workspacePath.trim();
@@ -1153,6 +1215,20 @@ export function App() {
         return;
       }
 
+      if (message.type === "taskboard:project-activated" && message.payload) {
+        const payload = message.payload as Partial<CodexProjectActivationResponse>;
+        if (typeof payload.requestId !== "string") return;
+        const pending = pendingProjectActivationsRef.current.get(payload.requestId);
+        if (!pending) return;
+        window.clearTimeout(pending.timeoutId);
+        pendingProjectActivationsRef.current.delete(payload.requestId);
+        if (payload.ok) pending.resolve(payload as CodexProjectActivationResponse);
+        else pending.reject(new Error(
+          typeof payload.error === "string" ? payload.error : "Codex 无法新增该项目",
+        ));
+        return;
+      }
+
       if (message.type === "taskboard:theme" && isTheme(message.theme)) {
         setTheme(message.theme);
         return;
@@ -1278,6 +1354,11 @@ export function App() {
         window.clearTimeout(pending.timeoutId);
       }
       pendingAutomationRequestsRef.current.clear();
+      for (const pending of pendingProjectActivationsRef.current.values()) {
+        window.clearTimeout(pending.timeoutId);
+        pending.reject(new Error("任务面板已关闭，项目同步已取消。"));
+      }
+      pendingProjectActivationsRef.current.clear();
     };
   }, [embedded]);
 
@@ -1585,33 +1666,32 @@ export function App() {
     ) as Record<TaskStatus, Task[]>;
   }, [filteredTasks]);
 
-  const columnVisibility = columnVisibilityByProject[selectedProjectId];
+  const columnVisibility = globalColumnVisibility ?? columnVisibilityByProject[selectedProjectId];
 
   const visibleStatuses = useMemo(
     () => TASK_STATUSES.filter((status) => (
-      tasksByStatus[status].length === 0
-        ? showEmptyColumns
-        : (columnVisibility?.[status] ?? true)
+      columnVisibility?.[status] ?? (showEmptyColumns || tasksByStatus[status].length > 0)
     )),
     [columnVisibility, showEmptyColumns, tasksByStatus],
   );
 
   const hiddenStatuses = useMemo(
-    () => TASK_STATUSES.filter((status) => (
-      tasksByStatus[status].length === 0
-        ? !showEmptyColumns
-        : !(columnVisibility?.[status] ?? true)
+    () => TASK_STATUSES.filter((status) => !(
+      columnVisibility?.[status] ?? (showEmptyColumns || tasksByStatus[status].length > 0)
     )),
     [columnVisibility, showEmptyColumns, tasksByStatus],
   );
 
-  function updateShowEmptyColumns(show: boolean) {
-    window.localStorage.setItem(SHOW_EMPTY_COLUMNS_KEY, String(show));
-    setShowEmptyColumns(show);
-  }
-
   function updateColumnVisibility(status: TaskStatus, visible: boolean) {
-    if (!selectedProjectId || tasksByStatus[status].length === 0) return;
+    if (globalColumnVisibility !== null) {
+      setGlobalColumnVisibility((current) => {
+        const next = { ...(current ?? {}), [status]: visible };
+        window.localStorage.setItem(GLOBAL_COLUMN_VISIBILITY_KEY, JSON.stringify(next));
+        return next;
+      });
+      return;
+    }
+    if (!selectedProjectId) return;
     setColumnVisibilityByProject((current) => {
       const next = {
         ...current,
@@ -1623,6 +1703,19 @@ export function App() {
       window.localStorage.setItem(COLUMN_VISIBILITY_KEY, JSON.stringify(next));
       return next;
     });
+  }
+
+  function updateGlobalColumnVisibility(enabled: boolean) {
+    if (!enabled) {
+      setGlobalColumnVisibility(null);
+      window.localStorage.removeItem(GLOBAL_COLUMN_VISIBILITY_KEY);
+      return;
+    }
+    const next = Object.fromEntries(
+      TASK_STATUSES.map((status) => [status, visibleStatuses.includes(status)]),
+    ) as Record<TaskStatus, boolean>;
+    setGlobalColumnVisibility(next);
+    window.localStorage.setItem(GLOBAL_COLUMN_VISIBILITY_KEY, JSON.stringify(next));
   }
 
   function selectBoardView(view: BoardView) {
@@ -1691,8 +1784,8 @@ export function App() {
         pushUndo(message, async () => {
           const candidate = tasksRef.current.find((task) => task.id === saved.id);
           const current = candidate && candidate.version >= saved.version ? candidate : saved;
-          await archiveTaskRequest(current);
-          setTasks((tasks) => tasks.filter((task) => task.id !== saved.id));
+          const archived = await archiveTaskRequest(current);
+          setTasks((tasks) => sortTasks(tasks.map((task) => task.id === archived.id ? archived : task)));
         });
       } else if (editor.task) {
         const previous = editor.task;
@@ -1896,8 +1989,8 @@ export function App() {
       pushUndo(`${duplicated.identifier} 副本已创建。`, async () => {
         const candidate = tasksRef.current.find((current) => current.id === duplicated.id);
         const current = candidate && candidate.version >= duplicated.version ? candidate : duplicated;
-        await archiveTaskRequest(current);
-        setTasks((tasks) => tasks.filter((item) => item.id !== duplicated.id));
+        const archived = await archiveTaskRequest(current);
+        setTasks((tasks) => sortTasks(tasks.map((item) => item.id === archived.id ? archived : item)));
       });
     } catch (error) {
       setActionError(errorMessage(error));
@@ -1905,23 +1998,7 @@ export function App() {
   }
 
   async function archiveTask(task: Task) {
-    setActionError(null);
-    try {
-      const archived = await archiveTaskRequest(task);
-      setTasks((current) => current.filter((candidate) => candidate.id !== task.id));
-      pushUndo(`${task.identifier} 已归档。`, async () => {
-        const restored = await restoreTaskRequest(archived);
-        setTasks((current) => sortTasks([
-          ...current.filter((candidate) => candidate.id !== restored.id),
-          restored,
-        ]));
-      });
-    } catch (error) {
-      setActionError(error instanceof ApiError && error.code === "VERSION_CONFLICT"
-        ? "该议题已在其他位置更新，看板已重新同步。"
-        : errorMessage(error));
-      if (selectedProjectId) void refreshTasks(selectedProjectId, { quiet: true });
-    }
+    await moveTask(task, "archived");
   }
 
   async function copyText(text: string, message: string) {
@@ -2144,6 +2221,55 @@ export function App() {
       return next;
     });
     setAnnouncement(`${dragged.name} 的顺序已调整。`);
+  }
+
+  async function createProjectFromHome(draft: ProjectCreateDraft) {
+    if (!draft.name) {
+      setActionError("请输入项目名称。");
+      return;
+    }
+    if (!isAbsoluteWorkspacePath(draft.workspacePath)) {
+      setActionError("本地项目目录必须填写绝对路径。");
+      return;
+    }
+    if (projectCreatePending) return;
+    setProjectCreatePending(true);
+    setActionError(null);
+    try {
+      const activation = await activateCodexProject(draft);
+      const linkedWithCodex = embedded && window.parent !== window;
+      if (linkedWithCodex && (!activation.project?.id || !activation.project.name)) {
+        throw new Error("Codex 已切换目录，但没有返回可关联的项目，请重试。");
+      }
+      const project = await createProjectRequest({
+        ...(activation.project?.id ? { id: activation.project.id } : {}),
+        name: draft.name,
+        workspacePath: draft.workspacePath,
+      });
+      rememberDeviceWorkspacePath(project.id, draft.workspacePath);
+      setProjects((current) => [
+        ...current.filter((candidate) => candidate.id !== project.id),
+        project,
+      ]);
+      setProjectCreatorOpen(false);
+      setAnnouncement(`${project.name} 已新增${linkedWithCodex ? "，并同步到 Codex 项目。" : "。"}`);
+    } catch (error) {
+      setActionError(error instanceof ApiError && error.code === "PROJECT_EXISTS"
+        ? "该项目已经存在，可直接从项目列表打开。"
+        : errorMessage(error));
+    } finally {
+      setProjectCreatePending(false);
+    }
+  }
+
+  async function chooseProjectWorkspace() {
+    setActionError(null);
+    try {
+      return await chooseLocalDirectory();
+    } catch (error) {
+      setActionError(errorMessage(error));
+      return null;
+    }
   }
 
   async function selectProject(choice: ProjectChoice) {
@@ -2557,8 +2683,10 @@ export function App() {
               onChange={setFilters}
             />
             <BoardSettingsMenu
-              showEmptyColumns={showEmptyColumns}
-              onShowEmptyColumnsChange={updateShowEmptyColumns}
+              visibleStatuses={visibleStatuses}
+              applyToAllProjects={globalColumnVisibility !== null}
+              onStatusVisibilityChange={updateColumnVisibility}
+              onApplyToAllProjectsChange={updateGlobalColumnVisibility}
             />
             {(search || activeFilterCount > 0) && (
               <button
@@ -2597,29 +2725,52 @@ export function App() {
               <span>任务面板</span>
               <div className="project-home-heading-row">
                 <h1>选择项目</h1>
-                <div className="project-home-mode-switch" role="group" aria-label="项目展示模式">
+                <div className="project-home-heading-actions">
                   <button
-                    className={projectHomeMode === "groups" ? "active" : ""}
+                    className="project-create-trigger"
                     type="button"
-                    aria-pressed={projectHomeMode === "groups"}
+                    aria-expanded={projectCreatorOpen}
                     onClick={() => {
-                      setProjectHomeMode("groups");
-                      window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "groups");
+                      setActionError(null);
+                      setProjectCreatorOpen((current) => !current);
                     }}
-                  >分类</button>
-                  <button
-                    className={projectHomeMode === "priority" ? "active" : ""}
-                    type="button"
-                    aria-pressed={projectHomeMode === "priority"}
-                    onClick={() => {
-                      setProjectHomeMode("priority");
-                      window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "priority");
-                    }}
-                  >收藏排序</button>
+                  >
+                    <LinearIcon name="plus" />
+                    新增项目
+                  </button>
+                  <div className="project-home-mode-switch" role="group" aria-label="项目展示模式">
+                    <button
+                      className={projectHomeMode === "groups" ? "active" : ""}
+                      type="button"
+                      aria-pressed={projectHomeMode === "groups"}
+                      onClick={() => {
+                        setProjectHomeMode("groups");
+                        window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "groups");
+                      }}
+                    >分类</button>
+                    <button
+                      className={projectHomeMode === "priority" ? "active" : ""}
+                      type="button"
+                      aria-pressed={projectHomeMode === "priority"}
+                      onClick={() => {
+                        setProjectHomeMode("priority");
+                        window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "priority");
+                      }}
+                    >收藏排序</button>
+                  </div>
                 </div>
               </div>
               <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
             </div>
+            {projectCreatorOpen && (
+              <ProjectCreator
+                codexLinkAvailable={embedded && window.parent !== window}
+                submitting={projectCreatePending}
+                onCancel={() => setProjectCreatorOpen(false)}
+                onChooseWorkspace={chooseProjectWorkspace}
+                onSubmit={createProjectFromHome}
+              />
+            )}
             {projectsLoading ? (
               <div className="project-grid project-grid-loading" aria-label="正在加载项目" aria-busy="true">
                 <span /><span /><span />
@@ -2676,7 +2827,7 @@ export function App() {
               <div className="project-home-empty">
                 <span className="empty-orbit" aria-hidden="true"><i /><i /></span>
                 <h2>还没有项目</h2>
-                <p>在 Codex 中创建项目后，再打开任务面板。</p>
+                <p>点击“新增项目”，选择本地项目目录后即可开始。</p>
               </div>
             )}
           </section>
@@ -2741,7 +2892,7 @@ export function App() {
         ) : (
           <div className="board-scroll" aria-label="Issue board">
             <div className="board">
-              {filteredTasks.length === 0 && tasks.length > 0 && !showEmptyColumns && (
+              {filteredTasks.length === 0 && tasks.length > 0 && visibleStatuses.length === 0 && (
                 <section className="page-empty filter-empty board-filter-empty">
                   <span className="empty-search" aria-hidden="true"><LinearIcon name="search" /></span>
                   <h2>没有匹配的议题</h2>

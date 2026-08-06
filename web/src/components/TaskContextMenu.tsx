@@ -404,9 +404,8 @@ export function TaskContextMenu({
       <div className="context-menu-group">
         <MenuItem
           label="归档议题"
-          icon={<LinearIcon name="trash" />}
+          icon={<LinearIcon name="archive" />}
           shortcut="⌘⌫"
-          danger
           onPointerEnter={closeSubmenu}
           onClick={() => closeThen(() => onArchive(task))}
         />

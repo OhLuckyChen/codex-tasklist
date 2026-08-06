@@ -85,10 +85,12 @@ test("the complete Linear-style workflow shares one ordered status source", () =
     "blocked",
     "done",
     "canceled",
+    "archived",
   ]);
   assert.match(boardColumnSource, /in_review: \{ label: "审核中", tone: "review" \}/);
   assert.match(boardColumnSource, /blocked: \{ label: "已阻塞", tone: "blocked" \}/);
   assert.match(boardColumnSource, /canceled: \{ label: "已取消", tone: "canceled" \}/);
+  assert.match(boardColumnSource, /archived: \{ label: "归档", tone: "archived" \}/);
   assert.match(cardSource, /import \{ TASK_STATUSES,/);
   assert.doesNotMatch(cardSource, /STATUS_ORDER/);
   assert.match(detailSource, /TASK_STATUSES\.map\(\(status\) =>/);
@@ -124,8 +126,8 @@ test("common issue mutations enter a Linear-style undo queue", () => {
   assert.match(appSource, /moveTask\(task, destination, beforeTaskId, true\)/);
   assert.doesNotMatch(appSource, /setAnnouncement\(`已撤回：/);
   assert.match(appSource, /className="toast undo-toast"/);
-  assert.match(appSource, /restoreTaskRequest\(archived\)/);
-  assert.match(apiSource, /export async function restoreTask/);
+  assert.match(appSource, /await moveTask\(task, "archived"\)/);
+  assert.match(apiSource, /archived: "all"/);
 });
 
 test("issues expose a current conversation and expandable conversation history", () => {

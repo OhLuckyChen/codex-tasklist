@@ -11,6 +11,7 @@ const TASK_STATUSES = [
   "blocked",
   "done",
   "canceled",
+  "archived",
 ];
 const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"];
 const INLINE_ATTACHMENT_TYPES = new Set([
@@ -886,7 +887,7 @@ function parseTaskFilters(searchParams) {
   }
   const projectId = searchParams.get("projectId");
   const status = searchParams.get("status");
-  const archived = searchParams.get("archived") ?? "false";
+  const archived = searchParams.get("archived") ?? "all";
   if (projectId !== null) validateProjectId(projectId);
   if (status !== null) parseStatus(status);
   if (!["false", "true", "all"].includes(archived)) {
@@ -1030,7 +1031,7 @@ async function listProjects(env) {
     FROM projects
     LEFT JOIN tasks
       ON tasks.project_id = projects.id
-      AND tasks.archived_at IS NULL
+      AND tasks.status != 'archived'
     GROUP BY
       projects.id,
       projects.name,
@@ -1054,7 +1055,7 @@ async function getProject(env, id) {
     FROM projects
     LEFT JOIN tasks
       ON tasks.project_id = projects.id
-      AND tasks.archived_at IS NULL
+      AND tasks.status != 'archived'
     WHERE projects.id = ?
     GROUP BY
       projects.id,
@@ -1112,6 +1113,7 @@ async function listTasks(env, filters) {
           WHEN 'blocked' THEN 5
           WHEN 'done' THEN 6
           WHEN 'canceled' THEN 7
+          WHEN 'archived' THEN 8
         END,
         sort_order,
         created_at,
@@ -1128,7 +1130,7 @@ async function createTask(env, input, actor) {
     const row = await env.DB.prepare(`
       SELECT COALESCE(MAX(sort_order), 0) AS maximum
       FROM tasks
-      WHERE project_id = ? AND status = ? AND archived_at IS NULL
+      WHERE project_id = ? AND status = ?
     `).bind(input.projectId, input.status).first();
     sortOrder = row.maximum + 1000;
   }
@@ -1151,7 +1153,7 @@ async function createTask(env, input, actor) {
         projects.id,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        NULL, 1, ?, ?
+        ?, 1, ?, ?
       FROM projects
       WHERE projects.id = ?
     `).bind(
@@ -1178,6 +1180,7 @@ async function createTask(env, input, actor) {
       input.dueDate,
       input.recurrence?.interval ?? null,
       input.recurrence?.unit ?? null,
+      input.status === "archived" ? timestamp : null,
       timestamp,
       timestamp,
       input.projectId,
@@ -1217,6 +1220,7 @@ async function updateTask(env, id, input, actor) {
 
   const assignments = [];
   const values = [];
+  const timestamp = now();
   const columns = {
     title: "title",
     description: "description",
@@ -1238,6 +1242,10 @@ async function updateTask(env, id, input, actor) {
       values.push(key === "labels" ? JSON.stringify(value) : value);
     }
   }
+  if (Object.hasOwn(input.changes, "status")) {
+    assignments.push("archived_at = CASE WHEN ? = 'archived' THEN COALESCE(archived_at, ?) ELSE NULL END");
+    values.push(input.changes.status, timestamp);
+  }
   if (input.assigneeTarget !== undefined) {
     const assignee = resolveAssignee(input.assigneeTarget, actor);
     assignments.push(
@@ -1253,7 +1261,6 @@ async function updateTask(env, id, input, actor) {
     values.push(input.threadId);
   }
   assignments.push("version = version + 1", "updated_at = ?");
-  const timestamp = now();
   values.push(timestamp, current.id, input.version);
   const statements = [env.DB.prepare(`
     UPDATE tasks
@@ -1284,15 +1291,12 @@ async function updateTask(env, id, input, actor) {
 async function moveTask(env, id, input) {
   const current = await requireTaskRow(env, id);
   assertTaskVersion(current, input.version);
-  if (current.archived_at !== null) {
-    throw new ApiError(409, "TASK_ARCHIVED", "Archived tasks cannot be moved");
-  }
   let sortOrder = input.sortOrder;
   if (sortOrder === undefined) {
     const row = await env.DB.prepare(`
       SELECT COALESCE(MAX(sort_order), 0) AS maximum
       FROM tasks
-      WHERE project_id = ? AND status = ? AND archived_at IS NULL AND id != ?
+      WHERE project_id = ? AND status = ? AND id != ?
     `).bind(current.project_id, input.status, current.id).first();
     sortOrder = row.maximum + 1000;
   }
@@ -1302,6 +1306,7 @@ async function moveTask(env, id, input) {
     SET
       status = ?,
       sort_order = ?,
+      archived_at = CASE WHEN ? = 'archived' THEN COALESCE(archived_at, ?) ELSE NULL END,
       thread_id = COALESCE(?, thread_id),
       version = version + 1,
       updated_at = ?
@@ -1309,6 +1314,8 @@ async function moveTask(env, id, input) {
   `).bind(
     input.status,
     sortOrder,
+    input.status,
+    timestamp,
     input.threadId ?? null,
     timestamp,
     current.id,
@@ -1335,15 +1342,21 @@ async function archiveTask(env, id, input) {
   const current = await requireTaskRow(env, id);
   assertTaskVersion(current, input.version);
   const timestamp = now();
+  const order = await env.DB.prepare(`
+    SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_order
+    FROM tasks WHERE project_id = ? AND status = 'archived' AND id != ?
+  `).bind(current.project_id, current.id).first();
   const statements = [env.DB.prepare(`
     UPDATE tasks
     SET
-      archived_at = ?,
+      status = 'archived',
+      sort_order = ?,
+      archived_at = COALESCE(archived_at, ?),
       thread_id = COALESCE(?, thread_id),
       version = version + 1,
       updated_at = ?
     WHERE id = ? AND version = ?
-  `).bind(timestamp, input.threadId ?? null, timestamp, current.id, input.version)];
+  `).bind(order.next_order, timestamp, input.threadId ?? null, timestamp, current.id, input.version)];
   const threadStatement = linkTaskThreadStatement(
     env, current.id, input.threadId, timestamp, input.version + 1,
   );
@@ -1364,19 +1377,25 @@ async function archiveTask(env, id, input) {
 async function restoreTask(env, id, input) {
   const current = await requireTaskRow(env, id);
   assertTaskVersion(current, input.version);
-  if (current.archived_at === null) {
+  if (current.status !== "archived") {
     throw new ApiError(409, "TASK_NOT_ARCHIVED", "Only archived tasks can be restored");
   }
   const timestamp = now();
+  const order = await env.DB.prepare(`
+    SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_order
+    FROM tasks WHERE project_id = ? AND status = 'todo' AND id != ?
+  `).bind(current.project_id, current.id).first();
   const statements = [env.DB.prepare(`
     UPDATE tasks
     SET
+      status = 'todo',
+      sort_order = ?,
       archived_at = NULL,
       thread_id = COALESCE(?, thread_id),
       version = version + 1,
       updated_at = ?
     WHERE id = ? AND version = ?
-  `).bind(input.threadId ?? null, timestamp, current.id, input.version)];
+  `).bind(order.next_order, input.threadId ?? null, timestamp, current.id, input.version)];
   const threadStatement = linkTaskThreadStatement(
     env, current.id, input.threadId, timestamp, input.version + 1,
   );

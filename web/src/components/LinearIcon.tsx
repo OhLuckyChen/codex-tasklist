@@ -4,6 +4,9 @@ import type { TaskPriority, TaskStatus } from "../types";
 // Geometry is sourced from Linear's live icon assets and Codex's native controls.
 // Keep SVG definitions here so product components never draw their own icons.
 const ICONS = {
+  archive: {
+    content: <><path d="M2.5 2A1.5 1.5 0 0 0 1 3.5v1A1.5 1.5 0 0 0 2.5 6v6.5A2.5 2.5 0 0 0 5 15h6a2.5 2.5 0 0 0 2.5-2.5V6A1.5 1.5 0 0 0 15 4.5v-1A1.5 1.5 0 0 0 13.5 2zm0 1.5h11v1h-11zm1.5 3h8v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" /><path d="M6.25 8h3.5a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1 0-1.5" /></>,
+  },
   alert: {
     content: <path fillRule="evenodd" d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14M7.026 4.525a.5.5 0 0 1 .5-.525h.948a.5.5 0 0 1 .5.525l-.2 4a.5.5 0 0 1-.5.475h-.548a.5.5 0 0 1-.5-.475zM7 11a1 1 0 1 1 2 0 1 1 0 0 1-2 0" clipRule="evenodd" />,
   },
@@ -196,6 +199,7 @@ const STATUS_ICON_NAMES: Record<TaskStatus, LinearIconName> = {
   blocked: "alert",
   done: "statusDone",
   canceled: "statusCanceled",
+  archived: "archive",
 };
 
 export function LinearStatusIcon({ status, ...props }: { status: TaskStatus } & Omit<LinearIconProps, "name">) {

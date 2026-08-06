@@ -821,7 +821,7 @@ test("existing task and comment thread attribution remains content-specific", as
       INSERT INTO projects VALUES ('local', 'Local', NULL, 2, '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z');
       INSERT INTO tasks VALUES (
         'legacy-task', 'LOCAL-1', 'local', 'Legacy task', '', 'todo', 'none', '[]', 1000,
-        '00000000-0000-4000-8000-000000000001', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1,
+        '00000000-0000-4000-8000-000000000001', NULL, NULL, NULL, NULL, NULL, NULL, '2026-07-20T00:00:00.000Z', 1,
         '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z'
       );
       INSERT INTO comments VALUES (
@@ -845,6 +845,7 @@ test("existing task and comment thread attribution remains content-specific", as
     "00000000-0000-4000-8000-000000000002",
   ]);
   assert.equal(result.body.task.creatorType, "agent");
+  assert.equal(result.body.task.status, "archived");
   assert.equal(result.body.task.creatorId, "codex-agent");
   assert.equal(result.body.task.creatorName, "Codex Agent");
   assert.deepEqual(result.body.task.assignee, {
@@ -877,7 +878,7 @@ test("existing task and comment thread attribution remains content-specific", as
   assert.equal(attachments.body.attachments[0].commentId, null);
 
   let version = result.body.task.version;
-  for (const status of ["in_review", "blocked", "canceled"]) {
+  for (const status of ["in_review", "blocked", "canceled", "archived"]) {
     const moveResult = await request(baseUrl, "/api/tasks/legacy-task/move", {
       method: "POST",
       body: { version, status },
@@ -892,6 +893,7 @@ test("existing task and comment thread attribution remains content-specific", as
   assert.match(tasksSql, /'in_review'/);
   assert.match(tasksSql, /'blocked'/);
   assert.match(tasksSql, /'canceled'/);
+  assert.match(tasksSql, /'archived'/);
   const commentForeignKeys = runningApps.at(-1).app.database.database
     .prepare("PRAGMA foreign_key_list(comments)")
     .all();
@@ -1158,10 +1160,13 @@ test("project and task CRUD flow", async () => {
   assert.equal(archiveResult.response.status, 200);
   assert.equal(archiveResult.body.task.version, 3);
   assert.equal(archiveResult.body.task.threadId, "00000000-0000-4000-8000-000000000005");
+  assert.equal(archiveResult.body.task.status, "archived");
   assert.match(archiveResult.body.task.archivedAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const activeList = await request(baseUrl, "/api/tasks?projectId=website");
-  assert.deepEqual(activeList.body.tasks, []);
+  assert.deepEqual(activeList.body.tasks.map((task) => task.id), [created.id]);
+  const unarchivedList = await request(baseUrl, "/api/tasks?projectId=website&archived=false");
+  assert.deepEqual(unarchivedList.body.tasks, []);
   const archivedList = await request(baseUrl, "/api/tasks?projectId=website&archived=true");
   assert.deepEqual(archivedList.body.tasks.map((task) => task.id), [created.id]);
 
@@ -1175,6 +1180,7 @@ test("project and task CRUD flow", async () => {
   });
   assert.equal(restoreResult.response.status, 200);
   assert.equal(restoreResult.body.task.archivedAt, null);
+  assert.equal(restoreResult.body.task.status, "todo");
   assert.equal(restoreResult.body.task.version, 4);
   assert.equal(restoreResult.body.task.threadId, "00000000-0000-4000-8000-000000000006");
 

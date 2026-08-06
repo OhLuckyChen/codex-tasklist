@@ -29,6 +29,6 @@ Use `taskctl` for every project, issue, and comment operation. Read [references/
 7. Before requesting review, verify the requested work and acceptance criteria.
 8. After implementation and self-verification, add a comment summarizing the key changes, verification, result, and remaining risks; then move the issue to `in_review`. Never move it directly to `done`.
 9. Move an issue from `in_review` to `done` only when the user explicitly confirms acceptance or explicitly asks to mark it complete. Codex self-verification alone is not sufficient.
-10. Move work that cannot continue to `blocked`, and work that will not continue to `canceled`.
+10. Move work that cannot continue to `blocked`, work that will not continue to `canceled`, and retained one-off work that should leave the active completion set to `archived`.
 
 For version conflicts outside the initial claim, read the issue again, reconcile the newer state, and retry with its current version.

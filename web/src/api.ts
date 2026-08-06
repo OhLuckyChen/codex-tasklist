@@ -89,6 +89,13 @@ export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
   return data.projects;
 }
 
+export async function chooseLocalDirectory(): Promise<string | null> {
+  const data = await request<{ workspacePath: string | null }>("/api/local/directory-picker", {
+    method: "POST",
+  });
+  return data.workspacePath;
+}
+
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
   return request<TaskboardMetadata>("/api/meta", { signal });
 }
@@ -253,7 +260,7 @@ export async function saveWorkflowWorkspace<T>(
 }
 
 export async function createProject(input: {
-  id: string;
+  id?: string;
   name: string;
   workspacePath: string | null;
 }): Promise<Project> {
@@ -283,7 +290,7 @@ export async function listDevelopmentContexts(
 }
 
 export async function listTasks(projectId: string, signal?: AbortSignal): Promise<Task[]> {
-  const params = new URLSearchParams({ projectId, archived: "false" });
+  const params = new URLSearchParams({ projectId, archived: "all" });
   const data = await request<{ tasks: Task[] }>(`/api/tasks?${params}`, { signal });
   return data.tasks;
 }

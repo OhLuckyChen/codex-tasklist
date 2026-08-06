@@ -6,6 +6,7 @@ export const TASK_STATUSES = [
   "blocked",
   "done",
   "canceled",
+  "archived",
 ];
 export const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"];
 
