@@ -485,7 +485,7 @@ async function listIssues(api, options) {
 }
 
 async function createIssue(api, options, overrides) {
-  const status = options.status ?? "backlog";
+  const status = options.status ?? "todo";
   const priority = options.priority ?? "none";
   assertStatus(status);
   assertPriority(priority);

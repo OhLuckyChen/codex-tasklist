@@ -39,11 +39,15 @@ function IssuePicker({
   label,
   candidates,
   disabled,
+  createLabel,
+  onCreate,
   onSelect,
 }: {
   label: string;
   candidates: Task[];
   disabled?: boolean;
+  createLabel?: string;
+  onCreate?: () => void;
   onSelect: (task: Task) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -129,6 +133,20 @@ function IssuePicker({
               }}
             />
           </div>
+          {onCreate && (
+            <button
+              className="issue-relation-create"
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setQuery("");
+                onCreate();
+              }}
+            >
+              <LinearIcon name="plus" />
+              <span>{createLabel ?? "新建议题"}</span>
+            </button>
+          )}
           <div className="issue-relation-results" id="issue-relation-results" role="listbox">
             {results.length > 0 ? results.map((candidate, index) => (
               <button
@@ -260,9 +278,10 @@ export function IssueSubIssues({
   task,
   tasks,
   onOpenTask,
+  onCreateSubIssue,
   onAddRelation,
   onRemoveRelation,
-}: RelationActions) {
+}: RelationActions & { onCreateSubIssue: (task: Task) => void }) {
   const [savingId, setSavingId] = useState<string | null>(null);
   const subIssues = task.relations.subIssues;
   const done = subIssues.filter((issue) => issue.status === "done").length;
@@ -301,6 +320,8 @@ export function IssueSubIssues({
           label="添加子议题"
           candidates={candidates}
           disabled={savingId !== null}
+          createLabel="新建子议题"
+          onCreate={() => onCreateSubIssue(task)}
           onSelect={async (candidate) => {
             setSavingId(candidate.id);
             try {

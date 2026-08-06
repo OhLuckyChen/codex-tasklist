@@ -85,10 +85,12 @@ test("the complete Linear-style workflow shares one ordered status source", () =
     "blocked",
     "done",
     "canceled",
+    "archived",
   ]);
   assert.match(boardColumnSource, /in_review: \{ label: "审核中", tone: "review" \}/);
   assert.match(boardColumnSource, /blocked: \{ label: "已阻塞", tone: "blocked" \}/);
   assert.match(boardColumnSource, /canceled: \{ label: "已取消", tone: "canceled" \}/);
+  assert.match(boardColumnSource, /archived: \{ label: "归档", tone: "archived" \}/);
   assert.match(cardSource, /import \{ TASK_STATUSES,/);
   assert.doesNotMatch(cardSource, /STATUS_ORDER/);
   assert.match(detailSource, /TASK_STATUSES\.map\(\(status\) =>/);
@@ -124,19 +126,20 @@ test("common issue mutations enter a Linear-style undo queue", () => {
   assert.match(appSource, /moveTask\(task, destination, beforeTaskId, true\)/);
   assert.doesNotMatch(appSource, /setAnnouncement\(`已撤回：/);
   assert.match(appSource, /className="toast undo-toast"/);
-  assert.match(appSource, /restoreTaskRequest\(archived\)/);
-  assert.match(apiSource, /export async function restoreTask/);
+  assert.match(appSource, /await moveTask\(task, "archived"\)/);
+  assert.match(apiSource, /archived: "all"/);
 });
 
-test("issues expose processing conversations without manual binding", () => {
-  assert.match(detailSource, /在对话中打开/);
+test("issues expose a current conversation and expandable conversation history", () => {
+  assert.match(detailSource, /新建会话处理/);
   assert.match(detailSource, /onOpenInThread\(currentTask\)/);
   assert.doesNotMatch(appSource, /detail-thread-button/);
   assert.doesNotMatch(detailSource, /输入对话 ID|解除 Codex 对话绑定|>绑定</);
   assert.doesNotMatch(editorSource, /对话 ID|linkedThreadId/);
   assert.match(detailSource, /currentTask\.threadId/);
-  assert.doesNotMatch(detailSource, /currentTask\.threadIds/);
-  assert.match(detailSource, /<strong>查看对话<\/strong>/);
+  assert.match(detailSource, /currentTask\.threadIds/);
+  assert.match(detailSource, /历史相关会话/);
+  assert.match(detailSource, /label="当前会话"/);
   assert.match(detailSource, /className="conversation-thread-id">\{threadId\}/);
   assert.doesNotMatch(detailSource, /shortThreadId/);
   assert.doesNotMatch(detailSource, /detail-property-label">Codex/);
@@ -144,6 +147,7 @@ test("issues expose processing conversations without manual binding", () => {
   assert.match(detailSource, /threadId=\{comment\.threadId\}/);
   assert.doesNotMatch(detailSource, /compact/);
   assert.doesNotMatch(styles, /issue-conversation-link\.compact/);
+  assert.match(styles, /\.issue-conversation-history/);
   assert.match(detailSource, /代码分支/);
   assert.match(detailSource, /Worktree/);
   assert.match(detailSource, /developmentContext/);
@@ -162,7 +166,7 @@ test("issues bind one workflow from the current project's workflow tabs", () => 
   assert.match(editorSource, /workflowId: workflowId \|\| null/);
   assert.match(editorSource, /<span className="sr-only">工作流<\/span>/);
   assert.match(detailSource, /<span className="detail-property-label">工作流<\/span>/);
-  assert.match(detailSource, /workflowId: event\.target\.value \|\| null/);
+  assert.match(detailSource, /onChange=\{\(workflowId\) => void saveTask\(\{\s*workflowId: workflowId \|\| null/);
   assert.match(detailSource, /当前设备未找到此流程/);
 });
 
@@ -171,8 +175,31 @@ test("comments stage, upload, render and delete their own attachments", () => {
   assert.match(apiSource, /\/api\/comments\/\$\{encodeURIComponent\(commentId\)\}\/attachments/);
   assert.match(detailSource, /pendingCommentFiles/);
   assert.match(detailSource, /uploadCommentAttachment\(comment\.id, file\)/);
-  assert.match(detailSource, /comment\.attachments\.map/);
+  assert.match(detailSource, /comment\.attachments[\s\S]*?\.map/);
   assert.match(detailSource, /setPendingAttachmentDelete\(attachment\)/);
+});
+
+test("comments publish before a conversation is associated", () => {
+  assert.match(detailSource, /\{submitting \? "发表中…" : "发表评论"\}/);
+  assert.doesNotMatch(detailSource, /评论并新建会话|评论并在已有会话跟进|选择会话并发布评论/);
+  assert.match(detailSource, /function openPublishedCommentInNewThread\(comment: Comment\)/);
+  assert.match(detailSource, /function associatePublishedCommentWithThread\(comment: Comment, threadId: string\)/);
+  assert.match(detailSource, /updateComment\(comment, comment\.body, threadId\)/);
+  assert.match(appSource, /const requestId = crypto\.randomUUID\(\)/);
+  assert.match(appSource, /pendingThreadRequestsRef\.current\.set\(requestId, \{/);
+  assert.match(appSource, /commentId: comment\?\.id/);
+  assert.match(appSource, /writePendingThreadRequests\(pendingThreadRequestsRef\.current\)/);
+  assert.match(appSource, /pendingThreadRequestsRef\.current\.get\(payload\.requestId\)/);
+  assert.match(appSource, /await listComments\(payload\.taskId as string\)/);
+  assert.match(appSource, /taskboard:thread-link-ack/);
+  assert.match(appSource, /requestId,/);
+  assert.match(appSource, /commentId: comment\?\.id/);
+  assert.match(detailSource, /新建会话处理/);
+  assert.match(detailSource, /关联已有会话/);
+  assert.match(detailSource, /const commentThreadOptions = \[/);
+  assert.match(detailSource, /\.\.\.linkedThreadIds/);
+  assert.match(apiSource, /Array\.isArray\(data\.comments\)/);
+  assert.match(apiSource, /attachments: Array\.isArray\(comment\.attachments\)/);
 });
 
 test("issue creation and detail share one searchable, creatable label picker", () => {

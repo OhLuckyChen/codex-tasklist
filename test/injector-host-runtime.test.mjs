@@ -53,6 +53,40 @@ test("a stale automation parser receives an immediate host error instead of timi
   }]);
 });
 
+test("the host bridge resolves a taskboard request marker to a Codex thread", async () => {
+  const responses = [];
+  const result = await handleHostBindingPayload(
+    {
+      payload: JSON.stringify({
+        id: "resolve-request-1",
+        action: "resolve-task-thread",
+        marker: "[taskboard-request:req-12345678]",
+        startedAt: 1_785_991_070_000,
+      }),
+      executionContextId: 19,
+    },
+    {
+      parseAutomationRequest: () => null,
+      ensure: async () => assert.fail("ensure must not run"),
+      runAutomation: async () => assert.fail("automation must not run"),
+      prefill: async () => assert.fail("prefill must not run"),
+      resolveTaskThread: async () => ({
+        status: "resolved",
+        threadId: "019fd55d-010a-76d1-90ec-dcde7169b1c3",
+      }),
+      sendResponse: async (_executionContextId, response) => responses.push(response),
+    },
+  );
+
+  assert.deepEqual(result, { responded: true, accepted: true });
+  assert.deepEqual(responses, [{
+    id: "resolve-request-1",
+    ok: true,
+    status: "resolved",
+    threadId: "019fd55d-010a-76d1-90ec-dcde7169b1c3",
+  }]);
+});
+
 test("attach replaces an old runtime with the current source and restores an open page", async () => {
   const calls = [];
   const result = await reconcileInjectionRuntime({

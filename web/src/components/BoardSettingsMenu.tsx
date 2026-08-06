@@ -1,15 +1,21 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { TASK_STATUSES, type TaskStatus } from "../types";
+import { STATUS_DETAILS, StatusIcon } from "./BoardColumn";
 import { LinearIcon } from "./LinearIcon";
 
 interface BoardSettingsMenuProps {
-  showEmptyColumns: boolean;
-  onShowEmptyColumnsChange: (show: boolean) => void;
+  visibleStatuses: readonly TaskStatus[];
+  applyToAllProjects: boolean;
+  onStatusVisibilityChange: (status: TaskStatus, visible: boolean) => void;
+  onApplyToAllProjectsChange: (enabled: boolean) => void;
 }
 
 export function BoardSettingsMenu({
-  showEmptyColumns,
-  onShowEmptyColumnsChange,
+  visibleStatuses,
+  applyToAllProjects,
+  onStatusVisibilityChange,
+  onApplyToAllProjectsChange,
 }: BoardSettingsMenuProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -29,7 +35,7 @@ export function BoardSettingsMenu({
 
   useEffect(() => {
     if (!open) return;
-    requestAnimationFrame(() => menuRef.current?.querySelector<HTMLButtonElement>("[role='switch']")?.focus());
+    requestAnimationFrame(() => menuRef.current?.querySelector<HTMLButtonElement>("[role='checkbox']")?.focus());
 
     function closeFromOutside(event: PointerEvent) {
       if (
@@ -79,7 +85,9 @@ export function BoardSettingsMenu({
       onKeyDown={(event) => {
         if (event.key === "Tab") {
           event.preventDefault();
-          const switches = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='switch']") ?? [])]
+          const switches = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>(
+            "[role='checkbox'], [role='switch']",
+          ) ?? [])]
             .filter((button) => !button.disabled);
           const currentIndex = switches.indexOf(document.activeElement as HTMLButtonElement);
           const offset = event.shiftKey ? -1 : 1;
@@ -88,18 +96,48 @@ export function BoardSettingsMenu({
       }}
     >
       <section className="board-settings-section" aria-labelledby="board-options-heading">
-        <h2 id="board-options-heading">看板选项</h2>
+        <h2 id="board-options-heading">展示状态列</h2>
+        <p className="board-setting-description">已勾选的列即使没有议题也会保留。</p>
+        <div className="board-status-options">
+          {TASK_STATUSES.map((status) => {
+            const visible = visibleStatuses.includes(status);
+            const details = STATUS_DETAILS[status];
+            return (
+              <button
+                type="button"
+                className={`board-status-option${visible ? " is-checked" : ""}`}
+                role="checkbox"
+                aria-checked={visible}
+                key={status}
+                onClick={() => onStatusVisibilityChange(status, !visible)}
+              >
+                <span className={`status-icon status-icon-${details.tone}`} aria-hidden="true">
+                  <StatusIcon status={status} />
+                </span>
+                <span>{details.label}</span>
+                <span className="board-status-check" aria-hidden="true">
+                  {visible && <LinearIcon name="check" />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+      <section className="board-settings-section" aria-labelledby="global-column-visibility-label">
         <div className="board-setting-row">
-          <span>显示空列</span>
+          <span className="board-setting-copy">
+            <span id="global-column-visibility-label">应用到所有项目</span>
+            <small>开启后，所有项目使用同一套状态列。</small>
+          </span>
           <button
             type="button"
-            className={`board-setting-switch${showEmptyColumns ? " is-on" : ""}`}
+            className={`board-setting-switch${applyToAllProjects ? " is-on" : ""}`}
             role="switch"
-            aria-checked={showEmptyColumns}
-            onClick={() => onShowEmptyColumnsChange(!showEmptyColumns)}
+            aria-checked={applyToAllProjects}
+            aria-labelledby="global-column-visibility-label"
+            onClick={() => onApplyToAllProjectsChange(!applyToAllProjects)}
           >
             <span aria-hidden="true" />
-            <span className="sr-only">{showEmptyColumns ? "关闭显示空列" : "开启显示空列"}</span>
           </button>
         </div>
       </section>
@@ -112,7 +150,7 @@ export function BoardSettingsMenu({
       <button
         ref={triggerRef}
         type="button"
-        className={`board-settings-trigger${open ? " is-open" : ""}${showEmptyColumns ? " is-active" : ""}`}
+        className={`board-settings-trigger${open ? " is-open" : ""}`}
         aria-label="看板设置"
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -125,7 +163,6 @@ export function BoardSettingsMenu({
         }}
       >
         <LinearIcon name="displayOptions" />
-        {showEmptyColumns && <span className="board-settings-active-dot" aria-hidden="true" />}
       </button>
       {menu}
     </>

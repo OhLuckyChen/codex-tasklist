@@ -15,6 +15,7 @@ import {
   isTaskPriority,
   isTaskStatus,
 } from "../shared/domain.mjs";
+import { normalizeCodexThreadId } from "../shared/codex-thread-id.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
@@ -43,6 +44,7 @@ const INLINE_ATTACHMENT_TYPES = new Set([
 ]);
 const PROJECT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TRUSTED_EMBED_ORIGINS = new Set(["app://-"]);
+const DIRECTORY_PICKER_SCRIPT = 'POSIX path of (choose folder with prompt "选择本地项目目录")';
 const CODEX_AGENT_ACTOR = {
   type: "agent",
   id: "codex-agent",
@@ -183,6 +185,19 @@ function assertLoopbackRequest(request) {
     && address !== "::ffff:127.0.0.1"
   ) {
     throw new ApiError(403, "LOCAL_ONLY", "This endpoint is only available on this device");
+  }
+}
+
+async function chooseLocalDirectory() {
+  if (process.platform !== "darwin") {
+    throw new ApiError(501, "DIRECTORY_PICKER_UNAVAILABLE", "当前系统不支持文件夹选择器");
+  }
+  try {
+    const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", DIRECTORY_PICKER_SCRIPT]);
+    return path.resolve(stdout.trim());
+  } catch (error) {
+    if (String(error.stderr ?? error.message).includes("-128")) return null;
+    throw new ApiError(500, "DIRECTORY_PICKER_FAILED", "无法打开文件夹选择器");
   }
 }
 
@@ -486,7 +501,12 @@ function parseProjectCreate(body) {
 
 function parseThreadId(value) {
   if (value === undefined) return undefined;
-  return stringField(value, "threadId", { required: true, maxLength: 256 });
+  const raw = stringField(value, "threadId", { required: true, maxLength: 256 });
+  const threadId = normalizeCodexThreadId(raw);
+  if (!threadId) {
+    throw new ApiError(400, "INVALID_FIELD", "'threadId' must be a finalized Codex UUID");
+  }
+  return threadId;
 }
 
 function requestHeader(request, name) {
@@ -574,7 +594,7 @@ function parseTaskCreate(body) {
     projectId,
     title: stringField(body.title, "title", { required: true, maxLength: 240 }),
     description: stringField(body.description ?? "", "description", { maxLength: 100_000 }),
-    status: parseStatus(body.status, "backlog"),
+    status: parseStatus(body.status, "todo"),
     priority: parsePriority(body.priority, "none"),
     labels: body.labels === undefined ? [] : parseLabels(body.labels),
     sortOrder: body.sortOrder === undefined ? undefined : parseSortOrder(body.sortOrder),
@@ -759,7 +779,7 @@ function parseTaskFilters(searchParams) {
 
   const projectIdValue = searchParams.get("projectId");
   const statusValue = searchParams.get("status");
-  const archived = searchParams.get("archived") ?? "false";
+  const archived = searchParams.get("archived") ?? "all";
   if (statusValue !== null && !isTaskStatus(statusValue)) {
     throw new ApiError(400, "INVALID_QUERY_PARAMETER", "Invalid task status");
   }
@@ -1361,6 +1381,13 @@ export function createTaskboardServer(options = {}) {
         return sendJson(response, 200, { status: "ok" });
       }
 
+      if (pathname === "/api/local/directory-picker") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/directory-picker");
+        await assertEmptyRequestBody(request, "POST /api/local/directory-picker");
+        return sendJson(response, 200, { workspacePath: await chooseLocalDirectory() });
+      }
+
       if (pathname === "/api/local/cloud-session") {
         if ([...url.searchParams.keys()].length > 0) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Cloud session routes do not accept query parameters");
@@ -1808,8 +1835,8 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 200, { comment });
         }
         if (request.method === "DELETE") {
-          const { version } = parseArchive(await readJson(request));
-          const comment = database.deleteComment(id, version);
+          const { version, threadId } = parseArchive(await readJson(request));
+          const comment = database.deleteComment(id, version, threadId);
           for (const attachment of comment.attachments) {
             try {
               await unlink(path.join(resolved.attachmentsDirectory, attachment.id));

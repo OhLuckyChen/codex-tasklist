@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -81,6 +87,7 @@ interface TaskDetailProps {
   attachmentsRevision: number;
   onUpdate: (task: Task, changes: Partial<TaskDraft>) => Promise<Task>;
   onOpenTask: (task: TaskRelationSummary) => void;
+  onCreateSubIssue: (task: Task) => void;
   onAddRelation: (
     task: Task,
     type: IssueRelationType,
@@ -95,7 +102,8 @@ interface TaskDetailProps {
   currentCodexThreadId?: string;
   codexThreads: CodexThreadSummary[];
   onLinkThread: (task: Task, threadId: string) => Promise<Task>;
-  onOpenInThread: (task: Task) => void;
+  onOpenInThread: (task: Task, followUp?: string, comment?: Comment) => void;
+  onFollowUpInThread: (task: Task, threadId: string, followUp: string) => void;
   openingThread: boolean;
   onError: (message: string | null) => void;
   onAnnounce: (message: string) => void;
@@ -167,9 +175,11 @@ function DescriptionDocument({ value }: { value: string }) {
 function ConversationLink({
   threadId,
   onOpen,
+  label = "查看对话",
 }: {
   threadId: string;
   onOpen: (threadId: string) => void;
+  label?: string;
 }) {
   return (
     <button
@@ -179,10 +189,150 @@ function ConversationLink({
       onClick={() => onOpen(threadId)}
     >
       <LinearIcon name="conversation" />
-      <strong>查看对话</strong>
+      <strong>{label}</strong>
       <span className="conversation-divider" aria-hidden="true" />
       <span className="conversation-thread-id">{threadId}</span>
     </button>
+  );
+}
+
+interface PropertyOption<Value extends string> {
+  value: Value;
+  label: string;
+  group?: string;
+  icon?: ReactNode;
+  title?: string;
+}
+
+function PropertyPicker<Value extends string>({
+  ariaLabel,
+  value,
+  options,
+  disabled = false,
+  onChange,
+}: {
+  ariaLabel: string;
+  value: Value;
+  options: PropertyOption<Value>[];
+  disabled?: boolean;
+  onChange: (value: Value) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    requestAnimationFrame(() => {
+      const selectedOption = rootRef.current?.querySelector<HTMLButtonElement>("[role='option'][aria-selected='true']");
+      (selectedOption ?? rootRef.current?.querySelector<HTMLButtonElement>("[role='option']"))?.focus();
+    });
+
+    function closeFromOutside(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+
+    function closeFromEscape(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+
+    document.addEventListener("pointerdown", closeFromOutside);
+    window.addEventListener("keydown", closeFromEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeFromOutside);
+      window.removeEventListener("keydown", closeFromEscape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  function handleMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const optionButtons = [...(rootRef.current?.querySelectorAll<HTMLButtonElement>("[role='option']") ?? [])];
+    if (optionButtons.length === 0) return;
+    event.preventDefault();
+    const currentIndex = optionButtons.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? optionButtons.length - 1
+        : event.key === "ArrowUp"
+          ? (currentIndex <= 0 ? optionButtons.length - 1 : currentIndex - 1)
+          : (currentIndex + 1) % optionButtons.length;
+    optionButtons[nextIndex]?.focus();
+  }
+
+  let previousGroup: string | undefined;
+
+  return (
+    <div className="detail-property-picker" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        className="detail-property-picker-trigger"
+        type="button"
+        disabled={disabled}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={selected?.title}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || !open) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+        }}
+      >
+        <span>{selected?.label ?? "未设置"}</span>
+        <LinearIcon name="chevronDown" />
+      </button>
+      {open && (
+        <div
+          className="detail-property-menu"
+          role="listbox"
+          aria-label={ariaLabel}
+          onKeyDown={handleMenuKeyDown}
+        >
+          {options.map((option) => {
+            const showGroup = Boolean(option.group && option.group !== previousGroup);
+            previousGroup = option.group;
+            return (
+              <div className="detail-property-option-wrap" key={option.value}>
+                {showGroup && <span className="detail-property-group-label">{option.group}</span>}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === value}
+                  title={option.title}
+                  onClick={() => {
+                    setOpen(false);
+                    if (option.value !== value) onChange(option.value);
+                  }}
+                >
+                  <span className="detail-property-option-icon" aria-hidden="true">
+                    {option.icon ?? <LinearIcon name="status" />}
+                  </span>
+                  <span className="detail-property-option-label">{option.label}</span>
+                  {option.value === value && <LinearIcon className="detail-property-option-check" name="check" />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -198,6 +348,7 @@ export function TaskDetail({
   attachmentsRevision,
   onUpdate,
   onOpenTask,
+  onCreateSubIssue,
   onAddRelation,
   onRemoveRelation,
   onOpenThread,
@@ -205,6 +356,7 @@ export function TaskDetail({
   codexThreads,
   onLinkThread,
   onOpenInThread,
+  onFollowUpInThread,
   openingThread,
   onError,
   onAnnounce,
@@ -233,6 +385,8 @@ export function TaskDetail({
   );
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [commentThreadMenuId, setCommentThreadMenuId] = useState<string | null>(null);
+  const [commentThreadActionId, setCommentThreadActionId] = useState<string | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingBody, setEditingBody] = useState("");
@@ -244,17 +398,41 @@ export function TaskDetail({
   const composerRef = useRef<InlineMediaComposerHandle>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const commentThreadMenuRef = useRef<HTMLDivElement>(null);
   const threadMenuRef = useRef<HTMLDivElement>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const workflowAvailable = !currentTask.workflowId
     || workflows.some((workflow) => workflow.id === currentTask.workflowId);
   const selectableCodexThreads = codexThreads.filter((thread) => thread.id !== currentCodexThreadId);
+  const linkedThreadIds = currentTask.threadIds?.length > 0
+    ? currentTask.threadIds
+    : currentTask.threadId
+      ? [currentTask.threadId]
+      : [];
+  const historicalThreadIds = linkedThreadIds.filter((threadId) => threadId !== currentTask.threadId);
+  const commentThreadOptions = [
+    ...codexThreads,
+    ...linkedThreadIds
+      .filter((threadId) => !codexThreads.some((thread) => thread.id === threadId))
+      .map((threadId) => ({
+        id: threadId,
+        title: threadId === currentTask.threadId ? "当前会话" : "历史会话",
+        projectId: currentTask.projectId,
+      })),
+  ];
   const draft = serializeInlineMedia(commentSegments);
+  const commentFollowUpText = inlineMediaText(commentSegments).trim();
   const commentInlineImages = inlineMediaImages(commentSegments);
+  const canSubmitComment = Boolean(
+    draft.trim()
+    || pendingCommentFiles.length > 0
+    || commentInlineImages.length > 0,
+  );
 
   useEffect(() => {
     setCurrentTask(task);
     setThreadMenuOpen(false);
+    setCommentThreadMenuId(null);
     if (document.activeElement !== titleRef.current) setTitle(task.title);
     if (document.activeElement !== descriptionRef.current) setDescription(task.description);
   }, [task]);
@@ -367,6 +545,33 @@ export function TaskDetail({
     };
   }, [threadMenuOpen]);
 
+  useEffect(() => {
+    if (!commentThreadMenuId) return;
+    requestAnimationFrame(() => {
+      commentThreadMenuRef.current?.querySelector<HTMLButtonElement>("[role='option']")?.focus();
+    });
+
+    function closeFromOutside(event: PointerEvent) {
+      if (!commentThreadMenuRef.current?.contains(event.target as Node)) setCommentThreadMenuId(null);
+    }
+
+    function closeFromEscape(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      const trigger = document.querySelector<HTMLButtonElement>(
+        `[data-comment-thread-trigger="${commentThreadMenuId}"]`,
+      );
+      setCommentThreadMenuId(null);
+      trigger?.focus();
+    }
+
+    document.addEventListener("pointerdown", closeFromOutside);
+    window.addEventListener("keydown", closeFromEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeFromOutside);
+      window.removeEventListener("keydown", closeFromEscape);
+    };
+  }, [commentThreadMenuId]);
+
   async function saveTask(changes: Partial<TaskDraft>, property: string) {
     setSavingProperty(property);
     onError(null);
@@ -424,6 +629,13 @@ export function TaskDetail({
   }
 
   function handleThreadMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setThreadMenuOpen(false);
+      threadMenuTriggerRef.current?.focus();
+      return;
+    }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const options = [...(threadMenuRef.current?.querySelectorAll<HTMLButtonElement>("[role='option']") ?? [])];
     if (options.length === 0) return;
@@ -470,9 +682,10 @@ export function TaskDetail({
     await saveTask({ description: normalized }, "description");
   }
 
-  async function submitComment() {
+  async function submitComment(): Promise<string | null> {
     const body = draft.trim();
-    if ((!body && pendingCommentFiles.length === 0 && commentInlineImages.length === 0) || submitting) return;
+    if (!canSubmitComment || submitting) return null;
+    const followUp = commentFollowUpText || "请查看刚发布的评论及附件。";
     setSubmitting(true);
     setCommentsError(null);
     try {
@@ -504,10 +717,42 @@ export function TaskDetail({
           : "评论已发布。",
       );
       requestAnimationFrame(() => composerRef.current?.focus());
+      return followUp;
+    } catch (error) {
+      setCommentsError(messageFor(error));
+      return null;
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function openPublishedCommentInNewThread(comment: Comment) {
+    setCommentThreadMenuId(null);
+    onOpenInThread(
+      currentTask,
+      comment.body.trim() || "请查看这条评论及附件。",
+      comment,
+    );
+  }
+
+  async function associatePublishedCommentWithThread(comment: Comment, threadId: string) {
+    if (commentThreadActionId) return;
+    setCommentThreadMenuId(null);
+    setCommentThreadActionId(comment.id);
+    setCommentsError(null);
+    try {
+      const updated = await updateComment(comment, comment.body, threadId);
+      setComments((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onAnnounce("评论已关联会话，正在打开。");
+      onFollowUpInThread(
+        currentTask,
+        threadId,
+        updated.body.trim() || "请查看这条评论及附件。",
+      );
     } catch (error) {
       setCommentsError(messageFor(error));
     } finally {
-      setSubmitting(false);
+      setCommentThreadActionId(null);
     }
   }
 
@@ -531,6 +776,32 @@ export function TaskDetail({
       event.preventDefault();
       void submitComment();
     }
+  }
+
+  function handleCommentThreadMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      const trigger = commentThreadMenuId
+        ? document.querySelector<HTMLButtonElement>(`[data-comment-thread-trigger="${commentThreadMenuId}"]`)
+        : null;
+      setCommentThreadMenuId(null);
+      trigger?.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const options = [...(commentThreadMenuRef.current?.querySelectorAll<HTMLButtonElement>("[role='option']") ?? [])];
+    if (options.length === 0) return;
+    event.preventDefault();
+    const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? options.length - 1
+        : event.key === "ArrowUp"
+          ? (currentIndex <= 0 ? options.length - 1 : currentIndex - 1)
+          : (currentIndex + 1) % options.length;
+    options[nextIndex]?.focus();
   }
 
   function beginEdit(comment: Comment) {
@@ -636,6 +907,61 @@ export function TaskDetail({
     .filter((actor, index, actors) => (
       actors.findIndex((candidate) => actorKey(candidate) === actorKey(actor)) === index
     ));
+  const statusOptions: PropertyOption<TaskStatus>[] = TASK_STATUSES.map((status) => ({
+    value: status,
+    label: STATUS_DETAILS[status].label,
+    icon: <LinearStatusIcon status={status} />,
+  }));
+  const priorityOptions: PropertyOption<TaskPriority>[] = (
+    Object.keys(PRIORITY_DETAILS) as TaskPriority[]
+  ).map((priority) => ({
+    value: priority,
+    label: PRIORITY_DETAILS[priority].label,
+    icon: <LinearPriorityIcon priority={priority} />,
+  }));
+  const assigneePropertyOptions: PropertyOption<string>[] = assigneeOptions.map((actor) => ({
+    value: actorKey(actor),
+    label: actor.id === currentUser.id ? `${actor.name}（我）` : actor.name,
+    icon: <ActorAvatar actor={actor} className="detail-property-option-avatar" />,
+  }));
+  const workflowPropertyOptions: PropertyOption<string>[] = [
+    {
+      value: "",
+      label: "未绑定",
+      icon: <LinearIcon name="dashboard" />,
+    },
+    ...(!workflowAvailable && currentTask.workflowId ? [{
+      value: currentTask.workflowId,
+      label: "当前设备未找到此流程",
+      icon: <LinearIcon name="alert" />,
+    }] : []),
+    ...workflows.map((workflow) => ({
+      value: workflow.id,
+      label: workflow.name,
+      icon: <LinearIcon name="dashboard" />,
+    })),
+  ];
+  const developmentPropertyOptions: PropertyOption<string>[] = [
+    {
+      value: "",
+      label: developmentScanLoading ? "正在扫描 Git…" : "未绑定",
+      icon: <LinearIcon name="branch" />,
+    },
+    ...developmentOptions.map((context) => ({
+      value: contextValue(context),
+      label: contextLabel(context),
+      group: context.type === "branch" ? "代码分支" : "Worktree",
+      icon: <LinearIcon name="branch" />,
+      title: context.type === "worktree" ? context.path : context.branch,
+    })),
+  ];
+  const recurrenceOptions: PropertyOption<string>[] = [
+    { value: "", label: "不重复", icon: <LinearIcon name="recurrence" /> },
+    { value: "day", label: "每天", icon: <LinearIcon name="recurrence" /> },
+    { value: "week", label: "每周", icon: <LinearIcon name="recurrence" /> },
+    { value: "month", label: "每月", icon: <LinearIcon name="recurrence" /> },
+    { value: "year", label: "每年", icon: <LinearIcon name="recurrence" /> },
+  ];
   const visibleTaskAttachments = attachments.filter(
     (attachment) => !description.includes(attachmentContentUrl(attachment)),
   );
@@ -713,9 +1039,29 @@ export function TaskDetail({
                     {description ? <DescriptionDocument value={description} /> : "添加描述…"}
                   </div>
                 )}
-                {currentTask.threadId && (
+                {linkedThreadIds.length > 0 && (
                   <div className="issue-conversation-list" aria-label="处理此议题的对话">
-                    <ConversationLink threadId={currentTask.threadId} onOpen={onOpenThread} />
+                    {currentTask.threadId && (
+                      <ConversationLink
+                        threadId={currentTask.threadId}
+                        onOpen={onOpenThread}
+                        label="当前会话"
+                      />
+                    )}
+                    {historicalThreadIds.length > 0 && (
+                      <details className="issue-conversation-history">
+                        <summary>历史相关会话（{historicalThreadIds.length}）</summary>
+                        <div>
+                          {historicalThreadIds.map((threadId) => (
+                            <ConversationLink
+                              key={threadId}
+                              threadId={threadId}
+                              onOpen={onOpenThread}
+                            />
+                          ))}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 )}
               </div>
@@ -725,6 +1071,7 @@ export function TaskDetail({
               task={currentTask}
               tasks={tasks}
               onOpenTask={onOpenTask}
+              onCreateSubIssue={onCreateSubIssue}
               onAddRelation={(anchor, type, relatedTaskId) => applyRelationMutation(
                 () => onAddRelation(anchor, type, relatedTaskId),
               )}
@@ -956,6 +1303,63 @@ export function TaskDetail({
                           <ConversationLink threadId={comment.threadId} onOpen={onOpenThread} />
                         </div>
                       )}
+                      <div className="comment-conversation-actions">
+                        <button
+                          className="button secondary comment-new-thread-button"
+                          type="button"
+                          disabled={openingThread || Boolean(commentThreadActionId)}
+                          onClick={() => openPublishedCommentInNewThread(comment)}
+                        >
+                          <LinearIcon name="plus" />
+                          {openingThread ? "正在打开…" : "新建会话处理"}
+                        </button>
+                        <div
+                          className="comment-thread-picker"
+                          ref={commentThreadMenuId === comment.id ? commentThreadMenuRef : undefined}
+                        >
+                          <button
+                            className="button secondary comment-thread-picker-trigger"
+                            type="button"
+                            data-comment-thread-trigger={comment.id}
+                            disabled={openingThread || Boolean(commentThreadActionId) || commentThreadOptions.length === 0}
+                            aria-label="关联已有会话"
+                            aria-haspopup="listbox"
+                            aria-expanded={commentThreadMenuId === comment.id}
+                            title={commentThreadOptions.length === 0 ? "当前议题没有可关联的 Codex 会话" : undefined}
+                            onClick={() => setCommentThreadMenuId((current) => current === comment.id ? null : comment.id)}
+                          >
+                            <LinearIcon name="conversation" />
+                            <span>{comment.threadId ? "更换关联会话" : "关联已有会话"}</span>
+                            <LinearIcon className="comment-thread-picker-chevron" name="chevronDown" />
+                          </button>
+                          {commentThreadMenuId === comment.id && (
+                            <div
+                              className="comment-thread-menu"
+                              role="listbox"
+                              aria-label="选择要关联的会话"
+                              onKeyDown={handleCommentThreadMenuKeyDown}
+                            >
+                              <span className="comment-thread-menu-heading">选择后将关联并打开会话</span>
+                              {commentThreadOptions.map((thread) => (
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={comment.threadId === thread.id}
+                                  key={thread.id}
+                                  title={thread.title}
+                                  onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
+                                >
+                                  <span className="detail-thread-option-icon"><LinearIcon name="conversation" /></span>
+                                  <span className="comment-thread-option-copy">
+                                    <strong>{thread.title}</strong>
+                                    <small>{thread.id}</small>
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </article>
                 ))}
@@ -1013,18 +1417,14 @@ export function TaskDetail({
                       }}
                     />
                   </div>
-                  <div>
+                  <div className="composer-submit-actions">
                     <kbd>⌘ Enter</kbd>
                     <button
                       className="button primary"
                       type="submit"
-                      disabled={(
-                        !draft.trim()
-                        && pendingCommentFiles.length === 0
-                        && commentInlineImages.length === 0
-                      ) || submitting}
+                      disabled={!canSubmitComment || submitting}
                     >
-                      {submitting ? "发布中…" : "评论"}
+                      {submitting ? "发表中…" : "发表评论"}
                     </button>
                   </div>
                 </footer>
@@ -1058,6 +1458,12 @@ export function TaskDetail({
                   aria-haspopup="listbox"
                   aria-expanded={threadMenuOpen}
                   onClick={() => setThreadMenuOpen((open) => !open)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape" || !threadMenuOpen) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setThreadMenuOpen(false);
+                  }}
                 >
                   <LinearIcon name="conversation" />
                   <span>
@@ -1103,54 +1509,45 @@ export function TaskDetail({
               </button>
             </div>
             <h2>属性</h2>
-            <label className="detail-property-row">
+            <div className="detail-property-row">
               <span className={`detail-property-icon status-icon-${STATUS_DETAILS[currentTask.status].tone}`}><LinearStatusIcon status={currentTask.status} /></span>
               <span className="detail-property-label">状态</span>
-              <select
+              <PropertyPicker
+                ariaLabel="状态"
                 value={currentTask.status}
+                options={statusOptions}
                 disabled={savingProperty === "status"}
-                onChange={(event) => void saveTask({ status: event.target.value as TaskStatus }, "status")}
-              >
-                {TASK_STATUSES.map((status) => (
-                  <option value={status} key={status}>{STATUS_DETAILS[status].label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="detail-property-row">
+                onChange={(status) => void saveTask({ status }, "status")}
+              />
+            </div>
+            <div className="detail-property-row">
               <span className="detail-property-icon"><LinearPriorityIcon priority={currentTask.priority} /></span>
               <span className="detail-property-label">优先级</span>
-              <select
+              <PropertyPicker
+                ariaLabel="优先级"
                 value={currentTask.priority}
+                options={priorityOptions}
                 disabled={savingProperty === "priority"}
-                onChange={(event) => void saveTask({ priority: event.target.value as TaskPriority }, "priority")}
-              >
-                {(Object.keys(PRIORITY_DETAILS) as TaskPriority[]).map((priority) => (
-                  <option value={priority} key={priority}>{PRIORITY_DETAILS[priority].label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="detail-property-row assignee-property">
+                onChange={(priority) => void saveTask({ priority }, "priority")}
+              />
+            </div>
+            <div className="detail-property-row assignee-property">
               <ActorAvatar actor={currentTask.assignee} className="detail-assignee-avatar" />
               <span className="detail-property-label">负责人</span>
-              <select
-                aria-label="负责人"
+              <PropertyPicker
+                ariaLabel="负责人"
                 value={actorKey(currentTask.assignee)}
+                options={assigneePropertyOptions}
                 disabled={savingProperty === "assignee"}
-                onChange={(event) => {
-                  const selected = assigneeOptions.find((actor) => actorKey(actor) === event.target.value);
+                onChange={(actor) => {
+                  const selected = assigneeOptions.find((option) => actorKey(option) === actor);
                   const assigneeTarget = selected
                     ? assigneeTargetForActor(selected, currentUser)
                     : undefined;
-                  if (assigneeTarget) void saveTask({ assigneeTarget: assigneeTarget }, "assignee");
+                  if (assigneeTarget) void saveTask({ assigneeTarget }, "assignee");
                 }}
-              >
-                {assigneeOptions.map((actor) => (
-                  <option value={actorKey(actor)} key={actorKey(actor)}>
-                    {actor.id === currentUser.id ? `${actor.name}（我）` : actor.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+              />
+            </div>
             <div className="detail-property-row labels-property">
               <span className="detail-property-icon" aria-hidden="true">
                 <LinearIcon name="label" />
@@ -1168,53 +1565,36 @@ export function TaskDetail({
                 onChange={(nextLabels) => void saveTask({ labels: nextLabels }, "labels")}
               />
             </div>
-            <label className="detail-property-row workflow-property">
+            <div className="detail-property-row workflow-property">
               <span className="detail-property-icon" aria-hidden="true">
                 <LinearIcon name="dashboard" />
               </span>
               <span className="detail-property-label">工作流</span>
-              <select
+              <PropertyPicker
+                ariaLabel="工作流"
                 value={currentTask.workflowId ?? ""}
+                options={workflowPropertyOptions}
                 disabled={savingProperty === "workflowId"}
-                onChange={(event) => void saveTask({
-                  workflowId: event.target.value || null,
+                onChange={(workflowId) => void saveTask({
+                  workflowId: workflowId || null,
                 }, "workflowId")}
-              >
-                <option value="">未绑定</option>
-                {!workflowAvailable && currentTask.workflowId && (
-                  <option value={currentTask.workflowId}>当前设备未找到此流程</option>
-                )}
-                {workflows.map((workflow) => (
-                  <option value={workflow.id} key={workflow.id}>{workflow.name}</option>
-                ))}
-              </select>
-            </label>
-            <label className="detail-property-row development-property">
+              />
+            </div>
+            <div className="detail-property-row development-property">
               <span className="detail-property-icon" aria-hidden="true">
                 <LinearIcon name="branch" />
               </span>
               <span className="detail-property-label">开发上下文</span>
-              <select
+              <PropertyPicker
+                ariaLabel="开发上下文"
                 value={contextValue(currentTask.developmentContext)}
+                options={developmentPropertyOptions}
                 disabled={developmentScanLoading || savingProperty === "developmentContext"}
-                title={currentTask.developmentContext?.type === "worktree" ? currentTask.developmentContext.path : undefined}
-                onChange={(event) => void saveTask({
-                  developmentContext: event.target.value ? JSON.parse(event.target.value) as DevelopmentContext : null,
+                onChange={(context) => void saveTask({
+                  developmentContext: context ? JSON.parse(context) as DevelopmentContext : null,
                 }, "developmentContext")}
-              >
-                <option value="">{developmentScanLoading ? "正在扫描 Git…" : "未绑定"}</option>
-                <optgroup label="代码分支">
-                  {developmentOptions.filter((context) => context.type === "branch").map((context) => (
-                    <option value={contextValue(context)} key={contextValue(context)}>{contextLabel(context)}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="Worktree">
-                  {developmentOptions.filter((context) => context.type === "worktree").map((context) => (
-                    <option value={contextValue(context)} key={contextValue(context)}>{contextLabel(context)}</option>
-                  ))}
-                </optgroup>
-              </select>
-            </label>
+              />
+            </div>
             <label className="detail-property-row">
               <span className="detail-property-icon" aria-hidden="true"><LinearIcon name="calendar" /></span>
               <span className="detail-property-label">截止日期</span>
@@ -1228,25 +1608,21 @@ export function TaskDetail({
                 }, "dueDate")}
               />
             </label>
-            <label className="detail-property-row">
+            <div className="detail-property-row">
               <span className="detail-property-icon" aria-hidden="true"><LinearIcon name="recurrence" /></span>
               <span className="detail-property-label">重复</span>
-              <select
+              <PropertyPicker
+                ariaLabel="重复"
                 value={currentTask.recurrence?.unit ?? ""}
+                options={recurrenceOptions}
                 disabled={!currentTask.dueDate || savingProperty === "recurrence"}
-                onChange={(event) => void saveTask({
-                  recurrence: event.target.value
-                    ? { interval: 1, unit: event.target.value as Recurrence["unit"] }
+                onChange={(unit) => void saveTask({
+                  recurrence: unit
+                    ? { interval: 1, unit: unit as Recurrence["unit"] }
                     : null,
                 }, "recurrence")}
-              >
-                <option value="">不重复</option>
-                <option value="day">每天</option>
-                <option value="week">每周</option>
-                <option value="month">每月</option>
-                <option value="year">每年</option>
-              </select>
-            </label>
+              />
+            </div>
             <IssueRelationSidebar
               task={currentTask}
               tasks={tasks}

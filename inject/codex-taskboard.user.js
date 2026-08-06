@@ -25,6 +25,11 @@
   const HOST_HEARTBEAT_MAX_AGE_MS = 8_000;
   const MACOS_TITLEBAR_SAFE_LEFT = 80;
   const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh";
+  const THREAD_LINK_RECEIPT_STORAGE_KEY = "codex-taskboard.pendingThreadLinkReceipt.v1";
+  const THREAD_LINK_REQUEST_STORAGE_KEY = "codex-taskboard.pendingThreadLinkRequest.v2";
+  const THREAD_LINK_RECEIPT_TTL_MS = 24 * 60 * 60 * 1_000;
+  const THREAD_LINK_RECEIPT_RETRY_MS = 1_000;
+  const THREAD_LINK_RESOLVE_RETRY_MS = 500;
   const PLUGIN_LABELS = ["插件", "plugins"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
@@ -41,6 +46,7 @@
   ];
   const PROJECT_SECTION_LABELS = ["projects", "项目"];
   const TASK_SECTION_LABELS = ["tasks", "任务", "chats", "对话"];
+  const CODEX_THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   const previous = window[SENTINEL_KEY];
   if (previous?.sourceHash === SOURCE_HASH && typeof previous.refresh === "function") {
@@ -71,6 +77,10 @@
   let openGeneration = 0;
   let pendingThreadCreation = null;
   let pendingTaskThreadLink = null;
+  let pendingThreadResolutionInFlight = false;
+  let pendingThreadCheckTimer = null;
+  let pendingThreadLinkReceipt = null;
+  let pendingThreadLinkReceiptTimer = null;
   let lastNativeThreadId = "";
   let active = false;
   let destroyed = false;
@@ -80,8 +90,103 @@
   }
 
   function normalizeThreadId(value) {
-    return String(value || "").trim().replace(/^(?:local|cloud):/i, "");
+    let normalized = String(value || "").trim();
+    if (!normalized) return "";
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch (_) {
+      return "";
+    }
+    normalized = normalized
+      .replace(/^(?:local|cloud):/i, "")
+      .replace(/^urn:uuid:/i, "")
+      .toLowerCase();
+    return CODEX_THREAD_ID_PATTERN.test(normalized) ? normalized : "";
   }
+
+  function readPendingThreadLinkReceipt() {
+    try {
+      const receipt = JSON.parse(window.localStorage.getItem(THREAD_LINK_RECEIPT_STORAGE_KEY) || "null");
+      if (
+        !receipt
+        || typeof receipt !== "object"
+        || typeof receipt.requestId !== "string"
+        || typeof receipt.taskId !== "string"
+        || (receipt.commentId !== undefined && typeof receipt.commentId !== "string")
+        || !normalizeThreadId(receipt.threadId)
+        || typeof receipt.createdAt !== "number"
+        || receipt.createdAt < Date.now() - THREAD_LINK_RECEIPT_TTL_MS
+      ) {
+        window.localStorage.removeItem(THREAD_LINK_RECEIPT_STORAGE_KEY);
+        return null;
+      }
+      return { ...receipt, threadId: normalizeThreadId(receipt.threadId) };
+    } catch (_) {
+      window.localStorage.removeItem(THREAD_LINK_RECEIPT_STORAGE_KEY);
+      return null;
+    }
+  }
+
+  function persistPendingThreadLinkReceipt(receipt) {
+    pendingThreadLinkReceipt = receipt;
+    if (receipt) {
+      window.localStorage.setItem(THREAD_LINK_RECEIPT_STORAGE_KEY, JSON.stringify(receipt));
+    } else {
+      window.localStorage.removeItem(THREAD_LINK_RECEIPT_STORAGE_KEY);
+    }
+  }
+
+  function readPendingTaskThreadLink() {
+    try {
+      const request = JSON.parse(window.localStorage.getItem(THREAD_LINK_REQUEST_STORAGE_KEY) || "null");
+      if (
+        !request
+        || typeof request !== "object"
+        || typeof request.requestId !== "string"
+        || typeof request.taskId !== "string"
+        || (request.commentId !== undefined && typeof request.commentId !== "string")
+        || typeof request.marker !== "string"
+        || request.marker.length < 8
+        || request.marker.length > 200
+        || typeof request.startedAt !== "number"
+        || request.startedAt < Date.now() - THREAD_LINK_RECEIPT_TTL_MS
+      ) {
+        window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
+        return null;
+      }
+      return request;
+    } catch (_) {
+      window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
+      return null;
+    }
+  }
+
+  function persistPendingTaskThreadLink(request) {
+    pendingTaskThreadLink = request;
+    if (request) {
+      window.localStorage.setItem(THREAD_LINK_REQUEST_STORAGE_KEY, JSON.stringify(request));
+    } else {
+      window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
+    }
+  }
+
+  function schedulePendingThreadLinkReceipt() {
+    if (!pendingThreadLinkReceipt || pendingThreadLinkReceiptTimer !== null) return;
+    pendingThreadLinkReceiptTimer = window.setTimeout(() => {
+      pendingThreadLinkReceiptTimer = null;
+      deliverPendingThreadLinkReceipt();
+    }, THREAD_LINK_RECEIPT_RETRY_MS);
+  }
+
+  function deliverPendingThreadLinkReceipt() {
+    if (!pendingThreadLinkReceipt) pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
+    if (!pendingThreadLinkReceipt) return;
+    postToFrame({ type: "taskboard:thread-created", payload: pendingThreadLinkReceipt });
+    schedulePendingThreadLinkReceipt();
+  }
+
+  pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
+  pendingTaskThreadLink = readPendingTaskThreadLink();
 
   function resolveTaskboardUrl() {
     const configured = typeof window.__CODEX_TASKBOARD_URL__ === "string"
@@ -597,23 +702,49 @@
       : liveContext;
     postToFrame({ type: "taskboard:host-context", payload });
     postToFrame({ type: "taskboard:theme", theme: payload.theme });
-    if (pendingTaskThreadLink && payload.threadId) {
-      const currentThread = (payload.threads || []).find((thread) => thread.id === payload.threadId);
-      const identifier = normalizedLabel(pendingTaskThreadLink.identifier);
-      const taskContextVisible = normalizedLabel(findPageMount()?.surface?.textContent).includes(identifier);
-      if (
-        payload.threadId !== pendingTaskThreadLink.previousThreadId
-        && (normalizedLabel(currentThread?.title).includes(identifier) || taskContextVisible)
-      ) {
-        postToFrame({
-          type: "taskboard:thread-created",
-          payload: {
-            taskId: pendingTaskThreadLink.taskId,
-            threadId: payload.threadId,
-          },
+    void resolvePendingTaskThreadLink();
+  }
+
+  function schedulePendingTaskThreadResolution(requestId) {
+    if (pendingThreadCheckTimer !== null) return;
+    pendingThreadCheckTimer = window.setTimeout(() => {
+      pendingThreadCheckTimer = null;
+      if (pendingTaskThreadLink?.requestId === requestId) void resolvePendingTaskThreadLink();
+    }, THREAD_LINK_RESOLVE_RETRY_MS);
+  }
+
+  async function resolvePendingTaskThreadLink() {
+    if (!pendingTaskThreadLink || pendingThreadResolutionInFlight) return;
+    const request = pendingTaskThreadLink;
+    pendingThreadResolutionInFlight = true;
+    try {
+      const result = await requestHost("resolve-task-thread", {
+        marker: request.marker,
+        startedAt: request.startedAt,
+      });
+      if (pendingTaskThreadLink?.requestId !== request.requestId) return;
+      const threadId = normalizeThreadId(result?.threadId);
+      if (result?.status === "resolved" && threadId) {
+        persistPendingThreadLinkReceipt({
+          requestId: request.requestId,
+          taskId: request.taskId,
+          commentId: request.commentId || undefined,
+          threadId,
+          createdAt: Date.now(),
         });
-        pendingTaskThreadLink = null;
+        persistPendingTaskThreadLink(null);
+        if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+        pendingThreadCheckTimer = null;
+        deliverPendingThreadLinkReceipt();
+        return;
       }
+    } catch (_) {
+      // The resident injector can restart independently. Keep the durable request and retry.
+    } finally {
+      pendingThreadResolutionInFlight = false;
+    }
+    if (pendingTaskThreadLink?.requestId === request.requestId) {
+      schedulePendingTaskThreadResolution(request.requestId);
     }
   }
 
@@ -626,16 +757,43 @@
     return `/local/${encodeURIComponent(threadId)}`;
   }
 
+  function waitForNativePaint() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+    });
+  }
+
+  async function waitForActiveThread(threadId, timeoutMs = 1_200) {
+    const normalizedThreadId = normalizeThreadId(threadId);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const row = findThreadRow(normalizedThreadId);
+      const activeThreadId = normalizeThreadId(
+        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
+      ) || normalizeThreadId(threadIdFromLocation());
+      if (
+        activeThreadId === normalizedThreadId
+        || row?.getAttribute("data-app-action-sidebar-thread-active") === "true"
+        || ["page", "true"].includes(row?.getAttribute("aria-current"))
+      ) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 40));
+    }
+    return false;
+  }
+
   async function openThread(threadId) {
     if (typeof threadId !== "string" || !threadId.trim()) return;
     const normalizedThreadId = normalizeThreadId(threadId);
+    if (!normalizedThreadId) return;
     lastNativeThreadId = normalizedThreadId;
-    const row = findThreadRow(normalizedThreadId);
     closeTaskboard(false);
+    await waitForNativePaint();
 
+    const row = findThreadRow(normalizedThreadId);
     if (row?.isConnected) {
+      row.scrollIntoView?.({ block: "nearest" });
       row.click?.();
-      return;
+      if (await waitForActiveThread(normalizedThreadId)) return;
     }
 
     try {
@@ -674,6 +832,84 @@
     }
   }
 
+  function workspaceLabelFromPath(workspacePath) {
+    return String(workspacePath || "").split(/[\\/]/).filter(Boolean).at(-1) || "";
+  }
+
+  function activeProjectRow() {
+    return document.querySelector('[data-app-action-sidebar-project-row][data-app-action-sidebar-project-active="true"]')
+      || document.querySelector(`[data-app-action-sidebar-project-row][${NATIVE_SELECTED_ATTRIBUTE}="true"]`)
+      || document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
+  }
+
+  function projectFromRow(row) {
+    if (!row) return null;
+    const id = row.getAttribute("data-app-action-sidebar-project-id")?.trim();
+    const name = (
+      row.getAttribute("data-app-action-sidebar-project-label")
+      || row.getAttribute("aria-label")
+      || ""
+    ).trim();
+    return id && name ? { id, name } : null;
+  }
+
+  async function activateProjectFromTaskboard(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
+    const projectName = typeof payload?.projectName === "string" ? payload.projectName.trim() : "";
+    const workspacePath = typeof payload?.workspacePath === "string" ? payload.workspacePath.trim() : "";
+    if (!requestId) return;
+    if (!isLocalTaskboardOrigin(frameOrigin)) {
+      postToFrame({
+        type: "taskboard:project-activated",
+        payload: { requestId, ok: false, error: "仅本地任务面板可新增 Codex 项目" },
+      });
+      return;
+    }
+    try {
+      const bridge = window.electronBridge;
+      if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+        throw new Error("当前 Codex 版本没有提供本地项目注册能力");
+      }
+      await ensureProjectRows();
+      const beforeIds = new Set(readCodexProjects().map((project) => project.id));
+      const beforeActiveProjectId = projectFromRow(activeProjectRow())?.id || "";
+      await bridge.sendMessageFromView({
+        type: "electron-set-active-workspace-root",
+        root: workspacePath,
+      });
+
+      const workspaceLabel = workspaceLabelFromPath(workspacePath);
+      const deadline = Date.now() + 4_000;
+      let project = null;
+      while (!project && Date.now() < deadline) {
+        const projects = readCodexProjects();
+        const activeProject = projectFromRow(activeProjectRow());
+        project = projects.find((candidate) => !beforeIds.has(candidate.id))
+          || projects.find((candidate) => normalizedLabel(candidate.name) === normalizedLabel(workspaceLabel))
+          || projects.find((candidate) => normalizedLabel(candidate.name) === normalizedLabel(projectName))
+          || (activeProject?.id !== beforeActiveProjectId ? activeProject : null);
+        if (!project) await new Promise((resolve) => window.setTimeout(resolve, 60));
+      }
+      if (!project) throw new Error("Codex 未能从该目录创建或识别项目，请确认目录存在");
+
+      hostContextSnapshot = await captureHostContext();
+      postHostContext();
+      postToFrame({
+        type: "taskboard:project-activated",
+        payload: { requestId, ok: true, project },
+      });
+    } catch (error) {
+      postToFrame({
+        type: "taskboard:project-activated",
+        payload: {
+          requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : "无法新增 Codex 项目",
+        },
+      });
+    }
+  }
+
   async function waitForPreparedComposer(identifier, skillPath) {
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
@@ -693,7 +929,9 @@
   }
 
   async function createThreadForTask(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
     const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
+    const commentId = typeof payload?.commentId === "string" ? payload.commentId.trim() : "";
     const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
     const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
     const skillName = typeof payload?.skillName === "string" ? payload.skillName.trim() : "";
@@ -705,21 +943,42 @@
       ? payload.workspacePath.trim()
       : "";
     if (
-      !taskId
+      !requestId
+      || !taskId
       || !identifier
       || !instruction
       || !skillName
       || !skillDisplayName
       || !skillPath
-      || pendingThreadCreation
     ) return;
-    pendingThreadCreation = taskId;
+    if (pendingThreadCreation || pendingTaskThreadLink || pendingThreadLinkReceipt) {
+      postToFrame({
+        type: "taskboard:thread-create-error",
+        payload: {
+          requestId,
+          taskId,
+          commentId: commentId || undefined,
+          error: "上一条新会话仍在确认中，请完成后再试。",
+        },
+      });
+      return;
+    }
+    pendingThreadCreation = requestId;
+    const startedAt = Date.now();
+    const marker = `[taskboard-request:${requestId}]`;
+    const correlatedInstruction = `${instruction}\n\n${marker}`;
+    persistPendingTaskThreadLink({
+      requestId,
+      taskId,
+      ...(commentId ? { commentId } : {}),
+      marker,
+      startedAt,
+    });
     try {
       const bridge = window.electronBridge;
       if (!bridge || typeof bridge.sendMessageFromView !== "function") {
         throw new Error("当前 Codex 版本没有提供原生对话导航能力");
       }
-
       if (workspacePath) {
         await bridge.sendMessageFromView({
           type: "electron-set-active-workspace-root",
@@ -753,23 +1012,70 @@
         },
       });
       await requestHostTaskComposerPrefill({
+        instruction: correlatedInstruction,
+        skillDisplayName,
+        skillName,
+        skillPath,
+      });
+      await waitForPreparedComposer(identifier, skillPath);
+      void resolvePendingTaskThreadLink();
+      postToFrame({ type: "taskboard:thread-prepared", payload: { requestId, taskId } });
+    } catch (error) {
+      if (pendingTaskThreadLink?.requestId === requestId) persistPendingTaskThreadLink(null);
+      if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+      pendingThreadCheckTimer = null;
+      postToFrame({
+        type: "taskboard:thread-create-error",
+        payload: {
+          requestId,
+          taskId,
+          commentId: commentId || undefined,
+          error: error instanceof Error ? error.message : "无法创建 Codex 对话",
+        },
+      });
+    } finally {
+      pendingThreadCreation = null;
+    }
+  }
+
+  async function followUpThreadForTask(payload) {
+    const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
+    const threadId = normalizeThreadId(payload?.threadId);
+    const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
+    const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
+    const skillName = typeof payload?.skillName === "string" ? payload.skillName.trim() : "";
+    const skillDisplayName = typeof payload?.skillDisplayName === "string"
+      ? payload.skillDisplayName.trim()
+      : "";
+    const skillPath = typeof payload?.skillPath === "string" ? payload.skillPath.trim() : "";
+    if (
+      !taskId
+      || !threadId
+      || !identifier
+      || !instruction
+      || !skillName
+      || !skillDisplayName
+      || !skillPath
+      || pendingThreadCreation
+    ) return;
+    pendingThreadCreation = taskId;
+    try {
+      await openThread(threadId);
+      if (!await waitForActiveThread(threadId, 8_000)) {
+        throw new Error("Codex 没有打开所选会话");
+      }
+      await requestHostTaskComposerPrefill({
         instruction,
         skillDisplayName,
         skillName,
         skillPath,
       });
       await waitForPreparedComposer(identifier, skillPath);
-      pendingTaskThreadLink = {
-        taskId,
-        identifier,
-        previousThreadId: normalizeThreadId(activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"))
-          || lastNativeThreadId,
-      };
       postToFrame({ type: "taskboard:thread-prepared", payload: { taskId } });
     } catch (error) {
       postToFrame({
         type: "taskboard:thread-create-error",
-        payload: { taskId, error: error instanceof Error ? error.message : "无法创建 Codex 对话" },
+        payload: { taskId, error: error instanceof Error ? error.message : "无法继续 Codex 会话" },
       });
     } finally {
       pendingThreadCreation = null;
@@ -847,6 +1153,7 @@
       frameReadyWaiters.clear();
       if (active) showFrame();
       postHostContext();
+      deliverPendingThreadLinkReceipt();
       return;
     }
     if (message.type === "taskboard:drag-region") {
@@ -865,7 +1172,26 @@
       void handleAutomationRequest(message.payload);
       return;
     }
-    if (message.type === "taskboard:create-thread") void createThreadForTask(message.payload);
+    if (message.type === "taskboard:activate-project") {
+      void activateProjectFromTaskboard(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:create-thread") {
+      void createThreadForTask(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:thread-link-ack") {
+      const requestId = typeof message.payload?.requestId === "string"
+        ? message.payload.requestId
+        : "";
+      if (requestId && requestId === pendingThreadLinkReceipt?.requestId) {
+        persistPendingThreadLinkReceipt(null);
+        if (pendingThreadLinkReceiptTimer !== null) window.clearTimeout(pendingThreadLinkReceiptTimer);
+        pendingThreadLinkReceiptTimer = null;
+      }
+      return;
+    }
+    if (message.type === "taskboard:follow-up-thread") void followUpThreadForTask(message.payload);
   }
 
   function updateDragRegion(payload) {
@@ -1162,8 +1488,11 @@
     if (!active) return;
     if (!page) page = createPage();
     const mount = findPageMount();
-    if (!mount) return;
-    const { surface } = mount;
+    const existingSurface = page.parentElement?.closest?.("main")
+      ? page.parentElement
+      : null;
+    const surface = mount?.surface || existingSurface;
+    if (!surface) return;
 
     if (page.parentElement !== surface) {
       restoreNativeContent();
@@ -1260,6 +1589,7 @@
         "data-theme",
         "data-color-theme",
         "data-app-action-sidebar-thread-active",
+        "data-app-action-sidebar-thread-id",
         "aria-label",
         "aria-current",
       ],
@@ -1281,6 +1611,10 @@
     hostRequests.clear();
     pendingThreadCreation = null;
     pendingTaskThreadLink = null;
+    if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+    pendingThreadCheckTimer = null;
+    if (pendingThreadLinkReceiptTimer !== null) window.clearTimeout(pendingThreadLinkReceiptTimer);
+    pendingThreadLinkReceiptTimer = null;
     document.removeEventListener("DOMContentLoaded", mount);
     document.removeEventListener("click", onDocumentClick, true);
     window.removeEventListener("message", onFrameMessage);

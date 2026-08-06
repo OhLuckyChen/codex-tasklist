@@ -125,6 +125,7 @@ export function createWranglerCloudAdapters({
         {
           projects: Number(row.projects),
           tasks: Number(row.tasks),
+          task_threads: Number(row.task_threads),
           comments: Number(row.comments),
           task_relations: Number(row.task_relations),
           attachments: Number(row.attachments),

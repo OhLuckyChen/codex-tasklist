@@ -342,6 +342,7 @@ test("task lifecycle keeps optimistic versions and never persists a worktree pat
     json: { version: moved.body.task.version },
   });
   assert.equal(archived.response.status, 200);
+  assert.equal(archived.body.task.status, "archived");
   assert.ok(archived.body.task.archivedAt);
 
   const restored = await cloud.request(`/api/tasks/${created.body.task.id}/restore`, {
@@ -350,7 +351,66 @@ test("task lifecycle keeps optimistic versions and never persists a worktree pat
     json: { version: archived.body.task.version },
   });
   assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.task.status, "todo");
   assert.equal(restored.body.task.archivedAt, null);
+});
+
+test("cloud issues retain multiple processing conversations with one current conversation", async () => {
+  await createProject("multi-conversation");
+  const threadOne = "00000000-0000-4000-8000-000000000201";
+  const threadTwo = "00000000-0000-4000-8000-000000000202";
+  const threadThree = "00000000-0000-4000-8000-000000000203";
+  const threadFour = "00000000-0000-4000-8000-000000000204";
+  const threadFive = "00000000-0000-4000-8000-000000000205";
+  const staleThread = "00000000-0000-4000-8000-000000000299";
+  const created = await createTask("multi-conversation", "Cloud multi-conversation", alice, {
+    threadId: threadOne,
+  });
+  const taskId = created.body.task.id;
+  const updated = await cloud.request(`/api/tasks/${taskId}`, {
+    method: "PATCH",
+    actorName: alice,
+    json: { version: created.body.task.version, threadId: threadTwo },
+  });
+  assert.equal(updated.response.status, 200);
+  assert.equal(updated.body.task.threadId, threadTwo);
+  assert.equal(updated.body.task.threadIds[0], threadTwo);
+  assert.deepEqual(new Set(updated.body.task.threadIds), new Set([threadOne, threadTwo]));
+  const stale = await cloud.request(`/api/tasks/${taskId}`, {
+    method: "PATCH",
+    actorName: bob,
+    json: { version: created.body.task.version, threadId: staleThread },
+  });
+  assert.equal(stale.response.status, 409);
+  const afterStale = await cloud.request(`/api/tasks/${taskId}`, { actorName: alice });
+  assert.equal(afterStale.body.task.threadIds.includes(staleThread), false);
+
+  const commentCreated = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: bob,
+    json: { body: "Cloud review", threadId: threadThree },
+  });
+  const commentUpdated = await cloud.request(`/api/comments/${commentCreated.body.comment.id}`, {
+    method: "PATCH",
+    actorName: bob,
+    json: {
+      version: commentCreated.body.comment.version,
+      body: "Cloud review updated",
+      threadId: threadFour,
+    },
+  });
+  await cloud.request(`/api/comments/${commentCreated.body.comment.id}`, {
+    method: "DELETE",
+    actorName: bob,
+    json: { version: commentUpdated.body.comment.version, threadId: threadFive },
+  });
+  const afterComment = await cloud.request(`/api/tasks/${taskId}`, { actorName: alice });
+  assert.equal(afterComment.body.task.threadId, threadTwo);
+  assert.equal(afterComment.body.task.threadIds[0], threadTwo);
+  assert.deepEqual(
+    new Set(afterComment.body.task.threadIds),
+    new Set([threadOne, threadTwo, threadThree, threadFour, threadFive]),
+  );
 });
 
 test("relation direction, deletion, and parent-cycle checks match the local contract", async () => {

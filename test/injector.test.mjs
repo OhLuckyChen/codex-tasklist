@@ -7,6 +7,18 @@ const runtimeSource = await readFile(
   new URL("../scripts/codex-injector-runtime.mjs", import.meta.url),
   "utf8",
 );
+const launcherSource = await readFile(
+  new URL("../scripts/codex-taskboard-launcher.sh", import.meta.url),
+  "utf8",
+);
+const supervisorSource = await readFile(
+  new URL("../scripts/codex-taskboard-supervisor.sh", import.meta.url),
+  "utf8",
+);
+const injectionSource = await readFile(
+  new URL("../inject/codex-taskboard.user.js", import.meta.url),
+  "utf8",
+);
 const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
@@ -18,15 +30,19 @@ test("the resident injector supervises the fixed local Taskboard service", () =>
   assert.match(source, /await supervisor\.ensure\(\)/);
   assert.match(source, /it will be restarted automatically/);
   assert.match(source, /AbortSignal\.timeout\(1_500\)/);
+  assert.match(source, /CODEX_TASKBOARD_HOST: "127\.0\.0\.1"/);
+  assert.match(source, /CODEX_TASKBOARD_PORT: String\(resolvePort\(\)\)/);
 });
 
-test("the CDP bridge accepts only service ensure and native Skill composer prefill actions", () => {
+test("the CDP bridge accepts service, composer, and exact thread correlation actions", () => {
   assert.match(source, /const hostBindingName = "__codexTaskboardHostV1"/);
   assert.match(runtimeSource, /request\.action === "ensure"/);
   assert.match(runtimeSource, /request\.action === "prefill-task-composer"/);
-  assert.match(runtimeSource, /request\.instruction\.length <= 1_024/);
+  assert.match(runtimeSource, /request\.action === "resolve-task-thread"/);
+  assert.match(runtimeSource, /request\.instruction\.length <= 8_192/);
   assert.match(runtimeSource, /request\.skillPath\.length <= 1_024/);
   assert.match(source, /function prefillTaskComposerViaCdp/);
+  assert.match(source, /resolveCodexSessionByMarker/);
   assert.match(source, /cdp\.send\("Input\.insertText", \{ text: "\$" \}\)/);
   assert.match(source, /data-composer-overlay-floating-ui/);
   assert.match(source, /button\[data-list-navigation-item="true"\]/);
@@ -39,6 +55,14 @@ test("the CDP bridge accepts only service ensure and native Skill composer prefi
   assert.match(source, /if \(keepAlive\) await installTaskboardHostBinding/);
   assert.match(source, /publishHostHeartbeat/);
   assert.match(source, /__codexTaskboardHostHeartbeatV1/);
+});
+
+test("new task threads use a durable request marker instead of sidebar ordering", () => {
+  assert.match(injectionSource, /pendingThreadLinkRequest\.v2/);
+  assert.match(injectionSource, /\[taskboard-request:\$\{requestId\}\]/);
+  assert.match(injectionSource, /requestHost\("resolve-task-thread"/);
+  assert.doesNotMatch(injectionSource, /检测到多个新会话/);
+  assert.doesNotMatch(injectionSource, /ambiguitySeenCount/);
 });
 
 test("the CDP bridge exposes only the fixed Taskboard automation operations", () => {
@@ -69,6 +93,31 @@ test("the package injection command remains resident for tab-triggered recovery"
   assert.match(source, /__codexTaskboardHostStartupTokenV1/);
 });
 
+test("the macOS Dock launcher enables loopback-only CDP before Codex starts", () => {
+  assert.match(launcherSource, /--remote-debugging-address=127\.0\.0\.1/);
+  assert.match(launcherSource, /--remote-debugging-port=\$cdp_port/);
+  assert.match(launcherSource, /--remote-allow-origins=http:\/\/127\.0\.0\.1:/);
+  assert.match(launcherSource, /if codex_is_running; then/);
+  assert.match(launcherSource, /inject_current_codex/);
+  assert.match(launcherSource, /--port "\$cdp_port" --open/);
+  assert.match(launcherSource, /leaving the current session untouched/);
+  assert.doesNotMatch(launcherSource, /osascript/);
+  assert.doesNotMatch(launcherSource, /kill -TERM/);
+});
+
+test("the login supervisor is passive and never requests a Codex restart", () => {
+  assert.match(supervisorSource, /--watch --open/);
+  assert.match(supervisorSource, /attached_cdp_signature/);
+  assert.match(supervisorSource, /Detected a new Codex CDP instance/);
+  assert.match(supervisorSource, /function stop_duplicate_injectors|stop_duplicate_injectors\(\)/);
+  assert.match(supervisorSource, /Stopping duplicate Taskboard injector/);
+  assert.match(supervisorSource, /targets_port = explicit_port \|\| !has_any_port/);
+  assert.match(supervisorSource, /waiting without restarting or quitting it/);
+  assert.doesNotMatch(supervisorSource, /osascript/);
+  assert.doesNotMatch(supervisorSource, /--launch/);
+  assert.doesNotMatch(supervisorSource, /tell application/);
+});
+
 test("attach reconciles the renderer against a hashed current injection source", () => {
   assert.match(source, /createHash\("sha256"\)/);
   assert.match(source, /__CODEX_TASKBOARD_SOURCE_HASH__/);
@@ -86,7 +135,7 @@ test("the injector ignores auxiliary Codex windows", () => {
   assert.match(source, /!target\.url\?\.includes\("initialRoute=%2Favatar-overlay"\)/);
 });
 
-test("a completed web build refreshes an already-open Codex iframe", () => {
+test("a completed web build reloads the current injection source and iframe", () => {
   assert.match(packageJson.scripts.build, /--refresh-if-running/);
   assert.match(packageJson.scripts["codex:refresh"], /--refresh/);
   assert.match(source, /async function refreshTaskboardFrames/);
@@ -100,4 +149,10 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
 test("the injected iframe follows the configured local service port", () => {
   assert.match(source, /const taskboardPageUrl = `\$\{taskboardOrigin\}\/\?host=codex`/);
   assert.match(source, /window\.__CODEX_TASKBOARD_URL__ = \$\{JSON\.stringify\(taskboardPageUrl\)\}/);
+});
+
+test("an open Taskboard remounts on its existing surface when Codex has no native thread frame", () => {
+  assert.match(injectionSource, /const existingSurface = page\.parentElement\?\.closest\?\.\("main"\)/);
+  assert.match(injectionSource, /const surface = mount\?\.surface \|\| existingSurface/);
+  assert.match(injectionSource, /if \(!surface\) return/);
 });

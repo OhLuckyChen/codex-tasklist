@@ -47,7 +47,6 @@ export function HiddenColumns({
       <div className="hidden-columns-list" id="hidden-columns-list" hidden={!open}>
         {statuses.map((status) => {
           const details = STATUS_DETAILS[status];
-          const canShow = counts[status] > 0;
           return (
             <div
               className={`hidden-column-item status-${status}${dropTarget === status ? " is-drop-target" : ""}`}
@@ -68,36 +67,24 @@ export function HiddenColumns({
               }}
               onDrop={(event) => dropTask(event, status)}
             >
-              {canShow ? (
-                <button
-                  type="button"
-                  className="hidden-column-show"
-                  aria-label={`显示${details.label}列`}
-                  onClick={() => onShow(status)}
-                >
-                  <span className={`status-icon status-icon-${details.tone}`}>
-                    <StatusIcon status={status} />
-                  </span>
-                  <strong>{details.label}</strong>
-                  <span className="hidden-column-count">{counts[status]}</span>
-                </button>
-              ) : (
-                <div className="hidden-column-show is-empty">
-                  <span className={`status-icon status-icon-${details.tone}`}>
-                    <StatusIcon status={status} />
-                  </span>
-                  <strong>{details.label}</strong>
-                  <span className="hidden-column-count">{counts[status]}</span>
-                </div>
-              )}
-              {canShow && (
-                <ColumnVisibilityMenu
-                  label={details.label}
-                  action="show"
-                  className="icon-button hidden-column-menu"
-                  onAction={() => onShow(status)}
-                />
-              )}
+              <button
+                type="button"
+                className={`hidden-column-show${counts[status] === 0 ? " is-empty" : ""}`}
+                aria-label={`显示${details.label}列`}
+                onClick={() => onShow(status)}
+              >
+                <span className={`status-icon status-icon-${details.tone}`}>
+                  <StatusIcon status={status} />
+                </span>
+                <strong>{details.label}</strong>
+                <span className="hidden-column-count">{counts[status]}</span>
+              </button>
+              <ColumnVisibilityMenu
+                label={details.label}
+                action="show"
+                className="icon-button hidden-column-menu"
+                onAction={() => onShow(status)}
+              />
             </div>
           );
         })}

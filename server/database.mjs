@@ -203,7 +203,7 @@ export class TaskboardDatabase {
         title TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL CHECK (status IN (
-          'backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled'
+          'backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled', 'archived'
         )),
         priority TEXT NOT NULL CHECK (priority IN ('none', 'urgent', 'high', 'medium', 'low')),
         labels TEXT NOT NULL DEFAULT '[]',
@@ -232,6 +232,13 @@ export class TaskboardDatabase {
 
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
         ON tasks(project_id, archived_at, status, sort_order, created_at);
+
+      CREATE TABLE IF NOT EXISTS task_threads (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL,
+        linked_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, thread_id)
+      );
 
       CREATE TABLE IF NOT EXISTS comments (
         id TEXT PRIMARY KEY,
@@ -405,6 +412,7 @@ export class TaskboardDatabase {
         throw error;
       }
     }
+    this.#migrateArchivedStatus();
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
         ON tasks(project_id, archived_at, status, sort_order, created_at)
@@ -449,10 +457,11 @@ export class TaskboardDatabase {
       WHERE author_id = 'local'
     `);
 
-    const hasTaskThreads = this.database.prepare(`
-      SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_threads'
-    `).get();
-    if (hasTaskThreads) {
+    const taskThreadColumns = this.database.prepare("PRAGMA table_info(task_threads)").all();
+    if (
+      taskThreadColumns.some((column) => column.name === "created_at")
+      && !taskThreadColumns.some((column) => column.name === "linked_at")
+    ) {
       this.database.exec(`
         UPDATE tasks
         SET thread_id = COALESCE(thread_id, (
@@ -460,20 +469,35 @@ export class TaskboardDatabase {
           FROM task_threads
           WHERE task_threads.task_id = tasks.id
           ORDER BY
-            CASE WHEN EXISTS (
-              SELECT 1
-              FROM comments
-              WHERE comments.task_id = tasks.id
-                AND comments.thread_id = task_threads.thread_id
+            CASE WHEN task_threads.thread_id IN (
+              SELECT comments.thread_id FROM comments
+              WHERE comments.task_id = task_threads.task_id
             ) THEN 1 ELSE 0 END,
             task_threads.created_at DESC,
             task_threads.thread_id DESC
           LIMIT 1
         ))
-        WHERE thread_id IS NULL
+        WHERE thread_id IS NULL;
+        ALTER TABLE task_threads RENAME TO legacy_task_threads;
+        CREATE TABLE task_threads (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          thread_id TEXT NOT NULL,
+          linked_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, thread_id)
+        );
+        INSERT INTO task_threads (task_id, thread_id, linked_at)
+        SELECT task_id, thread_id, created_at FROM legacy_task_threads;
+        DROP TABLE legacy_task_threads;
       `);
-      this.database.exec("DROP TABLE task_threads");
     }
+    this.database.exec(`
+      CREATE INDEX IF NOT EXISTS task_threads_task_linked
+        ON task_threads(task_id, linked_at DESC, thread_id);
+      INSERT OR IGNORE INTO task_threads (task_id, thread_id, linked_at)
+      SELECT id, thread_id, updated_at FROM tasks WHERE thread_id IS NOT NULL;
+      INSERT OR IGNORE INTO task_threads (task_id, thread_id, linked_at)
+      SELECT task_id, thread_id, updated_at FROM comments WHERE thread_id IS NOT NULL;
+    `);
 
     const attachmentColumns = this.database.prepare("PRAGMA table_info(attachments)").all();
     if (!attachmentColumns.some((column) => column.name === "comment_id")) {
@@ -563,6 +587,90 @@ export class TaskboardDatabase {
     }
   }
 
+  #migrateArchivedStatus() {
+    const tasksSql = this.database.prepare(`
+      SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'tasks'
+    `).get()?.sql ?? "";
+    if (tasksSql.includes("'archived'")) {
+      this.database.exec(`
+        UPDATE tasks SET status = 'archived' WHERE archived_at IS NOT NULL AND status != 'archived'
+      `);
+      return;
+    }
+
+    this.database.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE tasks_archived_status_migration (
+          id TEXT PRIMARY KEY,
+          identifier TEXT NOT NULL UNIQUE,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK (status IN (
+            'backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled', 'archived'
+          )),
+          priority TEXT NOT NULL CHECK (priority IN ('none', 'urgent', 'high', 'medium', 'low')),
+          labels TEXT NOT NULL DEFAULT '[]',
+          sort_order REAL NOT NULL,
+          thread_id TEXT,
+          creator_type TEXT NOT NULL DEFAULT 'user',
+          creator_id TEXT NOT NULL DEFAULT 'local-user',
+          creator_name TEXT NOT NULL DEFAULT '本地用户',
+          creator_avatar_url TEXT,
+          assignee_type TEXT NOT NULL DEFAULT 'user' CHECK (assignee_type IN ('user', 'agent')),
+          assignee_id TEXT NOT NULL DEFAULT 'local-user',
+          assignee_name TEXT NOT NULL DEFAULT '本地用户',
+          assignee_avatar_url TEXT,
+          workflow_id TEXT,
+          git_branch TEXT,
+          worktree_path TEXT,
+          worktree_branch TEXT,
+          due_date TEXT,
+          recurrence_interval INTEGER,
+          recurrence_unit TEXT,
+          archived_at TEXT,
+          version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO tasks_archived_status_migration (
+          id, identifier, project_id, title, description, status, priority, labels,
+          sort_order, thread_id, creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        )
+        SELECT
+          id, identifier, project_id, title, description,
+          CASE WHEN archived_at IS NOT NULL THEN 'archived' ELSE status END,
+          priority, labels, sort_order, thread_id,
+          creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        FROM tasks;
+
+        DROP TABLE tasks;
+        ALTER TABLE tasks_archived_status_migration RENAME TO tasks;
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
+    }
+
+    const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+    if (violation) {
+      throw new Error(`Archived status migration produced a foreign key violation in '${violation.table}'`);
+    }
+  }
+
   listProjects() {
     return this.database.prepare(`
       SELECT
@@ -575,7 +683,7 @@ export class TaskboardDatabase {
       FROM projects
       LEFT JOIN tasks
         ON tasks.project_id = projects.id
-        AND tasks.archived_at IS NULL
+        AND tasks.status != 'archived'
       GROUP BY
         projects.id,
         projects.name,
@@ -614,7 +722,7 @@ export class TaskboardDatabase {
       FROM projects
       LEFT JOIN tasks
         ON tasks.project_id = projects.id
-        AND tasks.archived_at IS NULL
+        AND tasks.status != 'archived'
       WHERE projects.id = ?
       GROUP BY
         projects.id,
@@ -940,6 +1048,7 @@ export class TaskboardDatabase {
           WHEN 'blocked' THEN 5
           WHEN 'done' THEN 6
           WHEN 'canceled' THEN 7
+          WHEN 'archived' THEN 8
         END,
         sort_order,
         created_at,
@@ -972,7 +1081,7 @@ export class TaskboardDatabase {
         const row = this.database.prepare(`
           SELECT COALESCE(MAX(sort_order), 0) AS maximum
           FROM tasks
-          WHERE project_id = ? AND status = ? AND archived_at IS NULL
+          WHERE project_id = ? AND status = ?
         `).get(input.projectId, input.status);
         sortOrder = row.maximum + 1000;
       }
@@ -988,7 +1097,7 @@ export class TaskboardDatabase {
           workflow_id, git_branch, worktree_path, worktree_branch,
           due_date, recurrence_interval, recurrence_unit,
           archived_at, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       `).run(
         id,
         identifier,
@@ -1015,9 +1124,11 @@ export class TaskboardDatabase {
         input.dueDate,
         input.recurrence?.interval ?? null,
         input.recurrence?.unit ?? null,
+        input.status === "archived" ? timestamp : null,
         timestamp,
         timestamp,
       );
+      this.#linkTaskThread(id, input.threadId, timestamp);
       this.database.exec("COMMIT");
       return this.getTask(id);
     } catch (error) {
@@ -1046,6 +1157,7 @@ export class TaskboardDatabase {
     };
     const assignments = [];
     const values = [];
+    const timestamp = now();
     for (const [key, value] of Object.entries(changes)) {
       if (key === "developmentContext") {
         assignments.push("git_branch = ?", "worktree_path = ?", "worktree_branch = ?");
@@ -1074,12 +1186,15 @@ export class TaskboardDatabase {
       assignments.push(`${columns[key]} = ?`);
       values.push(key === "labels" ? JSON.stringify(value) : value);
     }
+    if (Object.hasOwn(changes, "status")) {
+      assignments.push("archived_at = CASE WHEN ? = 'archived' THEN COALESCE(archived_at, ?) ELSE NULL END");
+      values.push(changes.status, timestamp);
+    }
     if (threadId !== undefined) {
       assignments.push("thread_id = ?");
       values.push(threadId);
     }
     assignments.push("version = version + 1", "updated_at = ?");
-    const timestamp = now();
     values.push(timestamp, current.id, version);
 
     this.database.exec("BEGIN IMMEDIATE");
@@ -1090,6 +1205,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1101,14 +1217,11 @@ export class TaskboardDatabase {
   moveTask(id, version, status, sortOrder, threadId) {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
-    if (current.archivedAt !== null) {
-      throw new ApiError(409, "TASK_ARCHIVED", "Archived tasks cannot be moved");
-    }
     if (sortOrder === undefined) {
       const row = this.database.prepare(`
         SELECT COALESCE(MAX(sort_order), 0) AS maximum
         FROM tasks
-        WHERE project_id = ? AND status = ? AND archived_at IS NULL AND id != ?
+        WHERE project_id = ? AND status = ? AND id != ?
       `).get(current.projectId, status, current.id);
       sortOrder = row.maximum + 1000;
     }
@@ -1118,12 +1231,15 @@ export class TaskboardDatabase {
     try {
       const result = this.database.prepare(`
         UPDATE tasks
-        SET status = ?, sort_order = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        SET status = ?, sort_order = ?,
+            archived_at = CASE WHEN ? = 'archived' THEN COALESCE(archived_at, ?) ELSE NULL END,
+            thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(status, sortOrder, threadId ?? null, timestamp, current.id, version);
+      `).run(status, sortOrder, status, timestamp, threadId ?? null, timestamp, current.id, version);
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1136,16 +1252,22 @@ export class TaskboardDatabase {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
     const timestamp = now();
+    const sortOrder = this.database.prepare(`
+      SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_order
+      FROM tasks WHERE project_id = ? AND status = 'archived' AND id != ?
+    `).get(current.projectId, current.id).next_order;
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const result = this.database.prepare(`
         UPDATE tasks
-        SET archived_at = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        SET status = 'archived', sort_order = ?, archived_at = COALESCE(archived_at, ?),
+            thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(timestamp, threadId ?? null, timestamp, current.id, version);
+      `).run(sortOrder, timestamp, threadId ?? null, timestamp, current.id, version);
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1157,20 +1279,26 @@ export class TaskboardDatabase {
   restoreTask(id, version, threadId) {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
-    if (current.archivedAt === null) {
+    if (current.status !== "archived") {
       throw new ApiError(409, "TASK_NOT_ARCHIVED", "Only archived tasks can be restored");
     }
     const timestamp = now();
+    const sortOrder = this.database.prepare(`
+      SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_order
+      FROM tasks WHERE project_id = ? AND status = 'todo' AND id != ?
+    `).get(current.projectId, current.id).next_order;
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const result = this.database.prepare(`
         UPDATE tasks
-        SET archived_at = NULL, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        SET status = 'todo', sort_order = ?, archived_at = NULL,
+            thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(threadId ?? null, timestamp, current.id, version);
+      `).run(sortOrder, threadId ?? null, timestamp, current.id, version);
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
+      this.#linkTaskThread(current.id, threadId, timestamp);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1280,23 +1408,31 @@ export class TaskboardDatabase {
     const task = this.#requireTask(taskId);
     const id = randomUUID();
     const timestamp = now();
-    this.database.prepare(`
-      INSERT INTO comments (
-        id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
-        version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(
-      id,
-      task.id,
-      input.body,
-      input.threadId ?? null,
-      input.actor.type,
-      input.actor.id,
-      input.actor.name,
-      input.actor.avatarUrl,
-      timestamp,
-      timestamp,
-    );
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO comments (
+          id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
+          version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        task.id,
+        input.body,
+        input.threadId ?? null,
+        input.actor.type,
+        input.actor.id,
+        input.actor.name,
+        input.actor.avatarUrl,
+        timestamp,
+        timestamp,
+      );
+      this.#linkTaskThread(task.id, input.threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
     return this.getComment(id);
   }
 
@@ -1308,25 +1444,43 @@ export class TaskboardDatabase {
   updateComment(id, version, body, threadId) {
     const current = this.#requireComment(id);
     this.#requireCommentVersion(current, version);
-    const result = this.database.prepare(`
-      UPDATE comments
-      SET body = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
-      WHERE id = ? AND version = ?
-    `).run(body, threadId ?? null, now(), id, version);
-    if (result.changes !== 1) {
-      this.#throwMissingCommentOrConflict(id, version);
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        UPDATE comments
+        SET body = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(body, threadId ?? null, timestamp, id, version);
+      if (result.changes !== 1) {
+        this.#throwMissingCommentOrConflict(id, version);
+      }
+      this.#linkTaskThread(current.taskId, threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
     }
     return this.getComment(id);
   }
 
-  deleteComment(id, version) {
+  deleteComment(id, version, threadId) {
     const current = this.#requireComment(id);
     this.#requireCommentVersion(current, version);
-    const result = this.database.prepare(`
-      DELETE FROM comments WHERE id = ? AND version = ?
-    `).run(id, version);
-    if (result.changes !== 1) {
-      this.#throwMissingCommentOrConflict(id, version);
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        DELETE FROM comments WHERE id = ? AND version = ?
+      `).run(id, version);
+      if (result.changes !== 1) {
+        this.#throwMissingCommentOrConflict(id, version);
+      }
+      this.#linkTaskThread(current.taskId, threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
     }
     return current;
   }
@@ -1408,6 +1562,12 @@ export class TaskboardDatabase {
 
   #taskWithRelations(row) {
     const task = taskFromRow(row);
+    task.threadIds = this.database.prepare(`
+      SELECT thread_id
+      FROM task_threads
+      WHERE task_id = ?
+      ORDER BY CASE WHEN thread_id = ? THEN 0 ELSE 1 END, linked_at DESC, thread_id DESC
+    `).all(task.id, task.threadId).map((item) => item.thread_id);
     const parent = this.database.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1518,14 +1678,25 @@ export class TaskboardDatabase {
   }
 
   #touchTask(id, version, threadId) {
+    const timestamp = now();
     const result = this.database.prepare(`
       UPDATE tasks
       SET thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
       WHERE id = ? AND version = ?
-    `).run(threadId ?? null, now(), id, version);
+    `).run(threadId ?? null, timestamp, id, version);
     if (result.changes !== 1) {
       this.#throwMissingOrConflict(id, version);
     }
+    this.#linkTaskThread(id, threadId, timestamp);
+  }
+
+  #linkTaskThread(taskId, threadId, linkedAt) {
+    if (threadId === undefined || threadId === null) return;
+    this.database.prepare(`
+      INSERT INTO task_threads (task_id, thread_id, linked_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(task_id, thread_id) DO UPDATE SET linked_at = excluded.linked_at
+    `).run(taskId, threadId, linkedAt);
   }
 
   #requireTask(id) {

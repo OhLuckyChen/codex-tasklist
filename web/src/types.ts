@@ -6,6 +6,7 @@ export const TASK_STATUSES = [
   "blocked",
   "done",
   "canceled",
+  "archived",
 ] as const;
 export const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"] as const;
 
@@ -203,6 +204,7 @@ export interface Task {
   labels: string[];
   sortOrder: number;
   threadId: string | null;
+  threadIds: string[];
   creatorType: ActorType;
   creatorId: string;
   creatorName: string;

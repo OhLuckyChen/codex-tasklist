@@ -16,6 +16,7 @@ export const STATUS_DETAILS: Record<
   blocked: { label: "已阻塞", tone: "blocked" },
   done: { label: "完成", tone: "done" },
   canceled: { label: "已取消", tone: "canceled" },
+  archived: { label: "归档", tone: "archived" },
 };
 
 export function StatusIcon({ status }: { status: TaskStatus }) {
@@ -135,14 +136,12 @@ export function BoardColumn({
           <span className="task-count" aria-label={`${tasks.length} 个议题`}>{tasks.length}</span>
         </div>
         <div className="column-actions">
-          {tasks.length > 0 && (
-            <ColumnVisibilityMenu
-              label={details.label}
-              action="hide"
-              className="icon-button column-menu"
-              onAction={() => onHide(status)}
-            />
-          )}
+          <ColumnVisibilityMenu
+            label={details.label}
+            action="hide"
+            className="icon-button column-menu"
+            onAction={() => onHide(status)}
+          />
           <button
             type="button"
             className="icon-button add-task-button"

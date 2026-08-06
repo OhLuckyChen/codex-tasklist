@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import path from "node:path";
 
 import { resolvePort } from "../server/app.mjs";
@@ -18,6 +19,7 @@ import {
   restartResidentInjector,
 } from "./codex-injector-runtime.mjs";
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
+import { resolveCodexSessionByMarker } from "./codex-session-resolver.mjs";
 
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
@@ -92,7 +94,7 @@ function parseArgs(argv) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(1_500) });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json();
 }
@@ -119,6 +121,11 @@ function startTaskboard({ detached }) {
   return spawn(process.execPath, [path.join(projectRoot, "server", "index.mjs")], {
     cwd: projectRoot,
     detached,
+    env: {
+      ...process.env,
+      CODEX_TASKBOARD_HOST: "127.0.0.1",
+      CODEX_TASKBOARD_PORT: String(resolvePort()),
+    },
     stdio: detached ? "ignore" : "inherit",
   });
 }
@@ -204,6 +211,7 @@ function launchCodex(appPath, port) {
       "-a",
       appPath,
       "--args",
+      "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${port}`,
       `--remote-allow-origins=http://127.0.0.1:${port}`,
     ],
@@ -966,6 +974,15 @@ async function installTaskboardHostBinding(cdp, supervisor) {
       prefill: (request, executionContextId) => (
         prefillTaskComposerViaCdp(cdp, executionContextId, request)
       ),
+      resolveTaskThread: async (request) => {
+        const sessionsRoot = path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions");
+        const threadId = await resolveCodexSessionByMarker({
+          sessionsRoot,
+          marker: request.marker,
+          startedAt: request.startedAt,
+        });
+        return threadId ? { status: "resolved", threadId } : { status: "pending" };
+      },
       sendResponse: (executionContextId, response) => (
         sendHostResponse(cdp, executionContextId, response)
       ),
@@ -976,13 +993,18 @@ async function installTaskboardHostBinding(cdp, supervisor) {
 }
 
 async function publishHostHeartbeat(cdp, startupToken) {
-  await cdp.send("Runtime.evaluate", {
-    expression: `(() => {
-      window[${JSON.stringify(hostHeartbeatName)}] = Date.now();
-      window[${JSON.stringify(hostStartupTokenName)}] = ${JSON.stringify(startupToken)};
-    })()`,
-    returnByValue: true,
-  });
+  await Promise.race([
+    cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        window[${JSON.stringify(hostHeartbeatName)}] = Date.now();
+        window[${JSON.stringify(hostStartupTokenName)}] = ${JSON.stringify(startupToken)};
+      })()`,
+      returnByValue: true,
+    }),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("CDP heartbeat timed out")), 1_500);
+    }),
+  ]);
 }
 
 async function readInjectionStatus(cdp) {
@@ -1233,7 +1255,7 @@ async function main() {
     const refreshed = [];
     for (const port of ports) {
       if (!(await isReachable(`http://127.0.0.1:${port}/json/version`))) continue;
-      if (options.refreshIfRunning) await restartResidentInjectorForRefresh(port);
+      await restartResidentInjectorForRefresh(port);
       const results = await refreshTaskboardFrames(port);
       refreshed.push(...results.map((result) => ({ port, ...result })));
     }
@@ -1307,10 +1329,13 @@ async function main() {
       } catch (error) {
         console.error(`Waiting for Taskboard service: ${error.message}`);
       }
-      for (const connection of injectedTargets.values()) {
+      for (const [targetId, connection] of injectedTargets) {
         try {
           await publishHostHeartbeat(connection, options.startupToken);
-        } catch (_) {}
+        } catch (_) {
+          connection.close();
+          injectedTargets.delete(targetId);
+        }
       }
       try {
         const results = await injectAll(

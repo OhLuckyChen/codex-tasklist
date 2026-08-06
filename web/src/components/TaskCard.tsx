@@ -11,6 +11,14 @@ const PRIORITY_LABELS: Record<TaskPriority, string> = {
   low: "低优先级",
 };
 
+function descriptionPreview(description: string) {
+  return description
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 interface TaskCardProps {
   task: Task;
   statusIndex: number;
@@ -48,8 +56,9 @@ export function TaskCard({
   const subIssueTotal = task.relations.subIssues.length;
   const completedSubIssues = task.relations.subIssues.filter((issue) => issue.status === "done").length;
   const activeBlockers = task.relations.blockedBy.filter((issue) => (
-    issue.status !== "done" && issue.status !== "canceled"
+    issue.status !== "done" && issue.status !== "canceled" && issue.status !== "archived"
   )).length;
+  const preview = descriptionPreview(task.description);
 
   function stopThen(callback: () => void) {
     return (event: MouseEvent<HTMLButtonElement>) => {
@@ -124,6 +133,8 @@ export function TaskCard({
       </div>
 
       <h3 id={`task-${task.id}-title`}>{task.title}</h3>
+
+      {preview && <p className="card-description">{preview}</p>}
 
       <div className="card-properties" aria-label="议题属性">
         <span className={`priority-icon priority-icon-${task.priority}`} title={PRIORITY_LABELS[task.priority]}>

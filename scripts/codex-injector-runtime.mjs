@@ -2,7 +2,7 @@ const HOST_REQUEST_ERROR = "自动认领配置暂时无法应用，请刷新后�
 const AUTOMATION_SCHEMA_DIAGNOSTIC = "AUTOMATION_SCHEMA_MISMATCH";
 
 function parseHostRequest(payload, parseAutomationRequest) {
-  if (typeof payload !== "string" || payload.length > 4_096) {
+  if (typeof payload !== "string" || payload.length > 16_384) {
     return { id: null, request: null, error: HOST_REQUEST_ERROR };
   }
 
@@ -20,6 +20,16 @@ function parseHostRequest(payload, parseAutomationRequest) {
   ) ? request.id : null;
   if (!id) return { id: null, request: null, error: HOST_REQUEST_ERROR };
   if (request.action === "ensure") return { id, request, error: null };
+  if (
+    request.action === "resolve-task-thread"
+    && typeof request.marker === "string"
+    && request.marker.length >= 8
+    && request.marker.length <= 200
+    && Number.isFinite(request.startedAt)
+    && request.startedAt > 0
+  ) {
+    return { id, request, error: null };
+  }
   if (request.action === "automation") {
     const parsed = parseAutomationRequest(request);
     return parsed
@@ -35,7 +45,7 @@ function parseHostRequest(payload, parseAutomationRequest) {
     request.action === "prefill-task-composer"
     && typeof request.instruction === "string"
     && request.instruction.length > 0
-    && request.instruction.length <= 1_024
+    && request.instruction.length <= 8_192
     && typeof request.skillName === "string"
     && /^[a-z0-9][a-z0-9-]{0,79}$/i.test(request.skillName)
     && typeof request.skillDisplayName === "string"
@@ -69,6 +79,8 @@ export async function handleHostBindingPayload(params, handlers) {
       result = await handlers.ensure();
     } else if (parsed.request.action === "automation") {
       result = await handlers.runAutomation(parsed.request, params.executionContextId);
+    } else if (parsed.request.action === "resolve-task-thread") {
+      result = await handlers.resolveTaskThread(parsed.request);
     } else {
       result = await handlers.prefill(parsed.request, params.executionContextId);
     }

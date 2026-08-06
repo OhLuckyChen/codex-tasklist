@@ -191,7 +191,7 @@ test("issue create reads a description file and parses labels", async () => {
     projectId: "local",
     title: "Fix auth",
     description: "Acceptance criteria",
-    status: "backlog",
+    status: "todo",
     priority: "none",
     labels: ["bug", "auth"],
     threadId: "thread-current",

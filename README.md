@@ -57,12 +57,25 @@ The Skill teaches Codex to inspect an issue, move it to `in_progress`, use optim
 
 ## Embed in Codex
 
+### Recommended on macOS: persistent Dock launcher
+
+Install the login supervisor and replace the ordinary Codex Dock entry with the Taskboard launcher:
+
+```bash
+./scripts/install-macos-launcher.sh
+```
+
+The installer keeps the official Codex application unchanged. The Dock launcher starts it with CDP bound to `127.0.0.1:9229`, while a passive `LaunchAgent` attaches the resident injector and restores the Taskboard entry. The supervisor never quits or restarts Codex. If Codex was already open during installation, quit it once and then use the new **Codex Taskboard** Dock entry. The same entry must be used after logging in or rebooting. Clicking that Dock entry while Codex is already open also runs a fresh one-shot injection, so it doubles as the manual **Restore Taskboard** action.
+
+The installer backs up the pre-install Dock preferences to `.data/com.apple.dock.before-codex-taskboard.plist`. Task data remains in `.data/taskboard.sqlite`.
+
 ### Recommended: keep your current window and open a separate Taskboard window
 
 Keep the existing Codex window open. From the Taskboard repository, start a second Codex instance with a dedicated CDP port:
 
 ```bash
 open -n -a /Applications/ChatGPT.app --args \
+  --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9231 \
   --remote-allow-origins=http://127.0.0.1:9231
 ```
@@ -98,7 +111,7 @@ This command also stays resident so the injected tab can restart Taskboard after
 
 The script adds a Taskboard entry to the Codex sidebar and renders the iframe across Codex's complete main workspace, including the contextual titlebar area so Taskboard's own header does not leave an empty strip. That full rectangular header is placed above Electron's draggable layer and marked `no-drag`; because the native contextual actions are suppressed while Taskboard is active, its own actions use their normal edge padding without an artificial right-side gap. The native sidebar stays mounted, while the previous page selection and contextual header are temporarily suppressed; choosing another Codex page restores them.
 
-“在对话中打开” selects the corresponding native Codex project when one is available and opens an unsent native composer with `$manage-taskboard ISSUE-ID`. A conversation is attributed only after it actually processes the issue: `taskctl` reads Codex's `CODEX_THREAD_ID` and records that ID on the issue or comment mutation. Recorded IDs are clickable through Codex's native route bridge. Each issue can bind either one Git branch or one worktree; the options are scanned from the selected Codex project's repository instead of being typed by hand. The integration uses Codex's existing project, composer, and route markers; it does not patch React, replace `fetch`, load private chunks, or edit Codex data files.
+“在对话中打开” selects the corresponding native Codex project when one is available and opens an unsent native composer with `$manage-taskboard ISSUE-ID`. A conversation is attributed only after it actually processes the issue: `taskctl` reads Codex's `CODEX_THREAD_ID` and records that ID on the issue or comment mutation. Issues keep the most recently linked conversation as the default entry while retaining earlier processing conversations as history. Recorded IDs are clickable through Codex's native route bridge. Each issue can bind either one Git branch or one worktree; the options are scanned from the selected Codex project's repository instead of being typed by hand. The integration uses Codex's existing project, composer, and route markers; it does not patch React, replace `fetch`, load private chunks, or edit Codex data files.
 
 To use a different UI origin, set `window.__CODEX_TASKBOARD_URL__` before the user script runs.
 

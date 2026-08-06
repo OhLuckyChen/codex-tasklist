@@ -89,6 +89,13 @@ export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
   return data.projects;
 }
 
+export async function chooseLocalDirectory(): Promise<string | null> {
+  const data = await request<{ workspacePath: string | null }>("/api/local/directory-picker", {
+    method: "POST",
+  });
+  return data.workspacePath;
+}
+
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
   return request<TaskboardMetadata>("/api/meta", { signal });
 }
@@ -253,7 +260,7 @@ export async function saveWorkflowWorkspace<T>(
 }
 
 export async function createProject(input: {
-  id: string;
+  id?: string;
   name: string;
   workspacePath: string | null;
 }): Promise<Project> {
@@ -283,7 +290,7 @@ export async function listDevelopmentContexts(
 }
 
 export async function listTasks(projectId: string, signal?: AbortSignal): Promise<Task[]> {
-  const params = new URLSearchParams({ projectId, archived: "false" });
+  const params = new URLSearchParams({ projectId, archived: "all" });
   const data = await request<{ tasks: Task[] }>(`/api/tasks?${params}`, { signal });
   return data.tasks;
 }
@@ -385,7 +392,12 @@ export async function listComments(taskId: string, signal?: AbortSignal): Promis
     `/api/tasks/${encodeURIComponent(taskId)}/comments`,
     { signal },
   );
-  return data.comments;
+  return Array.isArray(data.comments)
+    ? data.comments.map((comment) => ({
+        ...comment,
+        attachments: Array.isArray(comment.attachments) ? comment.attachments : [],
+      }))
+    : [];
 }
 
 export async function createComment(taskId: string, body: string, threadId?: string): Promise<Comment> {
@@ -396,7 +408,10 @@ export async function createComment(taskId: string, body: string, threadId?: str
       body: JSON.stringify({ body, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.comment;
+  return {
+    ...data.comment,
+    attachments: Array.isArray(data.comment.attachments) ? data.comment.attachments : [],
+  };
 }
 
 export async function updateComment(comment: Comment, body: string, threadId?: string): Promise<Comment> {
@@ -407,7 +422,10 @@ export async function updateComment(comment: Comment, body: string, threadId?: s
       body: JSON.stringify({ version: comment.version, body, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.comment;
+  return {
+    ...data.comment,
+    attachments: Array.isArray(data.comment.attachments) ? data.comment.attachments : [],
+  };
 }
 
 export async function deleteComment(comment: Comment, threadId?: string): Promise<void> {

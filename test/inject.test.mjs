@@ -251,7 +251,8 @@ test("issues open an unsent native Codex composer in the exact workspace with a 
 });
 
 test("the standalone web page opens linked Codex tasks through the app deep link", () => {
-  assert.match(webApp, /window\.location\.assign\(`codex:\/\/threads\/\$\{encodeURIComponent\(threadId\.trim\(\)\)\}`\)/);
+  assert.match(webApp, /const normalizedThreadId = normalizeCodexThreadId\(threadId\)/);
+  assert.match(webApp, /window\.location\.assign\(`codex:\/\/threads\/\$\{encodeURIComponent\(normalizedThreadId\)\}`\)/);
 });
 
 test("the injected app opens an existing local Codex task instead of a new composer", () => {
@@ -260,6 +261,7 @@ test("the injected app opens an existing local Codex task instead of a new compo
     source.indexOf("function projectRowById"),
   );
   assert.match(openThreadSource, /if \(row\?\.isConnected\) \{\s*row\.click\?\.\(\);\s*return;/);
+  assert.match(openThreadSource, /if \(!normalizedThreadId\) return/);
   assert.match(openThreadSource, /await dispatchHostMessage\(\{\s*type: "navigate-to-route",\s*path: routeForThread\(normalizedThreadId\)/);
   assert.match(source, /return `\/local\/\$\{encodeURIComponent\(threadId\)\}`/);
   assert.doesNotMatch(source, /return `\/thread\/\$\{encodeURIComponent\(threadId\)\}`/);

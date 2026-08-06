@@ -105,8 +105,9 @@ export function matchesTaskFilters(
   ) {
     return false;
   }
-  if (omit !== "link" && filters.link === "linked" && !task.threadId) return false;
-  if (omit !== "link" && filters.link === "unlinked" && task.threadId) return false;
+  const hasLinkedThread = Boolean(task.threadId) || (task.threadIds?.length ?? 0) > 0;
+  if (omit !== "link" && filters.link === "linked" && !hasLinkedThread) return false;
+  if (omit !== "link" && filters.link === "unlinked" && hasLinkedThread) return false;
 
   if (omit !== "content") {
     const content = filters.content.trim().toLowerCase();

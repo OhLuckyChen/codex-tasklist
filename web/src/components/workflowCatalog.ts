@@ -61,6 +61,7 @@ export const ISSUE_STATUSES = [
   { value: "blocked", label: "已阻塞" },
   { value: "done", label: "完成" },
   { value: "canceled", label: "已取消" },
+  { value: "archived", label: "归档" },
 ] as const;
 
 export const ISSUE_PRIORITIES = [
