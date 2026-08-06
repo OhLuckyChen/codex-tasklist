@@ -125,7 +125,7 @@ test("the injector ignores auxiliary Codex windows", () => {
   assert.match(source, /!target\.url\?\.includes\("initialRoute=%2Favatar-overlay"\)/);
 });
 
-test("a completed web build refreshes an already-open Codex iframe", () => {
+test("a completed web build reloads the current injection source and iframe", () => {
   assert.match(packageJson.scripts.build, /--refresh-if-running/);
   assert.match(packageJson.scripts["codex:refresh"], /--refresh/);
   assert.match(source, /async function refreshTaskboardFrames/);
@@ -133,7 +133,7 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
   assert.match(source, /--remote-debugging-port=/);
   assert.match(source, /taskboard\.reloadFrame\(\)/);
   assert.match(source, /__codex_taskboard_refresh/);
-  assert.doesNotMatch(source, /if \(options\.refreshIfRunning\) await restartResidentInjectorForRefresh\(port\)/);
+  assert.match(source, /await restartResidentInjectorForRefresh\(port\)/);
 });
 
 test("the injected iframe follows the configured local service port", () => {

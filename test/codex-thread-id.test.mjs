@@ -29,11 +29,19 @@ test("temporary and encoded client thread ids are never accepted", () => {
   assert.equal(isCodexThreadId("thread-123"), false);
 });
 
-test("new task conversations never fall back to the previously active thread", () => {
-  assert.match(injectionSource, /const activePendingThreadId = normalizeThreadId\(/);
-  assert.match(injectionSource, /threadId: activePendingThreadId/);
+test("new task conversations bind only a stable UUID absent from the creation snapshot", () => {
+  assert.match(injectionSource, /const knownThreadIds = new Set\(pendingTaskThreadLink\.knownThreadIds\)/);
+  assert.match(injectionSource, /!pendingTaskThreadLink\.knownThreadRows\.includes\(row\)/);
+  assert.match(injectionSource, /candidateThreadRow/);
+  assert.match(injectionSource, /data-app-action-sidebar-thread-id/);
+  assert.match(injectionSource, /candidateSeenCount >= 3/);
+  assert.match(injectionSource, /ambiguitySeenCount >= 3/);
+  assert.match(injectionSource, /检测到多个新会话，未自动关联/);
+  assert.match(injectionSource, /threadId: candidateThreadId/);
+  assert.match(injectionSource, /requestId: pendingTaskThreadLink\.requestId/);
   assert.match(injectionSource, /commentId: pendingTaskThreadLink\.commentId \|\| undefined/);
-  assert.match(injectionSource, /activePendingThreadId !== pendingTaskThreadLink\.previousThreadId/);
+  assert.doesNotMatch(injectionSource, /taskContextVisible/);
+  assert.doesNotMatch(injectionSource, /activePendingThreadId/);
   assert.doesNotMatch(
     injectionSource,
     /if \(pendingTaskThreadLink && payload\.threadId\)/,

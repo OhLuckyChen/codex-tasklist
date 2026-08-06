@@ -72,6 +72,7 @@
   let openGeneration = 0;
   let pendingThreadCreation = null;
   let pendingTaskThreadLink = null;
+  let pendingThreadCheckTimer = null;
   let lastNativeThreadId = "";
   let active = false;
   let destroyed = false;
@@ -610,27 +611,83 @@
     postToFrame({ type: "taskboard:host-context", payload });
     postToFrame({ type: "taskboard:theme", theme: payload.theme });
     if (pendingTaskThreadLink) {
-      const activePendingThreadId = normalizeThreadId(
-        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
-      ) || normalizeThreadId(threadIdFromLocation());
-      const currentThread = (payload.threads || [])
-        .find((thread) => thread.id === activePendingThreadId);
-      const identifier = normalizedLabel(pendingTaskThreadLink.identifier);
-      const taskContextVisible = normalizedLabel(findPageMount()?.surface?.textContent).includes(identifier);
-      if (
-        activePendingThreadId
-        && activePendingThreadId !== pendingTaskThreadLink.previousThreadId
-        && (normalizedLabel(currentThread?.title).includes(identifier) || taskContextVisible)
-      ) {
+      const knownThreadIds = new Set(pendingTaskThreadLink.knownThreadIds);
+      const currentThreadRows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
+      const newlyCreatedRows = currentThreadRows
+        .filter((row) => !pendingTaskThreadLink.knownThreadRows.includes(row));
+      if (pendingTaskThreadLink.candidateThreadRow?.isConnected !== true) {
+        pendingTaskThreadLink.candidateThreadRow = newlyCreatedRows.length === 1
+          ? newlyCreatedRows[0]
+          : null;
+      }
+      const newRowThreadId = normalizeThreadId(
+        pendingTaskThreadLink.candidateThreadRow
+          ?.getAttribute("data-app-action-sidebar-thread-id"),
+      );
+      const routeThreadId = normalizeThreadId(threadIdFromLocation());
+      const candidateThreadId = routeThreadId && !knownThreadIds.has(routeThreadId)
+        ? routeThreadId
+        : newRowThreadId;
+      const ambiguitySignature = (!routeThreadId || knownThreadIds.has(routeThreadId))
+        && newlyCreatedRows.length > 1
+        ? newlyCreatedRows
+          .map((row) => row.getAttribute("data-app-action-sidebar-thread-id") || "")
+          .sort()
+          .join(",")
+        : "";
+
+      if (candidateThreadId) {
+        if (candidateThreadId === pendingTaskThreadLink.candidateThreadId) {
+          pendingTaskThreadLink.candidateSeenCount += 1;
+        } else {
+          pendingTaskThreadLink.candidateThreadId = candidateThreadId;
+          pendingTaskThreadLink.candidateSeenCount = 1;
+        }
+        pendingTaskThreadLink.ambiguitySignature = "";
+        pendingTaskThreadLink.ambiguitySeenCount = 0;
+      } else {
+        pendingTaskThreadLink.candidateThreadId = "";
+        pendingTaskThreadLink.candidateSeenCount = 0;
+        if (ambiguitySignature === pendingTaskThreadLink.ambiguitySignature) {
+          pendingTaskThreadLink.ambiguitySeenCount += 1;
+        } else {
+          pendingTaskThreadLink.ambiguitySignature = ambiguitySignature;
+          pendingTaskThreadLink.ambiguitySeenCount = ambiguitySignature ? 1 : 0;
+        }
+      }
+
+      if (pendingTaskThreadLink.candidateSeenCount >= 3) {
         postToFrame({
           type: "taskboard:thread-created",
           payload: {
+            requestId: pendingTaskThreadLink.requestId,
             taskId: pendingTaskThreadLink.taskId,
             commentId: pendingTaskThreadLink.commentId || undefined,
-            threadId: activePendingThreadId,
+            threadId: candidateThreadId,
           },
         });
         pendingTaskThreadLink = null;
+        if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+        pendingThreadCheckTimer = null;
+      } else if (pendingTaskThreadLink.ambiguitySeenCount >= 3) {
+        postToFrame({
+          type: "taskboard:thread-create-error",
+          payload: {
+            requestId: pendingTaskThreadLink.requestId,
+            taskId: pendingTaskThreadLink.taskId,
+            commentId: pendingTaskThreadLink.commentId || undefined,
+            error: "检测到多个新会话，未自动关联。请在评论中手动选择正确会话。",
+          },
+        });
+        pendingTaskThreadLink = null;
+        if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+        pendingThreadCheckTimer = null;
+      } else if ((candidateThreadId || ambiguitySignature) && pendingThreadCheckTimer === null) {
+        const requestId = pendingTaskThreadLink.requestId;
+        pendingThreadCheckTimer = window.setTimeout(() => {
+          pendingThreadCheckTimer = null;
+          if (pendingTaskThreadLink?.requestId === requestId) postHostContext();
+        }, 120);
       }
     }
   }
@@ -738,6 +795,7 @@
   }
 
   async function createThreadForTask(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
     const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
     const commentId = typeof payload?.commentId === "string" ? payload.commentId.trim() : "";
     const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
@@ -751,24 +809,32 @@
       ? payload.workspacePath.trim()
       : "";
     if (
-      !taskId
+      !requestId
+      || !taskId
       || !identifier
       || !instruction
       || !skillName
       || !skillDisplayName
       || !skillPath
-      || pendingThreadCreation
     ) return;
-    pendingThreadCreation = taskId;
+    if (pendingThreadCreation || pendingTaskThreadLink) {
+      postToFrame({
+        type: "taskboard:thread-create-error",
+        payload: {
+          requestId,
+          taskId,
+          commentId: commentId || undefined,
+          error: "上一条新会话仍在确认中，请完成后再试。",
+        },
+      });
+      return;
+    }
+    pendingThreadCreation = requestId;
     try {
       const bridge = window.electronBridge;
       if (!bridge || typeof bridge.sendMessageFromView !== "function") {
         throw new Error("当前 Codex 版本没有提供原生对话导航能力");
       }
-      const previousThreadId = normalizeThreadId(
-        activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
-      ) || normalizeThreadId(threadIdFromLocation()) || lastNativeThreadId;
-
       if (workspacePath) {
         await bridge.sendMessageFromView({
           type: "electron-set-active-workspace-root",
@@ -793,6 +859,16 @@
         if (selectProject) await new Promise((resolve) => window.setTimeout(resolve, 120));
       }
 
+      const knownThreadIds = new Set([
+        ...(hostContextSnapshot?.threads || []).map((thread) => normalizeThreadId(thread.id)),
+        ...readCodexThreads().map((thread) => normalizeThreadId(thread.id)),
+        normalizeThreadId(threadIdFromLocation()),
+        normalizeThreadId(lastNativeThreadId),
+      ].filter(Boolean));
+      const knownThreadRows = Array.from(
+        document.querySelectorAll("[data-app-action-sidebar-thread-id]"),
+      );
+
       closeTaskboard(false);
       await dispatchHostMessage({
         type: "navigate-to-route",
@@ -809,16 +885,23 @@
       });
       await waitForPreparedComposer(identifier, skillPath);
       pendingTaskThreadLink = {
+        requestId,
         taskId,
         commentId,
-        identifier,
-        previousThreadId,
+        knownThreadIds: [...knownThreadIds],
+        knownThreadRows,
+        candidateThreadRow: null,
+        candidateThreadId: "",
+        candidateSeenCount: 0,
+        ambiguitySignature: "",
+        ambiguitySeenCount: 0,
       };
-      postToFrame({ type: "taskboard:thread-prepared", payload: { taskId } });
+      postToFrame({ type: "taskboard:thread-prepared", payload: { requestId, taskId } });
     } catch (error) {
       postToFrame({
         type: "taskboard:thread-create-error",
         payload: {
+          requestId,
           taskId,
           commentId: commentId || undefined,
           error: error instanceof Error ? error.message : "无法创建 Codex 对话",
@@ -1364,6 +1447,7 @@
         "data-theme",
         "data-color-theme",
         "data-app-action-sidebar-thread-active",
+        "data-app-action-sidebar-thread-id",
         "aria-label",
         "aria-current",
       ],
@@ -1385,6 +1469,8 @@
     hostRequests.clear();
     pendingThreadCreation = null;
     pendingTaskThreadLink = null;
+    if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
+    pendingThreadCheckTimer = null;
     document.removeEventListener("DOMContentLoaded", mount);
     document.removeEventListener("click", onDocumentClick, true);
     window.removeEventListener("message", onFrameMessage);

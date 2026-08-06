@@ -616,7 +616,7 @@ export function App() {
   const [settlingTaskId, setSettlingTaskId] = useState<string | null>(null);
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [openingThreadTaskId, setOpeningThreadTaskId] = useState<string | null>(null);
-  const pendingThreadCommentsRef = useRef(new Map<string, Comment>());
+  const pendingThreadRequestsRef = useRef(new Map<string, { taskId: string; comment?: Comment }>());
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
   const [projectAliases, setProjectAliases] = useState(readProjectAliases);
@@ -1112,32 +1112,46 @@ export function App() {
         return;
       }
 
-      if (message.type === "taskboard:thread-prepared") {
+      if (message.type === "taskboard:thread-prepared" && message.payload) {
+        const payload = message.payload as { requestId?: unknown };
+        if (typeof payload.requestId !== "string" || !pendingThreadRequestsRef.current.has(payload.requestId)) {
+          return;
+        }
         setOpeningThreadTaskId(null);
         return;
       }
 
       if (message.type === "taskboard:thread-create-error" && message.payload) {
-        const payload = message.payload as { taskId?: unknown; commentId?: unknown; error?: unknown };
-        setOpeningThreadTaskId(null);
-        if (typeof payload.commentId === "string") {
-          pendingThreadCommentsRef.current.delete(payload.commentId);
+        const payload = message.payload as { requestId?: unknown; error?: unknown };
+        if (typeof payload.requestId !== "string" || !pendingThreadRequestsRef.current.has(payload.requestId)) {
+          return;
         }
+        pendingThreadRequestsRef.current.delete(payload.requestId);
+        setOpeningThreadTaskId(null);
         setActionError(typeof payload.error === "string" ? payload.error : "无法在 Codex 中创建对话。");
         return;
       }
 
       if (message.type === "taskboard:thread-created" && message.payload) {
-        const payload = message.payload as { taskId?: unknown; commentId?: unknown; threadId?: unknown };
-        if (typeof payload.taskId !== "string" || typeof payload.threadId !== "string") return;
+        const payload = message.payload as {
+          requestId?: unknown;
+          taskId?: unknown;
+          commentId?: unknown;
+          threadId?: unknown;
+        };
+        if (
+          typeof payload.requestId !== "string"
+          || typeof payload.taskId !== "string"
+          || typeof payload.threadId !== "string"
+        ) return;
+        const pendingRequest = pendingThreadRequestsRef.current.get(payload.requestId);
+        if (!pendingRequest || pendingRequest.taskId !== payload.taskId) return;
+        pendingThreadRequestsRef.current.delete(payload.requestId);
         const threadId = normalizeCodexThreadId(payload.threadId);
         if (!threadId) return;
-        const pendingComment = typeof payload.commentId === "string"
-          ? pendingThreadCommentsRef.current.get(payload.commentId)
+        const pendingComment = pendingRequest.comment?.id === payload.commentId
+          ? pendingRequest.comment
           : undefined;
-        if (typeof payload.commentId === "string") {
-          pendingThreadCommentsRef.current.delete(payload.commentId);
-        }
         if (pendingComment?.taskId === payload.taskId) {
           void updateCommentRequest(pendingComment, pendingComment.body, threadId)
             .then(() => setCommentsRevision((current) => current + 1))
@@ -1893,13 +1907,15 @@ export function App() {
       return;
     }
     if (openingThreadTaskId) return;
+    const requestId = crypto.randomUUID();
     const codexProject = hostContext?.projects?.find((project) => project.id === selectedProject?.id);
-    if (comment) pendingThreadCommentsRef.current.set(comment.id, comment);
+    pendingThreadRequestsRef.current.set(requestId, { taskId: task.id, comment });
     setOpeningThreadTaskId(task.id);
     setActionError(null);
     window.parent.postMessage({
       type: "taskboard:create-thread",
       payload: {
+        requestId,
         taskId: task.id,
         commentId: comment?.id,
         identifier: task.identifier,
