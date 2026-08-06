@@ -32,6 +32,7 @@ test("temporary and encoded client thread ids are never accepted", () => {
 test("new task conversations never fall back to the previously active thread", () => {
   assert.match(injectionSource, /const activePendingThreadId = normalizeThreadId\(/);
   assert.match(injectionSource, /threadId: activePendingThreadId/);
+  assert.match(injectionSource, /commentId: pendingTaskThreadLink\.commentId \|\| undefined/);
   assert.match(injectionSource, /activePendingThreadId !== pendingTaskThreadLink\.previousThreadId/);
   assert.doesNotMatch(
     injectionSource,

@@ -177,6 +177,22 @@ test("comments stage, upload, render and delete their own attachments", () => {
   assert.match(detailSource, /setPendingAttachmentDelete\(attachment\)/);
 });
 
+test("comments publish before a conversation is associated", () => {
+  assert.match(detailSource, /\{submitting \? "发表中…" : "发表评论"\}/);
+  assert.doesNotMatch(detailSource, /评论并新建会话|评论并在已有会话跟进|选择会话并发布评论/);
+  assert.match(detailSource, /function openPublishedCommentInNewThread\(comment: Comment\)/);
+  assert.match(detailSource, /function associatePublishedCommentWithThread\(comment: Comment, threadId: string\)/);
+  assert.match(detailSource, /updateComment\(comment, comment\.body, threadId\)/);
+  assert.match(appSource, /pendingThreadCommentsRef\.current\.set\(comment\.id, comment\)/);
+  assert.match(appSource, /commentId: comment\?\.id/);
+  assert.match(detailSource, /新建会话处理/);
+  assert.match(detailSource, /关联已有会话/);
+  assert.match(detailSource, /const commentThreadOptions = \[/);
+  assert.match(detailSource, /\.\.\.linkedThreadIds/);
+  assert.match(apiSource, /Array\.isArray\(data\.comments\)/);
+  assert.match(apiSource, /attachments: Array\.isArray\(comment\.attachments\)/);
+});
+
 test("issue creation and detail share one searchable, creatable label picker", () => {
   assert.match(editorSource, /<LabelPicker/);
   assert.match(detailSource, /<LabelPicker/);

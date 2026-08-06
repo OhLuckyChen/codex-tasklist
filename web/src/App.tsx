@@ -38,6 +38,7 @@ import {
   restoreTask as restoreTaskRequest,
   setCurrentUserActor,
   uploadAttachment,
+  updateComment as updateCommentRequest,
   updateTask as updateTaskRequest,
 } from "./api";
 import {
@@ -72,6 +73,7 @@ import {
   TASK_STATUSES,
   type ActorIdentity,
   type CodexThreadSummary,
+  type Comment,
   type DevelopmentScan,
   type HostContext,
   type IssueRelationType,
@@ -614,6 +616,7 @@ export function App() {
   const [settlingTaskId, setSettlingTaskId] = useState<string | null>(null);
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [openingThreadTaskId, setOpeningThreadTaskId] = useState<string | null>(null);
+  const pendingThreadCommentsRef = useRef(new Map<string, Comment>());
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
   const [projectAliases, setProjectAliases] = useState(readProjectAliases);
@@ -1115,17 +1118,31 @@ export function App() {
       }
 
       if (message.type === "taskboard:thread-create-error" && message.payload) {
-        const payload = message.payload as { taskId?: unknown; error?: unknown };
+        const payload = message.payload as { taskId?: unknown; commentId?: unknown; error?: unknown };
         setOpeningThreadTaskId(null);
+        if (typeof payload.commentId === "string") {
+          pendingThreadCommentsRef.current.delete(payload.commentId);
+        }
         setActionError(typeof payload.error === "string" ? payload.error : "无法在 Codex 中创建对话。");
         return;
       }
 
       if (message.type === "taskboard:thread-created" && message.payload) {
-        const payload = message.payload as { taskId?: unknown; threadId?: unknown };
+        const payload = message.payload as { taskId?: unknown; commentId?: unknown; threadId?: unknown };
         if (typeof payload.taskId !== "string" || typeof payload.threadId !== "string") return;
         const threadId = normalizeCodexThreadId(payload.threadId);
         if (!threadId) return;
+        const pendingComment = typeof payload.commentId === "string"
+          ? pendingThreadCommentsRef.current.get(payload.commentId)
+          : undefined;
+        if (typeof payload.commentId === "string") {
+          pendingThreadCommentsRef.current.delete(payload.commentId);
+        }
+        if (pendingComment?.taskId === payload.taskId) {
+          void updateCommentRequest(pendingComment, pendingComment.body, threadId)
+            .then(() => setCommentsRevision((current) => current + 1))
+            .catch((error) => setActionError(errorMessage(error)));
+        }
         const task = tasksRef.current.find((candidate) => candidate.id === payload.taskId);
         if (!task || task.threadId === threadId) return;
         void linkTaskThreadRequest(task, threadId)
@@ -1853,7 +1870,7 @@ export function App() {
       : instruction;
   }
 
-  function openTaskInThread(task: Task, followUp?: string) {
+  function openTaskInThread(task: Task, followUp?: string, comment?: Comment) {
     if (!manageTaskboardSkillPath) {
       setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
       return;
@@ -1877,12 +1894,14 @@ export function App() {
     }
     if (openingThreadTaskId) return;
     const codexProject = hostContext?.projects?.find((project) => project.id === selectedProject?.id);
+    if (comment) pendingThreadCommentsRef.current.set(comment.id, comment);
     setOpeningThreadTaskId(task.id);
     setActionError(null);
     window.parent.postMessage({
       type: "taskboard:create-thread",
       payload: {
         taskId: task.id,
+        commentId: comment?.id,
         identifier: task.identifier,
         instruction,
         skillName: "manage-taskboard",

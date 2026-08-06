@@ -3891,6 +3891,13 @@ kbd {
 }
 
 .comment-conversation-link {
+  padding: 2px 16px 8px;
+}
+
+.comment-conversation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   padding: 2px 16px 16px;
 }
 

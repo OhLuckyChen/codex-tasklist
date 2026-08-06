@@ -15,6 +15,10 @@ const supervisorSource = await readFile(
   new URL("../scripts/codex-taskboard-supervisor.sh", import.meta.url),
   "utf8",
 );
+const injectionSource = await readFile(
+  new URL("../inject/codex-taskboard.user.js", import.meta.url),
+  "utf8",
+);
 const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
@@ -26,6 +30,8 @@ test("the resident injector supervises the fixed local Taskboard service", () =>
   assert.match(source, /await supervisor\.ensure\(\)/);
   assert.match(source, /it will be restarted automatically/);
   assert.match(source, /AbortSignal\.timeout\(1_500\)/);
+  assert.match(source, /CODEX_TASKBOARD_HOST: "127\.0\.0\.1"/);
+  assert.match(source, /CODEX_TASKBOARD_PORT: String\(resolvePort\(\)\)/);
 });
 
 test("the CDP bridge accepts only service ensure and native Skill composer prefill actions", () => {
@@ -133,4 +139,10 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
 test("the injected iframe follows the configured local service port", () => {
   assert.match(source, /const taskboardPageUrl = `\$\{taskboardOrigin\}\/\?host=codex`/);
   assert.match(source, /window\.__CODEX_TASKBOARD_URL__ = \$\{JSON\.stringify\(taskboardPageUrl\)\}/);
+});
+
+test("an open Taskboard remounts on its existing surface when Codex has no native thread frame", () => {
+  assert.match(injectionSource, /const existingSurface = page\.parentElement\?\.closest\?\.\("main"\)/);
+  assert.match(injectionSource, /const surface = mount\?\.surface \|\| existingSurface/);
+  assert.match(injectionSource, /if \(!surface\) return/);
 });

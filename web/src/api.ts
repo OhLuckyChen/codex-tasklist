@@ -385,7 +385,12 @@ export async function listComments(taskId: string, signal?: AbortSignal): Promis
     `/api/tasks/${encodeURIComponent(taskId)}/comments`,
     { signal },
   );
-  return data.comments;
+  return Array.isArray(data.comments)
+    ? data.comments.map((comment) => ({
+        ...comment,
+        attachments: Array.isArray(comment.attachments) ? comment.attachments : [],
+      }))
+    : [];
 }
 
 export async function createComment(taskId: string, body: string, threadId?: string): Promise<Comment> {
@@ -396,7 +401,10 @@ export async function createComment(taskId: string, body: string, threadId?: str
       body: JSON.stringify({ body, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.comment;
+  return {
+    ...data.comment,
+    attachments: Array.isArray(data.comment.attachments) ? data.comment.attachments : [],
+  };
 }
 
 export async function updateComment(comment: Comment, body: string, threadId?: string): Promise<Comment> {
@@ -407,7 +415,10 @@ export async function updateComment(comment: Comment, body: string, threadId?: s
       body: JSON.stringify({ version: comment.version, body, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.comment;
+  return {
+    ...data.comment,
+    attachments: Array.isArray(data.comment.attachments) ? data.comment.attachments : [],
+  };
 }
 
 export async function deleteComment(comment: Comment, threadId?: string): Promise<void> {

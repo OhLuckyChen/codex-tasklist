@@ -626,6 +626,7 @@
           type: "taskboard:thread-created",
           payload: {
             taskId: pendingTaskThreadLink.taskId,
+            commentId: pendingTaskThreadLink.commentId || undefined,
             threadId: activePendingThreadId,
           },
         });
@@ -738,6 +739,7 @@
 
   async function createThreadForTask(payload) {
     const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
+    const commentId = typeof payload?.commentId === "string" ? payload.commentId.trim() : "";
     const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
     const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
     const skillName = typeof payload?.skillName === "string" ? payload.skillName.trim() : "";
@@ -808,6 +810,7 @@
       await waitForPreparedComposer(identifier, skillPath);
       pendingTaskThreadLink = {
         taskId,
+        commentId,
         identifier,
         previousThreadId,
       };
@@ -815,7 +818,11 @@
     } catch (error) {
       postToFrame({
         type: "taskboard:thread-create-error",
-        payload: { taskId, error: error instanceof Error ? error.message : "无法创建 Codex 对话" },
+        payload: {
+          taskId,
+          commentId: commentId || undefined,
+          error: error instanceof Error ? error.message : "无法创建 Codex 对话",
+        },
       });
     } finally {
       pendingThreadCreation = null;
@@ -1256,8 +1263,11 @@
     if (!active) return;
     if (!page) page = createPage();
     const mount = findPageMount();
-    if (!mount) return;
-    const { surface } = mount;
+    const existingSurface = page.parentElement?.closest?.("main")
+      ? page.parentElement
+      : null;
+    const surface = mount?.surface || existingSurface;
+    if (!surface) return;
 
     if (page.parentElement !== surface) {
       restoreNativeContent();

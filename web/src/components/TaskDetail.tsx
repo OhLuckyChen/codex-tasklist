@@ -102,7 +102,7 @@ interface TaskDetailProps {
   currentCodexThreadId?: string;
   codexThreads: CodexThreadSummary[];
   onLinkThread: (task: Task, threadId: string) => Promise<Task>;
-  onOpenInThread: (task: Task, followUp?: string) => void;
+  onOpenInThread: (task: Task, followUp?: string, comment?: Comment) => void;
   onFollowUpInThread: (task: Task, threadId: string, followUp: string) => void;
   openingThread: boolean;
   onError: (message: string | null) => void;
@@ -385,7 +385,8 @@ export function TaskDetail({
   );
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [commentThreadMenuOpen, setCommentThreadMenuOpen] = useState(false);
+  const [commentThreadMenuId, setCommentThreadMenuId] = useState<string | null>(null);
+  const [commentThreadActionId, setCommentThreadActionId] = useState<string | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingBody, setEditingBody] = useState("");
@@ -398,7 +399,6 @@ export function TaskDetail({
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const commentThreadMenuRef = useRef<HTMLDivElement>(null);
-  const commentThreadMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const threadMenuRef = useRef<HTMLDivElement>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const workflowAvailable = !currentTask.workflowId
@@ -410,6 +410,16 @@ export function TaskDetail({
       ? [currentTask.threadId]
       : [];
   const historicalThreadIds = linkedThreadIds.filter((threadId) => threadId !== currentTask.threadId);
+  const commentThreadOptions = [
+    ...codexThreads,
+    ...linkedThreadIds
+      .filter((threadId) => !codexThreads.some((thread) => thread.id === threadId))
+      .map((threadId) => ({
+        id: threadId,
+        title: threadId === currentTask.threadId ? "当前会话" : "历史会话",
+        projectId: currentTask.projectId,
+      })),
+  ];
   const draft = serializeInlineMedia(commentSegments);
   const commentFollowUpText = inlineMediaText(commentSegments).trim();
   const commentInlineImages = inlineMediaImages(commentSegments);
@@ -422,7 +432,7 @@ export function TaskDetail({
   useEffect(() => {
     setCurrentTask(task);
     setThreadMenuOpen(false);
-    setCommentThreadMenuOpen(false);
+    setCommentThreadMenuId(null);
     if (document.activeElement !== titleRef.current) setTitle(task.title);
     if (document.activeElement !== descriptionRef.current) setDescription(task.description);
   }, [task]);
@@ -536,19 +546,22 @@ export function TaskDetail({
   }, [threadMenuOpen]);
 
   useEffect(() => {
-    if (!commentThreadMenuOpen) return;
+    if (!commentThreadMenuId) return;
     requestAnimationFrame(() => {
       commentThreadMenuRef.current?.querySelector<HTMLButtonElement>("[role='option']")?.focus();
     });
 
     function closeFromOutside(event: PointerEvent) {
-      if (!commentThreadMenuRef.current?.contains(event.target as Node)) setCommentThreadMenuOpen(false);
+      if (!commentThreadMenuRef.current?.contains(event.target as Node)) setCommentThreadMenuId(null);
     }
 
     function closeFromEscape(event: globalThis.KeyboardEvent) {
       if (event.key !== "Escape") return;
-      setCommentThreadMenuOpen(false);
-      commentThreadMenuTriggerRef.current?.focus();
+      const trigger = document.querySelector<HTMLButtonElement>(
+        `[data-comment-thread-trigger="${commentThreadMenuId}"]`,
+      );
+      setCommentThreadMenuId(null);
+      trigger?.focus();
     }
 
     document.addEventListener("pointerdown", closeFromOutside);
@@ -557,7 +570,7 @@ export function TaskDetail({
       document.removeEventListener("pointerdown", closeFromOutside);
       window.removeEventListener("keydown", closeFromEscape);
     };
-  }, [commentThreadMenuOpen]);
+  }, [commentThreadMenuId]);
 
   async function saveTask(changes: Partial<TaskDraft>, property: string) {
     setSavingProperty(property);
@@ -669,14 +682,14 @@ export function TaskDetail({
     await saveTask({ description: normalized }, "description");
   }
 
-  async function submitComment(threadId?: string): Promise<string | null> {
+  async function submitComment(): Promise<string | null> {
     const body = draft.trim();
     if (!canSubmitComment || submitting) return null;
     const followUp = commentFollowUpText || "请查看刚发布的评论及附件。";
     setSubmitting(true);
     setCommentsError(null);
     try {
-      const comment = await createComment(task.id, body, threadId);
+      const comment = await createComment(task.id, body);
       const [results, inlineAttachments] = await Promise.all([
         Promise.allSettled(
           pendingCommentFiles.map((file) => uploadCommentAttachment(comment.id, file)),
@@ -713,15 +726,34 @@ export function TaskDetail({
     }
   }
 
-  async function submitCommentAndCreateThread() {
-    const followUp = await submitComment();
-    if (followUp !== null) onOpenInThread(currentTask, followUp);
+  function openPublishedCommentInNewThread(comment: Comment) {
+    setCommentThreadMenuId(null);
+    onOpenInThread(
+      currentTask,
+      comment.body.trim() || "请查看这条评论及附件。",
+      comment,
+    );
   }
 
-  async function submitCommentAndFollowUp(threadId: string) {
-    setCommentThreadMenuOpen(false);
-    const followUp = await submitComment(threadId);
-    if (followUp !== null) onFollowUpInThread(currentTask, threadId, followUp);
+  async function associatePublishedCommentWithThread(comment: Comment, threadId: string) {
+    if (commentThreadActionId) return;
+    setCommentThreadMenuId(null);
+    setCommentThreadActionId(comment.id);
+    setCommentsError(null);
+    try {
+      const updated = await updateComment(comment, comment.body, threadId);
+      setComments((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onAnnounce("评论已关联会话，正在打开。");
+      onFollowUpInThread(
+        currentTask,
+        threadId,
+        updated.body.trim() || "请查看这条评论及附件。",
+      );
+    } catch (error) {
+      setCommentsError(messageFor(error));
+    } finally {
+      setCommentThreadActionId(null);
+    }
   }
 
   function stageCommentFiles(files: FileList | File[]) {
@@ -750,8 +782,11 @@ export function TaskDetail({
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      setCommentThreadMenuOpen(false);
-      commentThreadMenuTriggerRef.current?.focus();
+      const trigger = commentThreadMenuId
+        ? document.querySelector<HTMLButtonElement>(`[data-comment-thread-trigger="${commentThreadMenuId}"]`)
+        : null;
+      setCommentThreadMenuId(null);
+      trigger?.focus();
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -1268,6 +1303,63 @@ export function TaskDetail({
                           <ConversationLink threadId={comment.threadId} onOpen={onOpenThread} />
                         </div>
                       )}
+                      <div className="comment-conversation-actions">
+                        <button
+                          className="button secondary comment-new-thread-button"
+                          type="button"
+                          disabled={openingThread || Boolean(commentThreadActionId)}
+                          onClick={() => openPublishedCommentInNewThread(comment)}
+                        >
+                          <LinearIcon name="plus" />
+                          {openingThread ? "正在打开…" : "新建会话处理"}
+                        </button>
+                        <div
+                          className="comment-thread-picker"
+                          ref={commentThreadMenuId === comment.id ? commentThreadMenuRef : undefined}
+                        >
+                          <button
+                            className="button secondary comment-thread-picker-trigger"
+                            type="button"
+                            data-comment-thread-trigger={comment.id}
+                            disabled={openingThread || Boolean(commentThreadActionId) || commentThreadOptions.length === 0}
+                            aria-label="关联已有会话"
+                            aria-haspopup="listbox"
+                            aria-expanded={commentThreadMenuId === comment.id}
+                            title={commentThreadOptions.length === 0 ? "当前议题没有可关联的 Codex 会话" : undefined}
+                            onClick={() => setCommentThreadMenuId((current) => current === comment.id ? null : comment.id)}
+                          >
+                            <LinearIcon name="conversation" />
+                            <span>{comment.threadId ? "更换关联会话" : "关联已有会话"}</span>
+                            <LinearIcon className="comment-thread-picker-chevron" name="chevronDown" />
+                          </button>
+                          {commentThreadMenuId === comment.id && (
+                            <div
+                              className="comment-thread-menu"
+                              role="listbox"
+                              aria-label="选择要关联的会话"
+                              onKeyDown={handleCommentThreadMenuKeyDown}
+                            >
+                              <span className="comment-thread-menu-heading">选择后将关联并打开会话</span>
+                              {commentThreadOptions.map((thread) => (
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={comment.threadId === thread.id}
+                                  key={thread.id}
+                                  title={thread.title}
+                                  onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
+                                >
+                                  <span className="detail-thread-option-icon"><LinearIcon name="conversation" /></span>
+                                  <span className="comment-thread-option-copy">
+                                    <strong>{thread.title}</strong>
+                                    <small>{thread.id}</small>
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </article>
                 ))}
@@ -1328,73 +1420,12 @@ export function TaskDetail({
                   <div className="composer-submit-actions">
                     <kbd>⌘ Enter</kbd>
                     <button
-                      className="button secondary"
+                      className="button primary"
                       type="submit"
-                      disabled={!canSubmitComment || submitting || openingThread}
+                      disabled={!canSubmitComment || submitting}
                     >
-                      {submitting ? "发布中…" : "评论"}
+                      {submitting ? "发表中…" : "发表评论"}
                     </button>
-                    <button
-                      className="button primary comment-new-thread-button"
-                      type="button"
-                      disabled={!canSubmitComment || submitting || openingThread}
-                      onClick={() => void submitCommentAndCreateThread()}
-                    >
-                      <LinearIcon name="plus" />
-                      {openingThread ? "正在打开…" : "评论并新建会话"}
-                    </button>
-                    <div className="comment-thread-picker" ref={commentThreadMenuRef}>
-                      <button
-                        ref={commentThreadMenuTriggerRef}
-                        className="button secondary comment-thread-picker-trigger"
-                        type="button"
-                        disabled={!canSubmitComment || submitting || openingThread || linkedThreadIds.length === 0}
-                        aria-label="评论并在已有会话跟进"
-                        aria-haspopup="listbox"
-                        aria-expanded={commentThreadMenuOpen}
-                        title={linkedThreadIds.length === 0 ? "此议题还没有已关联会话" : undefined}
-                        onClick={() => setCommentThreadMenuOpen((current) => !current)}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Escape" || !commentThreadMenuOpen) return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          setCommentThreadMenuOpen(false);
-                        }}
-                      >
-                        <LinearIcon name="conversation" />
-                        <span>在已有会话跟进</span>
-                        <LinearIcon className="comment-thread-picker-chevron" name="chevronDown" />
-                      </button>
-                      {commentThreadMenuOpen && (
-                        <div
-                          className="comment-thread-menu"
-                          role="listbox"
-                          aria-label="选择此议题的会话"
-                          onKeyDown={handleCommentThreadMenuKeyDown}
-                        >
-                          <span className="comment-thread-menu-heading">选择会话并发布评论</span>
-                          {linkedThreadIds.map((threadId) => {
-                            const thread = codexThreads.find((candidate) => candidate.id === threadId);
-                            return (
-                              <button
-                                type="button"
-                                role="option"
-                                aria-selected="false"
-                                key={threadId}
-                                title={thread?.title ?? threadId}
-                                onClick={() => void submitCommentAndFollowUp(threadId)}
-                              >
-                                <span className="detail-thread-option-icon"><LinearIcon name="conversation" /></span>
-                                <span className="comment-thread-option-copy">
-                                  <strong>{thread?.title ?? (threadId === currentTask.threadId ? "当前会话" : "历史会话")}</strong>
-                                  <small>{threadId}</small>
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
                   </div>
                 </footer>
               </form>

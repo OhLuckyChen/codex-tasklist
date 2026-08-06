@@ -119,6 +119,11 @@ function startTaskboard({ detached }) {
   return spawn(process.execPath, [path.join(projectRoot, "server", "index.mjs")], {
     cwd: projectRoot,
     detached,
+    env: {
+      ...process.env,
+      CODEX_TASKBOARD_HOST: "127.0.0.1",
+      CODEX_TASKBOARD_PORT: String(resolvePort()),
+    },
     stdio: detached ? "ignore" : "inherit",
   });
 }
