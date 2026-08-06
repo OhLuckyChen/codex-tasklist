@@ -40,6 +40,11 @@ test("new task conversations bind only a stable UUID absent from the creation sn
   assert.match(injectionSource, /threadId: candidateThreadId/);
   assert.match(injectionSource, /requestId: pendingTaskThreadLink\.requestId/);
   assert.match(injectionSource, /commentId: pendingTaskThreadLink\.commentId \|\| undefined/);
+  assert.match(injectionSource, /THREAD_LINK_RECEIPT_STORAGE_KEY/);
+  assert.match(injectionSource, /persistPendingThreadLinkReceipt/);
+  assert.match(injectionSource, /deliverPendingThreadLinkReceipt/);
+  assert.match(injectionSource, /taskboard:thread-link-ack/);
+  assert.match(injectionSource, /THREAD_LINK_RECEIPT_RETRY_MS/);
   assert.doesNotMatch(injectionSource, /taskContextVisible/);
   assert.doesNotMatch(injectionSource, /activePendingThreadId/);
   assert.doesNotMatch(

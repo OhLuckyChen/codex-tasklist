@@ -184,8 +184,12 @@ test("comments publish before a conversation is associated", () => {
   assert.match(detailSource, /function associatePublishedCommentWithThread\(comment: Comment, threadId: string\)/);
   assert.match(detailSource, /updateComment\(comment, comment\.body, threadId\)/);
   assert.match(appSource, /const requestId = crypto\.randomUUID\(\)/);
-  assert.match(appSource, /pendingThreadRequestsRef\.current\.set\(requestId, \{ taskId: task\.id, comment \}\)/);
+  assert.match(appSource, /pendingThreadRequestsRef\.current\.set\(requestId, \{/);
+  assert.match(appSource, /commentId: comment\?\.id/);
+  assert.match(appSource, /writePendingThreadRequests\(pendingThreadRequestsRef\.current\)/);
   assert.match(appSource, /pendingThreadRequestsRef\.current\.get\(payload\.requestId\)/);
+  assert.match(appSource, /await listComments\(payload\.taskId as string\)/);
+  assert.match(appSource, /taskboard:thread-link-ack/);
   assert.match(appSource, /requestId,/);
   assert.match(appSource, /commentId: comment\?\.id/);
   assert.match(detailSource, /新建会话处理/);

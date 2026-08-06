@@ -25,6 +25,9 @@
   const HOST_HEARTBEAT_MAX_AGE_MS = 8_000;
   const MACOS_TITLEBAR_SAFE_LEFT = 80;
   const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh";
+  const THREAD_LINK_RECEIPT_STORAGE_KEY = "codex-taskboard.pendingThreadLinkReceipt.v1";
+  const THREAD_LINK_RECEIPT_TTL_MS = 24 * 60 * 60 * 1_000;
+  const THREAD_LINK_RECEIPT_RETRY_MS = 1_000;
   const PLUGIN_LABELS = ["插件", "plugins"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
@@ -73,6 +76,8 @@
   let pendingThreadCreation = null;
   let pendingTaskThreadLink = null;
   let pendingThreadCheckTimer = null;
+  let pendingThreadLinkReceipt = null;
+  let pendingThreadLinkReceiptTimer = null;
   let lastNativeThreadId = "";
   let active = false;
   let destroyed = false;
@@ -95,6 +100,55 @@
       .toLowerCase();
     return CODEX_THREAD_ID_PATTERN.test(normalized) ? normalized : "";
   }
+
+  function readPendingThreadLinkReceipt() {
+    try {
+      const receipt = JSON.parse(window.localStorage.getItem(THREAD_LINK_RECEIPT_STORAGE_KEY) || "null");
+      if (
+        !receipt
+        || typeof receipt !== "object"
+        || typeof receipt.requestId !== "string"
+        || typeof receipt.taskId !== "string"
+        || (receipt.commentId !== undefined && typeof receipt.commentId !== "string")
+        || !normalizeThreadId(receipt.threadId)
+        || typeof receipt.createdAt !== "number"
+        || receipt.createdAt < Date.now() - THREAD_LINK_RECEIPT_TTL_MS
+      ) {
+        window.localStorage.removeItem(THREAD_LINK_RECEIPT_STORAGE_KEY);
+        return null;
+      }
+      return { ...receipt, threadId: normalizeThreadId(receipt.threadId) };
+    } catch (_) {
+      window.localStorage.removeItem(THREAD_LINK_RECEIPT_STORAGE_KEY);
+      return null;
+    }
+  }
+
+  function persistPendingThreadLinkReceipt(receipt) {
+    pendingThreadLinkReceipt = receipt;
+    if (receipt) {
+      window.localStorage.setItem(THREAD_LINK_RECEIPT_STORAGE_KEY, JSON.stringify(receipt));
+    } else {
+      window.localStorage.removeItem(THREAD_LINK_RECEIPT_STORAGE_KEY);
+    }
+  }
+
+  function schedulePendingThreadLinkReceipt() {
+    if (!pendingThreadLinkReceipt || pendingThreadLinkReceiptTimer !== null) return;
+    pendingThreadLinkReceiptTimer = window.setTimeout(() => {
+      pendingThreadLinkReceiptTimer = null;
+      deliverPendingThreadLinkReceipt();
+    }, THREAD_LINK_RECEIPT_RETRY_MS);
+  }
+
+  function deliverPendingThreadLinkReceipt() {
+    if (!pendingThreadLinkReceipt) pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
+    if (!pendingThreadLinkReceipt) return;
+    postToFrame({ type: "taskboard:thread-created", payload: pendingThreadLinkReceipt });
+    schedulePendingThreadLinkReceipt();
+  }
+
+  pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
 
   function resolveTaskboardUrl() {
     const configured = typeof window.__CODEX_TASKBOARD_URL__ === "string"
@@ -657,18 +711,17 @@
       }
 
       if (pendingTaskThreadLink.candidateSeenCount >= 3) {
-        postToFrame({
-          type: "taskboard:thread-created",
-          payload: {
-            requestId: pendingTaskThreadLink.requestId,
-            taskId: pendingTaskThreadLink.taskId,
-            commentId: pendingTaskThreadLink.commentId || undefined,
-            threadId: candidateThreadId,
-          },
+        persistPendingThreadLinkReceipt({
+          requestId: pendingTaskThreadLink.requestId,
+          taskId: pendingTaskThreadLink.taskId,
+          commentId: pendingTaskThreadLink.commentId || undefined,
+          threadId: candidateThreadId,
+          createdAt: Date.now(),
         });
         pendingTaskThreadLink = null;
         if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
         pendingThreadCheckTimer = null;
+        deliverPendingThreadLinkReceipt();
       } else if (pendingTaskThreadLink.ambiguitySeenCount >= 3) {
         postToFrame({
           type: "taskboard:thread-create-error",
@@ -817,7 +870,7 @@
       || !skillDisplayName
       || !skillPath
     ) return;
-    if (pendingThreadCreation || pendingTaskThreadLink) {
+    if (pendingThreadCreation || pendingTaskThreadLink || pendingThreadLinkReceipt) {
       postToFrame({
         type: "taskboard:thread-create-error",
         payload: {
@@ -1027,6 +1080,7 @@
       frameReadyWaiters.clear();
       if (active) showFrame();
       postHostContext();
+      deliverPendingThreadLinkReceipt();
       return;
     }
     if (message.type === "taskboard:drag-region") {
@@ -1047,6 +1101,17 @@
     }
     if (message.type === "taskboard:create-thread") {
       void createThreadForTask(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:thread-link-ack") {
+      const requestId = typeof message.payload?.requestId === "string"
+        ? message.payload.requestId
+        : "";
+      if (requestId && requestId === pendingThreadLinkReceipt?.requestId) {
+        persistPendingThreadLinkReceipt(null);
+        if (pendingThreadLinkReceiptTimer !== null) window.clearTimeout(pendingThreadLinkReceiptTimer);
+        pendingThreadLinkReceiptTimer = null;
+      }
       return;
     }
     if (message.type === "taskboard:follow-up-thread") void followUpThreadForTask(message.payload);
@@ -1471,6 +1536,8 @@
     pendingTaskThreadLink = null;
     if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
     pendingThreadCheckTimer = null;
+    if (pendingThreadLinkReceiptTimer !== null) window.clearTimeout(pendingThreadLinkReceiptTimer);
+    pendingThreadLinkReceiptTimer = null;
     document.removeEventListener("DOMContentLoaded", mount);
     document.removeEventListener("click", onDocumentClick, true);
     window.removeEventListener("message", onFrameMessage);

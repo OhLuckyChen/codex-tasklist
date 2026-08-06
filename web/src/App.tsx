@@ -29,6 +29,7 @@ import {
   getWorkflowWorkspace,
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
+  listComments,
   listDevelopmentContexts,
   listDeviceWorkspaces,
   listProjects,
@@ -141,6 +142,13 @@ type ProjectAutomationStatus = "ACTIVE" | "PAUSED";
 type AutomationQuotaState = "available" | "blocked" | "unknown" | "unavailable";
 type AutomationIntervalMinutes = 5 | 10 | 15 | 30 | 60;
 
+interface PendingThreadRequest {
+  taskId: string;
+  projectId: string;
+  commentId?: string;
+  createdAt: number;
+}
+
 interface AutomationQuotaStatus {
   state: AutomationQuotaState;
   checkedAt: number;
@@ -201,6 +209,8 @@ const DEFAULT_USER_ACTOR: ActorIdentity = {
 };
 
 const LAST_PROJECT_KEY = "taskboard.lastProjectId";
+const PENDING_THREAD_REQUESTS_KEY = "taskboard.pendingThreadRequests.v1";
+const PENDING_THREAD_REQUEST_TTL_MS = 24 * 60 * 60 * 1_000;
 const FAVORITE_PROJECTS_KEY = "taskboard.favoriteProjectIds";
 const PROJECT_ALIASES_KEY = "taskboard.projectAliases.v1";
 const PROJECT_ORDER_KEY = "taskboard.projectOrder.v1";
@@ -287,6 +297,41 @@ function readArchivedProjectIds(): Set<string> {
 
 function readProjectHomeMode(): "groups" | "priority" {
   return window.localStorage.getItem(PROJECT_HOME_MODE_KEY) === "priority" ? "priority" : "groups";
+}
+
+function readPendingThreadRequests(): Map<string, PendingThreadRequest> {
+  const result = new Map<string, PendingThreadRequest>();
+  try {
+    const value = JSON.parse(window.localStorage.getItem(PENDING_THREAD_REQUESTS_KEY) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+    const cutoff = Date.now() - PENDING_THREAD_REQUEST_TTL_MS;
+    for (const [requestId, request] of Object.entries(value)) {
+      if (!request || typeof request !== "object" || Array.isArray(request)) continue;
+      const candidate = request as Partial<PendingThreadRequest>;
+      if (
+        typeof requestId !== "string"
+        || typeof candidate.taskId !== "string"
+        || typeof candidate.projectId !== "string"
+        || (candidate.commentId !== undefined && typeof candidate.commentId !== "string")
+        || typeof candidate.createdAt !== "number"
+        || candidate.createdAt < cutoff
+      ) continue;
+      result.set(requestId, candidate as PendingThreadRequest);
+    }
+  } catch {}
+  writePendingThreadRequests(result);
+  return result;
+}
+
+function writePendingThreadRequests(requests: Map<string, PendingThreadRequest>): void {
+  if (requests.size === 0) {
+    window.localStorage.removeItem(PENDING_THREAD_REQUESTS_KEY);
+    return;
+  }
+  window.localStorage.setItem(
+    PENDING_THREAD_REQUESTS_KEY,
+    JSON.stringify(Object.fromEntries(requests)),
+  );
 }
 
 function readDeviceWorkspacePaths(): Record<string, string> {
@@ -616,7 +661,8 @@ export function App() {
   const [settlingTaskId, setSettlingTaskId] = useState<string | null>(null);
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [openingThreadTaskId, setOpeningThreadTaskId] = useState<string | null>(null);
-  const pendingThreadRequestsRef = useRef(new Map<string, { taskId: string; comment?: Comment }>());
+  const pendingThreadRequestsRef = useRef(readPendingThreadRequests());
+  const finalizingThreadRequestsRef = useRef(new Set<string>());
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
   const [projectAliases, setProjectAliases] = useState(readProjectAliases);
@@ -1127,6 +1173,7 @@ export function App() {
           return;
         }
         pendingThreadRequestsRef.current.delete(payload.requestId);
+        writePendingThreadRequests(pendingThreadRequestsRef.current);
         setOpeningThreadTaskId(null);
         setActionError(typeof payload.error === "string" ? payload.error : "无法在 Codex 中创建对话。");
         return;
@@ -1146,41 +1193,73 @@ export function App() {
         ) return;
         const pendingRequest = pendingThreadRequestsRef.current.get(payload.requestId);
         if (!pendingRequest || pendingRequest.taskId !== payload.taskId) return;
-        pendingThreadRequestsRef.current.delete(payload.requestId);
+        if (finalizingThreadRequestsRef.current.has(payload.requestId)) return;
         const threadId = normalizeCodexThreadId(payload.threadId);
         if (!threadId) return;
-        const pendingComment = pendingRequest.comment?.id === payload.commentId
-          ? pendingRequest.comment
-          : undefined;
-        if (pendingComment?.taskId === payload.taskId) {
-          void updateCommentRequest(pendingComment, pendingComment.body, threadId)
-            .then(() => setCommentsRevision((current) => current + 1))
-            .catch((error) => setActionError(errorMessage(error)));
-        }
-        const task = tasksRef.current.find((candidate) => candidate.id === payload.taskId);
-        if (!task || task.threadId === threadId) return;
-        void linkTaskThreadRequest(task, threadId)
-          .then((updated) => {
-            setTasks((current) => sortTasks(current.map((candidate) => (
-              candidate.id === updated.id ? updated : candidate
-            ))));
-          })
-          .catch(async (error) => {
-            if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
-              try {
-                const latestTasks = await listTasks(task.projectId);
-                if (selectedProjectIdRef.current === task.projectId) {
-                  setTasks(sortTasks(latestTasks));
+        const commentId = pendingRequest.commentId ?? (
+          typeof payload.commentId === "string" ? payload.commentId : undefined
+        );
+        if (pendingRequest.commentId && pendingRequest.commentId !== payload.commentId) return;
+        finalizingThreadRequestsRef.current.add(payload.requestId);
+        void (async () => {
+          try {
+            if (commentId) {
+              let commentLinked = false;
+              for (let attempt = 0; attempt < 2 && !commentLinked; attempt += 1) {
+                const comments = await listComments(payload.taskId as string);
+                const comment = comments.find((candidate) => candidate.id === commentId);
+                if (!comment) throw new Error("没有找到需要关联会话的评论。");
+                if (normalizeCodexThreadId(comment.threadId) === threadId) {
+                  commentLinked = true;
+                  break;
                 }
-                if (latestTasks.find((candidate) => candidate.id === task.id)?.threadId === threadId) {
-                  return;
+                try {
+                  await updateCommentRequest(comment, comment.body, threadId);
+                  commentLinked = true;
+                } catch (error) {
+                  if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT" || attempt > 0) {
+                    throw error;
+                  }
                 }
-              } catch {}
-              setActionError("任务已在其他位置更新，请刷新后确认会话关联。");
-              return;
+              }
+              if (!commentLinked) throw new Error("评论会话关联没有完成。");
+              setCommentsRevision((current) => current + 1);
             }
-            setActionError(errorMessage(error));
-          });
+
+            let latestTasks = await listTasks(pendingRequest.projectId);
+            let task = latestTasks.find((candidate) => candidate.id === payload.taskId);
+            if (!task) throw new Error("没有找到需要关联会话的议题。");
+            if (normalizeCodexThreadId(task.threadId) !== threadId) {
+              try {
+                task = await linkTaskThreadRequest(task, threadId);
+                latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
+              } catch (error) {
+                if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT") throw error;
+                latestTasks = await listTasks(pendingRequest.projectId);
+                task = latestTasks.find((candidate) => candidate.id === payload.taskId);
+                if (!task) throw new Error("没有找到需要关联会话的议题。");
+                if (normalizeCodexThreadId(task.threadId) !== threadId) {
+                  task = await linkTaskThreadRequest(task, threadId);
+                  latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
+                }
+              }
+            }
+            if (selectedProjectIdRef.current === pendingRequest.projectId) {
+              setTasks(sortTasks(latestTasks));
+            }
+            pendingThreadRequestsRef.current.delete(payload.requestId as string);
+            writePendingThreadRequests(pendingThreadRequestsRef.current);
+            setOpeningThreadTaskId(null);
+            window.parent.postMessage({
+              type: "taskboard:thread-link-ack",
+              payload: { requestId: payload.requestId, taskId: payload.taskId, commentId, threadId },
+            }, "*");
+          } catch (error) {
+            setActionError(`会话已创建，但关联尚未完成：${errorMessage(error)} 将自动重试。`);
+          } finally {
+            finalizingThreadRequestsRef.current.delete(payload.requestId as string);
+          }
+        })();
         return;
       }
 
@@ -1909,7 +1988,13 @@ export function App() {
     if (openingThreadTaskId) return;
     const requestId = crypto.randomUUID();
     const codexProject = hostContext?.projects?.find((project) => project.id === selectedProject?.id);
-    pendingThreadRequestsRef.current.set(requestId, { taskId: task.id, comment });
+    pendingThreadRequestsRef.current.set(requestId, {
+      taskId: task.id,
+      projectId: task.projectId,
+      commentId: comment?.id,
+      createdAt: Date.now(),
+    });
+    writePendingThreadRequests(pendingThreadRequestsRef.current);
     setOpeningThreadTaskId(task.id);
     setActionError(null);
     window.parent.postMessage({
