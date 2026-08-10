@@ -23,6 +23,7 @@ Use `taskctl` for every project, issue, and comment operation. Read [references/
    Issues created through `taskctl` are assigned to Codex Agent by default. Later CLI updates do not change the assignee.
 4. Let `taskctl` attribute every issue, relation, or comment mutation to the current Codex conversation through `CODEX_THREAD_ID`. Outside Codex, pass the exact conversation id with `--thread-id`.
 5. To claim a `todo` issue, move it to `in_progress` with `--if-version` from the latest read before starting implementation. If this claim reports a version conflict or a new read shows that its status changed, skip the issue and do not implement it.
+   - After the issue is confirmed as `in_progress` for the current execution, use the Codex `set_thread_title` capability when available to rename the current conversation to `<issue identifier> · <issue title>`. Pass the exact conversation id when it is known. Treat renaming as best-effort and non-blocking: a missing capability or rename failure must not block issue execution.
    - For an `in_review` issue, do not change status merely because the user sends another message. Questions, discussion, requests for explanation, and additional review evidence keep the issue in `in_review`.
    - When the user explicitly rejects the result, reports an unmet acceptance criterion, or requests required changes, move the `in_review` issue to `in_progress` with its latest version before starting rework.
 6. Include `--if-version <version>` on every concurrent update, using the version returned by the latest read.

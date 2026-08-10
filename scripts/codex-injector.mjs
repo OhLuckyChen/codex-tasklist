@@ -13,9 +13,12 @@ import {
   reconcileTaskboardAutomation,
 } from "../shared/taskboard-automation.mjs";
 import {
+  classifyHeartbeatFailure,
+  frameUrlMatches,
   findResidentInjectorPids,
   handleHostBindingPayload,
   reconcileInjectionRuntime,
+  rendererBootstrapReason,
   restartResidentInjector,
 } from "./codex-injector-runtime.mjs";
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
@@ -32,6 +35,8 @@ const taskboardPageUrl = `${taskboardOrigin}/?host=codex`;
 const hostBindingName = "__codexTaskboardHostV1";
 const hostHeartbeatName = "__codexTaskboardHostHeartbeatV1";
 const hostStartupTokenName = "__codexTaskboardHostStartupTokenV1";
+const hostHeartbeatTimeoutMs = 5_000;
+const hostHeartbeatFailureThreshold = 3;
 const injectionSourceHashName = "__CODEX_TASKBOARD_SOURCE_HASH__";
 const injectionScriptIdentifierName = "__CODEX_TASKBOARD_SCRIPT_IDENTIFIER__";
 const codexAutomationMethods = new Set([
@@ -214,6 +219,7 @@ function launchCodex(appPath, port) {
       "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${port}`,
       `--remote-allow-origins=http://127.0.0.1:${port}`,
+      "--disable-features=LocalNetworkAccessChecks",
     ],
     { stdio: "ignore" },
   );
@@ -504,7 +510,7 @@ async function refreshTaskboardFrames(port) {
 }
 
 function frameTreeContains(frameTree, expectedUrl) {
-  if (frameTree.frame?.url === expectedUrl) return true;
+  if (frameUrlMatches(frameTree.frame?.url, expectedUrl)) return true;
   return frameTree.childFrames?.some((child) => frameTreeContains(child, expectedUrl)) || false;
 }
 
@@ -516,7 +522,9 @@ async function waitForFrame(cdp, expectedUrl, timeoutMs) {
       cdp.send("Page.getFrameTree"),
     ]);
     if (
-      targetInfos.some((target) => target.type === "iframe" && target.url === expectedUrl) ||
+      targetInfos.some((target) => (
+        target.type === "iframe" && frameUrlMatches(target.url, expectedUrl)
+      )) ||
       frameTreeContains(frameTree, expectedUrl)
     ) {
       return true;
@@ -914,7 +922,8 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
   }
 
   await cdp.send("Input.insertText", { text: instruction });
-  while (Date.now() < deadline) {
+  const verificationDeadline = Date.now() + 8_000;
+  while (Date.now() < verificationDeadline) {
     const verified = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
@@ -937,6 +946,62 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
     await new Promise((resolve) => setTimeout(resolve, 80));
   }
   throw new Error("Timed out while writing the issue instruction into the Codex composer");
+}
+
+async function submitTaskComposerViaCdp(cdp, executionContextId, instruction) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const submitted = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const instruction = ${JSON.stringify(instruction)};
+        const editor = Array.from(document.querySelectorAll(
+          '[data-codex-composer="true"][contenteditable="true"]'
+        )).find((candidate) => candidate.getClientRects().length > 0);
+        if (!editor) return { ready: false };
+        if (!(editor.textContent || "").includes(instruction)) {
+          return { ready: true, submitted: true };
+        }
+        let root = editor;
+        for (let depth = 0; root && depth < 10; depth += 1, root = root.parentElement) {
+          const send = Array.from(root.querySelectorAll("button")).find((button) => {
+            const label = (button.getAttribute("aria-label") || "").trim().toLowerCase();
+            return button.getClientRects().length > 0
+              && !button.disabled
+              && (label === "发送" || label === "send" || label === "submit");
+          });
+          if (!send) continue;
+          send.click();
+          return { ready: true, clicked: true };
+        }
+        return { ready: true, clicked: false };
+      })()`,
+      contextId: executionContextId,
+      returnByValue: true,
+    });
+    if (submitted.result.value?.submitted) return { submitted: true };
+    if (submitted.result.value?.clicked) break;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+
+  const verificationDeadline = Date.now() + 8_000;
+  while (Date.now() < verificationDeadline) {
+    const verified = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const instruction = ${JSON.stringify(instruction)};
+        return !Array.from(document.querySelectorAll(
+          '[data-codex-composer="true"][contenteditable="true"]'
+        )).some((editor) => (
+          editor.getClientRects().length > 0
+          && (editor.textContent || "").includes(instruction)
+        ));
+      })()`,
+      contextId: executionContextId,
+      returnByValue: true,
+    });
+    if (verified.result.value === true) return { submitted: true };
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  throw new Error("Codex 任务指令已填入，但发送没有完成");
 }
 
 async function sendHostResponse(cdp, executionContextId, response) {
@@ -971,9 +1036,14 @@ async function installTaskboardHostBinding(cdp, supervisor) {
           return result;
         })()
       ),
-      prefill: (request, executionContextId) => (
-        prefillTaskComposerViaCdp(cdp, executionContextId, request)
-      ),
+      prefill: async (request, executionContextId) => {
+        const result = await prefillTaskComposerViaCdp(cdp, executionContextId, request);
+        if (!request.submit) return result;
+        return {
+          ...result,
+          ...await submitTaskComposerViaCdp(cdp, executionContextId, request.instruction),
+        };
+      },
       resolveTaskThread: async (request) => {
         const sessionsRoot = path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions");
         const threadId = await resolveCodexSessionByMarker({
@@ -993,18 +1063,26 @@ async function installTaskboardHostBinding(cdp, supervisor) {
 }
 
 async function publishHostHeartbeat(cdp, startupToken) {
-  await Promise.race([
-    cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        window[${JSON.stringify(hostHeartbeatName)}] = Date.now();
-        window[${JSON.stringify(hostStartupTokenName)}] = ${JSON.stringify(startupToken)};
-      })()`,
-      returnByValue: true,
-    }),
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("CDP heartbeat timed out")), 1_500);
-    }),
-  ]);
+  let timeout;
+  try {
+    await Promise.race([
+      cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          window[${JSON.stringify(hostHeartbeatName)}] = Date.now();
+          window[${JSON.stringify(hostStartupTokenName)}] = ${JSON.stringify(startupToken)};
+        })()`,
+        returnByValue: true,
+      }),
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("CDP heartbeat timed out")),
+          hostHeartbeatTimeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function readInjectionStatus(cdp) {
@@ -1016,7 +1094,8 @@ async function readInjectionStatus(cdp) {
       entryMounted: Boolean(document.getElementById("codex-taskboard-entry")),
       pageMounted: Boolean(document.getElementById("codex-taskboard-page")),
       pageVisible: document.getElementById("codex-taskboard-page")?.hidden === false,
-      frameUrl: document.getElementById("codex-taskboard-frame")?.src || null
+      frameUrl: document.getElementById("codex-taskboard-frame")?.src || null,
+      frameVisible: document.getElementById("codex-taskboard-frame")?.hidden === false
     })`,
     returnByValue: true,
   });
@@ -1031,7 +1110,7 @@ async function waitForInjectionStatus(cdp, shouldOpen, expectedSourceHash, timeo
     && (
       status.sourceHash !== expectedSourceHash
       || !status.entryMounted
-      || (shouldOpen && (!status.pageVisible || !status.frameUrl))
+      || (shouldOpen && (!status.pageVisible || !status.frameUrl || !status.frameVisible))
     )
   ) {
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1086,42 +1165,80 @@ async function injectTarget(
     await cdp.send("Page.setBypassCSP", { enabled: true });
     await cdp.send("Runtime.enable");
     if (keepAlive) await installTaskboardHostBinding(cdp, supervisor);
-    if (keepAlive && attachExisting) {
+    if (attachExisting) {
       const currentStatus = await readInjectionStatus(cdp);
-      const reconciled = await reconcileInjectionRuntime({
-        currentStatus,
-        source,
-        sourceHash,
-        removeRegisteredSource: (identifier) => cdp.send(
-          "Page.removeScriptToEvaluateOnNewDocument",
-          { identifier },
-        ),
-        registerCurrentSource: (currentSource) => registerInjectionSource(cdp, currentSource),
-        evaluateCurrentSource: (currentSource) => evaluateInjectionSource(cdp, currentSource),
-        publishRegistration: (identifier) => publishInjectionScriptIdentifier(cdp, identifier),
-        reopen: () => cdp.send("Runtime.evaluate", {
-          expression: "window.__codexTaskboardInjection__?.open()",
-          returnByValue: true,
-        }),
+      const { frameTree } = await cdp.send("Page.getFrameTree");
+      const bootstrapReason = rendererBootstrapReason({
+        injectionVersion: currentStatus.version,
+        frameTree,
+        expectedFrameUrl: taskboardPageUrl,
       });
-      cdp.on("Page.loadEventFired", () => (
-        publishInjectionScriptIdentifier(cdp, reconciled.scriptIdentifier)
-      ));
-      await publishHostHeartbeat(cdp, startupToken);
-      const status = await waitForInjectionStatus(
-        cdp,
-        reconciled.shouldRemainOpen,
-        sourceHash,
-        15_000,
-      );
-      const frameLoaded = status.frameUrl
-        ? await waitForFrame(cdp, status.frameUrl, 15_000)
-        : false;
-      retained = true;
-      return {
-        result: { ...status, cspBypassed: true, frameLoaded },
-        connection: cdp,
-      };
+      if (!bootstrapReason) {
+        const reconciled = await reconcileInjectionRuntime({
+          currentStatus,
+          source,
+          sourceHash,
+          removeRegisteredSource: (identifier) => cdp.send(
+            "Page.removeScriptToEvaluateOnNewDocument",
+            { identifier },
+          ),
+          registerCurrentSource: (currentSource) => registerInjectionSource(cdp, currentSource),
+          evaluateCurrentSource: (currentSource) => evaluateInjectionSource(cdp, currentSource),
+          publishRegistration: (identifier) => publishInjectionScriptIdentifier(cdp, identifier),
+          reopen: () => cdp.send("Runtime.evaluate", {
+            expression: "window.__codexTaskboardInjection__?.open()",
+            returnByValue: true,
+          }),
+        });
+        cdp.on("Page.loadEventFired", () => (
+          publishInjectionScriptIdentifier(cdp, reconciled.scriptIdentifier)
+        ));
+        if (keepAlive) await publishHostHeartbeat(cdp, startupToken);
+        if (shouldOpen && !reconciled.shouldRemainOpen) {
+          await cdp.send("Runtime.evaluate", {
+            expression: "window.__codexTaskboardInjection__?.open()",
+            returnByValue: true,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        const shouldBeOpen = shouldOpen || reconciled.shouldRemainOpen;
+        const status = await waitForInjectionStatus(
+          cdp,
+          shouldBeOpen,
+          sourceHash,
+          15_000,
+        );
+        const frameLoaded = status.frameVisible && status.frameUrl
+          ? await waitForFrame(cdp, status.frameUrl, 15_000)
+          : false;
+        if (shouldBeOpen && !frameLoaded) {
+          throw new Error("Taskboard iframe did not finish loading in the Codex renderer");
+        }
+        const result = { ...status, cspBypassed: true, frameLoaded };
+        if (screenshotPath) {
+          const screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+          await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
+          result.screenshot = screenshotPath;
+        }
+        retained = keepAlive;
+        return {
+          result,
+          connection: retained ? cdp : null,
+        };
+      }
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        event: "cdp-csp-bootstrap-reload",
+        targetId: target.id,
+        reason: bootstrapReason,
+      }));
+      if (currentStatus.scriptIdentifier) {
+        try {
+          await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+            identifier: currentStatus.scriptIdentifier,
+          });
+        } catch {}
+      }
     }
     const scriptIdentifier = await registerInjectionSource(cdp, source);
     cdp.on("Page.loadEventFired", () => (
@@ -1144,7 +1261,7 @@ async function injectTarget(
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     const status = await waitForInjectionStatus(cdp, shouldOpen, sourceHash, 15_000);
-    const frameLoaded = status.frameUrl
+    const frameLoaded = status.frameVisible && status.frameUrl
       ? await waitForFrame(cdp, status.frameUrl, 15_000)
       : false;
     if (shouldOpen && !frameLoaded) {
@@ -1244,7 +1361,7 @@ async function main() {
       if (!activePort) throw new Error("No debuggable Codex window found");
       port = activePort;
     }
-    console.log(JSON.stringify({ launcher: startResidentInjector(port, options.open), port }, null, 2));
+    console.log(JSON.stringify({ launcher: startResidentInjector(port, options.open, true), port }, null, 2));
     return;
   }
 
@@ -1255,7 +1372,7 @@ async function main() {
     const refreshed = [];
     for (const port of ports) {
       if (!(await isReachable(`http://127.0.0.1:${port}/json/version`))) continue;
-      await restartResidentInjectorForRefresh(port);
+      if (options.refresh) await restartResidentInjectorForRefresh(port);
       const results = await refreshTaskboardFrames(port);
       refreshed.push(...results.map((result) => ({ port, ...result })));
     }
@@ -1304,7 +1421,7 @@ async function main() {
       injectedTargets,
       options.watch,
       supervisor,
-      options.attachExisting,
+      options.attachExisting || cdpReachable,
       options.startupToken,
     );
     console.log(JSON.stringify({ injected: firstResults }, null, 2));
@@ -1321,6 +1438,7 @@ async function main() {
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
+    const heartbeatFailures = new Map();
 
     while (true) {
       await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -1332,9 +1450,37 @@ async function main() {
       for (const [targetId, connection] of injectedTargets) {
         try {
           await publishHostHeartbeat(connection, options.startupToken);
-        } catch (_) {
-          connection.close();
-          injectedTargets.delete(targetId);
+          const previousFailures = heartbeatFailures.get(targetId) || 0;
+          if (previousFailures > 0) {
+            console.warn(JSON.stringify({
+              at: new Date().toISOString(),
+              event: "cdp-heartbeat-recovered",
+              targetId,
+              previousFailures,
+            }));
+          }
+          heartbeatFailures.delete(targetId);
+        } catch (error) {
+          const { failures, shouldReconnect } = classifyHeartbeatFailure({
+            previousFailures: heartbeatFailures.get(targetId) || 0,
+            connectionClosed: connection.closed,
+            threshold: hostHeartbeatFailureThreshold,
+          });
+          heartbeatFailures.set(targetId, failures);
+          console.warn(JSON.stringify({
+            at: new Date().toISOString(),
+            event: shouldReconnect ? "cdp-reconnect-required" : "cdp-heartbeat-delayed",
+            targetId,
+            failures,
+            threshold: hostHeartbeatFailureThreshold,
+            connectionClosed: connection.closed,
+            reason: error.message,
+          }));
+          if (shouldReconnect) {
+            connection.close();
+            injectedTargets.delete(targetId);
+            heartbeatFailures.delete(targetId);
+          }
         }
       }
       try {
@@ -1347,7 +1493,7 @@ async function main() {
           injectedTargets,
           true,
           supervisor,
-          options.attachExisting,
+          true,
           options.startupToken,
         );
         if (results.length > 0) console.log(JSON.stringify({ injected: results }, null, 2));

@@ -16,15 +16,20 @@ const serverSource = await readFile(new URL("../server/app.mjs", import.meta.url
 const styles = await readFile(new URL("../web/src/components/workflow.css", import.meta.url), "utf8");
 const globalStyles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 
-test("the taskboard defaults to issues and exposes issue and node mode tabs", () => {
-  assert.match(appSource, /type BoardView = "issues" \| "workflow"/);
+test("the taskboard defaults to issues and exposes the current view tabs", () => {
+  assert.match(appSource, /type BoardView = "issues" \| "drafts" \| "knowledge" \| "workflow"/);
   assert.match(appSource, /useState<BoardView>\("issues"\)/);
   assert.match(appSource, />\s*议题看板\s*<\/button>/);
+  assert.match(appSource, />\s*草稿箱/);
+  assert.match(appSource, /收藏\{favoriteTaskCount/);
   assert.match(appSource, />\s*节点模式\s*<\/button>/);
-  assert.match(appSource, /aria-pressed=\{boardView === "issues"\}/);
+  assert.match(appSource, /aria-pressed=\{boardView === "issues" && !favoriteTasksOnly\}/);
+  assert.match(appSource, /aria-pressed=\{boardView === "drafts"\}/);
   assert.match(appSource, /aria-pressed=\{boardView === "workflow"\}/);
-  assert.match(appSource, /onClick=\{\(\) => selectBoardView\("issues"\)\}/);
+  assert.match(appSource, /selectBoardView\("issues"\)/);
+  assert.match(appSource, /onClick=\{\(\) => selectBoardView\("drafts"\)\}/);
   assert.match(appSource, /onClick=\{\(\) => selectBoardView\("workflow"\)\}/);
+  assert.match(appSource, /SHOW_WORKFLOW_BOARD_ENTRY &&/);
   assert.match(appSource, /function changeProject[\s\S]*?setBoardView\("issues"\)/);
   assert.doesNotMatch(appSource, /<span>活跃<\/span>|<span>积压事项<\/span>|所有议题|add-view/);
 });

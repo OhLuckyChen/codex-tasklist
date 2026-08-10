@@ -28,7 +28,7 @@ cdp_is_ready() {
 
 inject_current_codex() {
   log "Injecting Taskboard into the current Codex renderer"
-  if "$node_binary" "$injector" --port "$cdp_port" --open >> "$log_file" 2>&1; then
+  if "$node_binary" "$injector" --port "$cdp_port" --open --attach-existing >> "$log_file" 2>&1; then
     log "Taskboard injection completed"
     return 0
   fi
@@ -69,7 +69,8 @@ log "Starting Codex with loopback-only CDP on port $cdp_port"
 /usr/bin/open -a "$codex_app" --args \
   "--remote-debugging-address=127.0.0.1" \
   "--remote-debugging-port=$cdp_port" \
-  "--remote-allow-origins=http://127.0.0.1:${cdp_port}"
+  "--remote-allow-origins=http://127.0.0.1:${cdp_port}" \
+  "--disable-features=LocalNetworkAccessChecks"
 
 for _ in {1..60}; do
   if cdp_is_ready; then

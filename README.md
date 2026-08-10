@@ -1,12 +1,59 @@
-# Codex Taskboard
+# Codex Taskboard（Codex 任务面板）
 
-A local-first issue board that runs in a browser and can be embedded in Codex through the standalone CDP launcher or its injection script. The same HTTP API powers the React UI and the `taskctl` CLI used by the bundled Codex Skill.
+Codex Taskboard 是一个本地优先的项目与议题看板，可独立运行在浏览器中，也可嵌入 Codex 桌面端侧边栏。Web 界面、`taskctl` CLI 和随项目提供的 `manage-taskboard` Skill 共用同一套 HTTP API，让人和 Codex Agent 在同一份任务数据上协作。
 
-## Requirements
+## 界面预览
 
-- Node.js 22.5 or newer
+### Codex 内嵌看板
 
-## Run locally
+![Codex 侧边栏中的任务面板](injection-proof.png)
+
+### 新建议题
+
+![新建议题编辑器](linear-editor-proof.png)
+
+### 议题详情
+
+![议题详情与评论](task-detail-embedded-proof.png)
+
+## 核心功能
+
+- **项目管理**：新增本地项目并同步到 Codex；支持设备本地别名、收藏、拖动排序、归档与恢复，不修改实际目录名称。
+- **议题看板**：按积压、待办、进行中、审核中、已阻塞、完成、已取消等状态管理议题；支持拖动排序、列顺序调整、隐藏列和空列保留。
+- **搜索与筛选**：可按标题、编号、状态、优先级、标签、负责人、项目和关联会话筛选；支持跨项目总览。
+- **议题详情**：支持 Markdown 描述、评论、附件、优先级、标签、负责人、截止日期、重复规则、开发分支或 worktree，以及父子、阻塞和相关关系。
+- **收藏与草稿**：收藏常用议题，以列表或看板查看；新建议题可先保存到草稿箱。
+- **Codex / Claude 协作**：从议题或评论创建、关联并打开 Codex 会话；本地环境可从议题启动 Claude Code 会话。议题保留当前会话和历史会话关联。
+- **Agent 工作流**：`manage-taskboard` Skill 让 Agent 按认领、实现、验证、送审的流程处理议题；所有写操作都记录对应 Codex 会话。
+- **流程与自动化**：项目可配置工作流，并通过 Codex 自动化定时认领待办议题。
+- **项目知识与 AI 对话**：在已映射的本地项目中分析工程、形成待确认的知识提案，并围绕当前项目或议题发起本地 AI 对话。
+- **实时协作**：本地服务通过 Server-Sent Events 刷新所有已打开的看板；也可部署到 Cloudflare，通过 D1、R2 和 Basic Authentication 共享数据。
+
+## 工作原理
+
+```text
+React 看板 / taskctl / manage-taskboard Skill
+                    │
+                    ▼
+              HTTP API + SSE
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+   本地 SQLite          Cloudflare D1 / R2
+          │
+          ▼
+  Codex 注入器与会话桥接
+```
+
+本地模式下，数据默认写入 `.data/taskboard.sqlite`。浏览器和 Codex 内嵌页使用同一套 React 界面；`taskctl` 通过同一 API 读写项目、议题、关系和评论。注入器只负责在 Codex 中增加任务面板入口和建立原生会话桥接，不修改、替换或重新签名 Codex 应用文件。
+
+## 环境要求
+
+- Node.js 22.5 或更高版本
+- npm
+- macOS（仅 Codex 桌面端注入和 Dock 启动器需要；独立 Web 看板可在其他支持 Node.js 的系统运行）
+
+## 快速开始
 
 ```bash
 npm install
@@ -14,132 +61,140 @@ npm run build
 npm start
 ```
 
-Open <http://127.0.0.1:47823>. The SQLite database is stored at `.data/taskboard.sqlite`.
+打开 <http://127.0.0.1:47823>。
 
-For development with live frontend reload:
+开发模式：
 
 ```bash
 npm run dev
 ```
 
-The Vite UI runs at <http://127.0.0.1:5173> and proxies API requests to the local service.
+Vite 开发服务器运行在 <http://127.0.0.1:5173>，并将 API 请求代理到本地服务。
 
-## Use the CLI
+## 嵌入 Codex
 
-Run it from the project:
-
-```bash
-npm run taskctl -- project create \
-  --id my-project \
-  --name "My project" \
-  --workspace-path /absolute/path/to/repository
-
-npm run taskctl -- issue create \
-  --project my-project \
-  --title "Implement the next slice" \
-  --status todo \
-  --priority high \
-  --labels product,mvp
-```
-
-Use `npm link` if you want `taskctl` on your shell path. Set `CODEX_TASKBOARD_URL` to point the CLI at another local or LAN service. Cloud deployments are configured through the loopback companion with `taskctl cloud login`.
-
-## Install the Codex Skill
-
-Copy or symlink `skills/manage-taskboard` into the Codex skills directory, then start a new Codex task:
-
-```bash
-ln -s /absolute/path/to/codex-taskboard/skills/manage-taskboard \
-  ~/.codex/skills/manage-taskboard
-```
-
-The Skill teaches Codex to inspect an issue, move it to `in_progress`, use optimistic versions, verify the work, and then move it to `in_review`; it moves the issue to `done` only after the user explicitly confirms acceptance or asks to mark it complete.
-
-## Embed in Codex
-
-### Recommended on macOS: persistent Dock launcher
-
-Install the login supervisor and replace the ordinary Codex Dock entry with the Taskboard launcher:
+### 推荐方式：安装持久 Dock 启动器
 
 ```bash
 ./scripts/install-macos-launcher.sh
 ```
 
-The installer keeps the official Codex application unchanged. The Dock launcher starts it with CDP bound to `127.0.0.1:9229`, while a passive `LaunchAgent` attaches the resident injector and restores the Taskboard entry. The supervisor never quits or restarts Codex. If Codex was already open during installation, quit it once and then use the new **Codex Taskboard** Dock entry. The same entry must be used after logging in or rebooting. Clicking that Dock entry while Codex is already open also runs a fresh one-shot injection, so it doubles as the manual **Restore Taskboard** action.
+安装器会保留官方 Codex 应用，仅将 Dock 入口替换为 **Codex Taskboard**。该入口以只监听 `127.0.0.1:9229` 的 CDP 启动 Codex，后台监督程序负责恢复任务面板；Codex 已运行时再次点击该入口，也可手动恢复面板。
 
-The installer backs up the pre-install Dock preferences to `.data/com.apple.dock.before-codex-taskboard.plist`. Task data remains in `.data/taskboard.sqlite`.
+首次安装后如果 Codex 已经打开，请退出一次，再从新的 Dock 入口启动。原 Dock 配置会备份到 `.data/com.apple.dock.before-codex-taskboard.plist`。
 
-### Recommended: keep your current window and open a separate Taskboard window
-
-Keep the existing Codex window open. From the Taskboard repository, start a second Codex instance with a dedicated CDP port:
+### 保留当前窗口，另开一个 Taskboard 窗口
 
 ```bash
 open -n -a /Applications/ChatGPT.app --args \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9231 \
-  --remote-allow-origins=http://127.0.0.1:9231
+  --remote-allow-origins=http://127.0.0.1:9231 \
+  --disable-features=LocalNetworkAccessChecks
 ```
 
-After the new Codex window appears, run the injector in another terminal:
+新窗口出现后，在另一个终端执行：
 
 ```bash
 CODEX_TASKBOARD_HOST=127.0.0.1 \
 npm run codex:inject -- --port 9231 --open
 ```
 
-Keep the injector terminal running while using the embedded panel. The original Codex window remains unchanged, and the new window receives the Taskboard sidebar entry. If port `9231` is occupied, use another port in both commands.
+注入器需要保持运行。若 `9231` 已被占用，请在两个命令中改用同一个空闲端口。
 
-### Alternative: restart Codex with the standalone launcher
+`LocalNetworkAccessChecks` 仅对这个专用 Codex 进程关闭，因为 `app://` 页面需要嵌入回环地址上的任务面板。任务面板服务仍绑定 `127.0.0.1`，不会因此向局域网开放。
 
-Quit every running Codex window, then run:
+### 其他启动方式
+
+重启 Codex 并由独立启动器管理：
 
 ```bash
 CODEX_TASKBOARD_HOST=127.0.0.1 npm run codex
 ```
 
-This starts the local Taskboard service when needed, launches the official macOS Codex app with a loopback-only CDP port, injects a native-looking Taskboard entry after Plugins, and keeps watching both the service and replacement renderers. Opening Taskboard asks this launcher to health-check the fixed local service, restart it when needed, and rebuild a failed iframe. Keep this command running while using the embedded panel. The launcher does not modify `ChatGPT.app` or its `app.asar`.
-
-Codex 26.715.52143 ships a renderer CSP that blocks arbitrary HTTP iframes. The launcher therefore enables CDP CSP bypass, reloads that renderer once, installs the document-start script, and waits until the Taskboard OOPIF is actually loaded. CDP is unauthenticated to other processes on the same machine, so only run trusted local code while the launcher is active.
-
-To inject into a Codex instance that was already launched with CDP by another method, run:
+向一个已经启用 CDP 的 Codex 实例注入：
 
 ```bash
 npm run codex:inject -- --port 9229 --open
 ```
 
-This command also stays resident so the injected tab can restart Taskboard after a service exit. Stop it with `Ctrl-C`.
+Codex 26.715.52143 的 Renderer CSP 会阻止普通 HTTP iframe。启动器会在新文档导航前启用 CDP CSP bypass，并等待任务面板真正加载完成。CDP 不向其他本机进程提供认证，因此启用期间只运行可信代码。
 
-The script adds a Taskboard entry to the Codex sidebar and renders the iframe across Codex's complete main workspace, including the contextual titlebar area so Taskboard's own header does not leave an empty strip. That full rectangular header is placed above Electron's draggable layer and marked `no-drag`; because the native contextual actions are suppressed while Taskboard is active, its own actions use their normal edge padding without an artificial right-side gap. The native sidebar stays mounted, while the previous page selection and contextual header are temporarily suppressed; choosing another Codex page restores them.
+## 使用 `taskctl`
 
-“在对话中打开” selects the corresponding native Codex project when one is available and opens an unsent native composer with `$manage-taskboard ISSUE-ID`. A conversation is attributed only after it actually processes the issue: `taskctl` reads Codex's `CODEX_THREAD_ID` and records that ID on the issue or comment mutation. Issues keep the most recently linked conversation as the default entry while retaining earlier processing conversations as history. Recorded IDs are clickable through Codex's native route bridge. Each issue can bind either one Git branch or one worktree; the options are scanned from the selected Codex project's repository instead of being typed by hand. The integration uses Codex's existing project, composer, and route markers; it does not patch React, replace `fetch`, load private chunks, or edit Codex data files.
+从仓库内运行：
 
-To use a different UI origin, set `window.__CODEX_TASKBOARD_URL__` before the user script runs.
+```bash
+npm run taskctl -- project create \
+  --id my-project \
+  --name "我的项目" \
+  --workspace-path /absolute/path/to/repository
 
-## Configuration
+npm run taskctl -- issue create \
+  --project my-project \
+  --title "实现下一个功能切片" \
+  --status todo \
+  --priority high \
+  --labels product,mvp
+```
 
-| Variable | Default | Purpose |
+也可执行 `npm link`，将 `taskctl` 安装到当前 shell 的命令搜索路径。完整命令说明见 [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md)。
+
+在 Codex 中使用 Skill：
+
+```bash
+ln -s /absolute/path/to/codex-taskboard/skills/manage-taskboard \
+  ~/.codex/skills/manage-taskboard
+```
+
+开启新会话后，可用 `$manage-taskboard ISSUE-ID` 让 Agent 处理指定议题。Skill 会读取最新议题和评论，以乐观版本认领任务，完成验证后送审；只有用户明确验收后才会标记完成。
+
+## 配置
+
+| 环境变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP bind address; use `127.0.0.1` to disable LAN access |
-| `CODEX_TASKBOARD_PORT` | `47823` | Local HTTP port |
-| `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite data directory |
-| `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | CLI API origin |
+| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP 监听地址；设为 `127.0.0.1` 可禁用局域网访问 |
+| `CODEX_TASKBOARD_PORT` | `47823` | 本地服务端口 |
+| `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite 数据目录 |
+| `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | CLI 使用的 API 地址 |
 
-`npm start` prints both the local URL and the available LAN URLs. Teammates on the same trusted network can open one of those LAN URLs and use the same taskboard service. Task, comment, and attachment changes are broadcast to every open client through server-sent events; reconnecting clients perform a full refresh so changes made while disconnected are not missed. A teammate using `taskctl` can point it at the shared service with `CODEX_TASKBOARD_URL=http://<host-ip>:47823`.
+默认的局域网模式没有账户认证：可信局域网内能访问该地址的人都可以读写任务数据。不要将本地服务直接暴露到公网。
 
-LAN mode has no account authentication: anyone on the trusted local network who can reach the URL can read and write the taskboard. Public internet and cloud deployment require an authenticated deployment boundary.
+## 云端协作
 
-## Share through Cloudflare
+项目支持部署到 Cloudflare Worker：
 
-For two trusted collaborators, the taskboard can run on Cloudflare with Worker Static Assets and API routes, D1 as the authoritative business database, and a private R2 bucket for attachments. The deployment uses HTTPS Basic Authentication with a shared password and refreshes open boards after a global revision changes.
+- 静态资源与 API：Cloudflare Worker
+- 业务数据：D1
+- 附件：私有 R2 Bucket
+- 访问控制：HTTPS Basic Authentication
+- 设备本地能力：本地 companion 保留项目目录映射、Git/worktree、Skill 和 MCP 能力
 
-Each device keeps its own project checkout mapping and continues to use a local companion for Codex, Git/worktree, Skill, and MCP capabilities. Cloud mode never falls back to or double-writes the local SQLite database.
+云模式不会回退或双写本地 SQLite。部署、密码轮换、目录映射和一次性数据迁移步骤见 [`docs/cloud-collaboration.md`](docs/cloud-collaboration.md)。
 
-See [Cloud collaboration](docs/cloud-collaboration.md) for owner deployment, existing GitHub installation setup, password rotation, local path mapping, and the one-time local-data migration flow.
-
-## Verify
+## 验证
 
 ```bash
 npm run check
 ```
 
-This runs TypeScript checking, a production frontend build, and the server/CLI/injection test suite.
+该命令依次执行 TypeScript 类型检查、Web 生产构建和服务端、CLI、注入器等测试。
+
+如需分别执行：
+
+```bash
+npm run typecheck
+npm run build
+npm test
+```
+
+## 数据与安全边界
+
+- `.data/` 中的 SQLite、备份、日志和运行截图不会提交到 Git。
+- 注入器只连接回环地址上的 Codex CDP，不修改官方应用包。
+- 项目目录映射是设备本地配置，云端协作者可以使用不同的本地检出路径。
+- 云端写入失败时不会静默回退到本地数据库，避免产生两份事实来源。
+
+## 许可证
+
+当前仓库尚未声明开源许可证。在添加许可证前，默认保留全部权利。

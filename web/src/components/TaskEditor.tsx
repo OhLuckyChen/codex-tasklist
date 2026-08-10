@@ -32,6 +32,7 @@ import {
   createInlineMediaSegments,
   InlineMediaComposer,
   inlineMediaImages,
+  inlineMediaText,
   serializeInlineMedia,
   type InlineMediaSegment,
   type PendingInlineImage,
@@ -54,13 +55,18 @@ const RECURRENCE_UNITS: Record<Recurrence["unit"], string> = {
 
 interface TaskEditorProps {
   task: Task | null;
+  initialDraft?: TaskDraft;
   initialStatus: TaskStatus;
+  projectId: string;
+  projectOptions?: Array<{ id: string; name: string }>;
   labels: string[];
   workflows: WorkflowOption[];
   currentUser: ActorIdentity;
   developmentScan: DevelopmentScan;
   developmentScanLoading: boolean;
+  onProjectChange?: (projectId: string) => void;
   onCancel: () => void;
+  onSaveDraft?: (draft: TaskDraft) => Promise<void> | void;
   onSave: (
     draft: TaskDraft,
     attachments: File[],
@@ -103,31 +109,36 @@ function contextLabel(context: DevelopmentContext): string {
 
 export function TaskEditor({
   task,
+  initialDraft,
   initialStatus,
+  projectId,
+  projectOptions = [],
   labels: availableLabels,
   workflows,
   currentUser,
   developmentScan,
   developmentScanLoading,
+  onProjectChange,
   onCancel,
+  onSaveDraft,
   onSave,
 }: TaskEditorProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const [title, setTitle] = useState(task?.title ?? "");
-  const [description, setDescription] = useState(task?.description ?? "");
+  const [title, setTitle] = useState(task?.title ?? initialDraft?.title ?? "");
+  const [description, setDescription] = useState(task?.description ?? initialDraft?.description ?? "");
   const [descriptionSegments, setDescriptionSegments] = useState<InlineMediaSegment[]>(
-    () => createInlineMediaSegments(),
+    () => createInlineMediaSegments(initialDraft?.description ?? ""),
   );
-  const [status, setStatus] = useState<TaskStatus>(task?.status ?? initialStatus);
-  const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? "none");
+  const [status, setStatus] = useState<TaskStatus>(task?.status ?? initialDraft?.status ?? initialStatus);
+  const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? initialDraft?.priority ?? "none");
   const [assignee, setAssignee] = useState<ActorIdentity>(task?.assignee ?? currentUser);
-  const [selectedLabels, setSelectedLabels] = useState<string[]>(task?.labels ?? []);
-  const [workflowId, setWorkflowId] = useState(task?.workflowId ?? "");
-  const [developmentContext, setDevelopmentContext] = useState<DevelopmentContext | null>(task?.developmentContext ?? null);
-  const [dueDate, setDueDate] = useState(task?.dueDate ?? "");
-  const [recurrence, setRecurrence] = useState<Recurrence | null>(task?.recurrence ?? null);
+  const [selectedLabels, setSelectedLabels] = useState<string[]>(task?.labels ?? initialDraft?.labels ?? []);
+  const [workflowId, setWorkflowId] = useState(task?.workflowId ?? initialDraft?.workflowId ?? "");
+  const [developmentContext, setDevelopmentContext] = useState<DevelopmentContext | null>(task?.developmentContext ?? initialDraft?.developmentContext ?? null);
+  const [dueDate, setDueDate] = useState(task?.dueDate ?? initialDraft?.dueDate ?? "");
+  const [recurrence, setRecurrence] = useState<Recurrence | null>(task?.recurrence ?? initialDraft?.recurrence ?? null);
   const [menu, setMenu] = useState<"labels" | "more" | "due" | "recurrence" | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -158,6 +169,30 @@ export function TaskEditor({
     };
   }, []);
 
+  function currentDraft(cleanTitle = title.trim(), includePendingImages = true): TaskDraft {
+    const assigneeTarget = task && actorKey(assignee) === actorKey(task.assignee)
+      ? undefined
+      : assigneeTargetForActor(assignee, currentUser);
+    const descriptionValue = task
+      ? description.trim()
+      : (includePendingImages
+          ? serializeInlineMedia(descriptionSegments)
+          : inlineMediaText(descriptionSegments)
+        ).trim();
+    return {
+      title: cleanTitle,
+      description: descriptionValue,
+      status,
+      priority,
+      labels: selectedLabels,
+      ...(assigneeTarget ? { assigneeTarget } : {}),
+      workflowId: workflowId || null,
+      developmentContext,
+      dueDate: dueDate || null,
+      recurrence,
+    };
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const cleanTitle = title.trim();
@@ -174,30 +209,33 @@ export function TaskEditor({
     setSaving(true);
     setError(null);
     try {
-      const assigneeTarget = task && actorKey(assignee) === actorKey(task.assignee)
-        ? undefined
-        : assigneeTargetForActor(assignee, currentUser);
-      const descriptionValue = task
-        ? description.trim()
-        : serializeInlineMedia(descriptionSegments).trim();
-      await onSave({
-        title: cleanTitle,
-        description: descriptionValue,
-        status,
-        priority,
-        labels: selectedLabels,
-        ...(assigneeTarget ? { assigneeTarget } : {}),
-        workflowId: workflowId || null,
-        developmentContext,
-        dueDate: dueDate || null,
-        recurrence,
-      }, attachments, inlineMediaImages(descriptionSegments));
+      await onSave(currentDraft(cleanTitle), attachments, inlineMediaImages(descriptionSegments));
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === "VERSION_CONFLICT") {
         setError("这个议题已在其他位置发生变更，请关闭并刷新后重试。");
       } else {
         setError(caught instanceof Error ? caught.message : "无法保存这个议题。");
       }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveAsDraft() {
+    if (!onSaveDraft || saving) return;
+    if (!projectId) {
+      setError("请先选择草稿所属项目。");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      if (attachments.length > 0 || inlineMediaImages(descriptionSegments).length > 0) {
+        setAttachmentError("草稿仅保存文字和议题属性；附件请在正式创建时重新添加。");
+      }
+      await onSaveDraft(currentDraft(title.trim(), false));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "无法保存草稿。");
     } finally {
       setSaving(false);
     }
@@ -251,6 +289,16 @@ export function TaskEditor({
         </header>
 
         <div className="form-body">
+          {!task && projectOptions.length > 0 && (
+            <label className="composer-project">
+              <span>所属项目</span>
+              <select value={projectId} onChange={(event) => onProjectChange?.(event.target.value)}>
+                {projectOptions.map((project) => (
+                  <option value={project.id} key={project.id}>{project.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="composer-title">
             <span className="sr-only">标题</span>
             <input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Issue title" maxLength={240} autoComplete="off" />
@@ -402,6 +450,11 @@ export function TaskEditor({
             {task && <span aria-hidden="true" />}
             <div className="dialog-actions">
               {task && <span className="dialog-updated">编辑 {task.identifier}</span>}
+              {!task && onSaveDraft && (
+                <button className="button secondary" type="button" disabled={saving} onClick={() => void saveAsDraft()}>
+                  保存到草稿箱
+                </button>
+              )}
               <button className="button primary" type="submit" disabled={saving}>{saving ? "正在保存…" : task ? "保存更改" : "创建议题"}</button>
             </div>
           </footer>

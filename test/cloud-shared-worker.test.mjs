@@ -399,17 +399,28 @@ test("cloud issues retain multiple processing conversations with one current con
       threadId: threadFour,
     },
   });
+  const commentUnlinked = await cloud.request(`/api/comments/${commentCreated.body.comment.id}`, {
+    method: "PATCH",
+    actorName: bob,
+    json: {
+      version: commentUpdated.body.comment.version,
+      body: commentUpdated.body.comment.body,
+      threadId: null,
+    },
+  });
+  assert.equal(commentUnlinked.response.status, 200);
+  assert.equal(commentUnlinked.body.comment.threadId, null);
   await cloud.request(`/api/comments/${commentCreated.body.comment.id}`, {
     method: "DELETE",
     actorName: bob,
-    json: { version: commentUpdated.body.comment.version, threadId: threadFive },
+    json: { version: commentUnlinked.body.comment.version, threadId: threadFive },
   });
   const afterComment = await cloud.request(`/api/tasks/${taskId}`, { actorName: alice });
   assert.equal(afterComment.body.task.threadId, threadTwo);
   assert.equal(afterComment.body.task.threadIds[0], threadTwo);
   assert.deepEqual(
     new Set(afterComment.body.task.threadIds),
-    new Set([threadOne, threadTwo, threadThree, threadFour, threadFive]),
+    new Set([threadOne, threadTwo, threadThree, threadFive]),
   );
 });
 

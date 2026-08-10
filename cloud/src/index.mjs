@@ -1,6 +1,6 @@
 import { normalizeWorkflowSnapshot } from "../../shared/workflow-control-flow.mjs";
 
-const JSON_BODY_LIMIT = 1024 * 1024;
+const JSON_BODY_LIMIT = 6 * 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
 const PROJECT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TASK_STATUSES = [
@@ -395,11 +395,11 @@ async function readJson(request) {
   }
   const contentLength = Number(request.headers.get("content-length") ?? 0);
   if (contentLength > JSON_BODY_LIMIT) {
-    throw new ApiError(413, "BODY_TOO_LARGE", "JSON body cannot exceed 1 MiB");
+    throw new ApiError(413, "BODY_TOO_LARGE", "JSON body cannot exceed 6 MiB");
   }
   const text = await request.text();
   if (new TextEncoder().encode(text).byteLength > JSON_BODY_LIMIT) {
-    throw new ApiError(413, "BODY_TOO_LARGE", "JSON body cannot exceed 1 MiB");
+    throw new ApiError(413, "BODY_TOO_LARGE", "JSON body cannot exceed 6 MiB");
   }
   try {
     return JSON.parse(text);
@@ -566,6 +566,44 @@ function attachmentFromRow(row) {
     contentType: row.content_type,
     size: row.size,
     createdAt: row.created_at,
+  };
+}
+
+function knowledgeChangeFromRow(row) {
+  return {
+    id: row.id,
+    proposalId: row.proposal_id,
+    targetPath: row.target_path,
+    operation: row.operation,
+    baseDigest: row.base_digest,
+    beforeContent: row.before_content,
+    afterContent: row.after_content,
+    sortOrder: row.sort_order,
+  };
+}
+
+function knowledgeProposalFromRow(row, changes) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    sourceType: row.source_type,
+    sourceSnapshot: JSON.parse(row.source_snapshot),
+    developmentContext: row.development_context_type
+      ? { type: row.development_context_type, branch: row.development_branch }
+      : null,
+    status: row.status,
+    summary: row.summary,
+    error: row.error,
+    creator: { type: row.creator_type, id: row.creator_id, name: row.creator_name },
+    publisher: row.publisher_id
+      ? { type: row.publisher_type, id: row.publisher_id, name: row.publisher_name }
+      : null,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    publishedAt: row.published_at,
+    changes,
   };
 }
 
@@ -844,6 +882,141 @@ function parseMove(body) {
   };
 }
 
+function parseTaskTransfer(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version", "projectId", "threadId"]));
+  return {
+    version: parseVersion(body.version),
+    projectId: validateProjectId(body.projectId),
+    threadId: parseThreadId(body.threadId),
+  };
+}
+
+function parseKnowledgeContext(value) {
+  if (value === undefined || value === null) return null;
+  assertPlainObject(value);
+  assertAllowedKeys(value, new Set(["type", "branch"]));
+  if (value.type !== "branch" && value.type !== "worktree") {
+    throw new ApiError(400, "INVALID_FIELD", "Knowledge development context must be branch or worktree");
+  }
+  const branch = stringField(value.branch ?? null, "developmentContext.branch", {
+    nullable: true,
+    maxLength: 512,
+  });
+  if (value.type === "branch" && !branch) {
+    throw new ApiError(400, "INVALID_FIELD", "Branch knowledge context requires a branch name");
+  }
+  return { type: value.type, branch };
+}
+
+function knowledgeTextField(value, name, { nullable = false, maxLength } = {}) {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be a string${nullable ? " or null" : ""}`);
+  }
+  if (value.length > maxLength) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot exceed ${maxLength} characters`);
+  }
+  return value;
+}
+
+function parseKnowledgeChanges(value) {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new ApiError(400, "INVALID_FIELD", "Knowledge changes must contain at most 50 items");
+  }
+  return value.map((change, index) => {
+    assertPlainObject(change);
+    assertAllowedKeys(change, new Set([
+      "id", "proposalId", "targetPath", "operation", "baseDigest",
+      "beforeContent", "afterContent", "sortOrder",
+    ]));
+    const targetPath = stringField(change.targetPath, "targetPath", { required: true, maxLength: 4096 })
+      .replaceAll("\\", "/")
+      .replace(/^\.\//, "");
+    if (
+      targetPath.startsWith("/")
+      || targetPath.split("/").includes("..")
+      || !(targetPath === "changelog.md" || (
+        targetPath.startsWith("docs/knowledge/") && targetPath.endsWith(".md")
+      ))
+    ) {
+      throw new ApiError(400, "INVALID_FIELD", "Knowledge target path is not allowed");
+    }
+    if (!["create", "update", "delete"].includes(change.operation)) {
+      throw new ApiError(400, "INVALID_FIELD", "Knowledge operation must be create, update or delete");
+    }
+    const beforeContent = knowledgeTextField(change.beforeContent ?? null, "beforeContent", {
+      nullable: true,
+      maxLength: 1024 * 1024,
+    });
+    const afterContent = knowledgeTextField(change.afterContent ?? null, "afterContent", {
+      nullable: true,
+      maxLength: 1024 * 1024,
+    });
+    if (change.operation !== "delete" && !afterContent) {
+      throw new ApiError(400, "INVALID_FIELD", "Create and update changes require afterContent");
+    }
+    return {
+      id: stringField(change.id ?? uuid(), "changeId", { required: true, maxLength: 128 }),
+      targetPath,
+      operation: change.operation,
+      baseDigest: stringField(change.baseDigest ?? null, "baseDigest", { nullable: true, maxLength: 256 }),
+      beforeContent,
+      afterContent: change.operation === "delete" ? null : afterContent,
+      sortOrder: Number.isSafeInteger(change.sortOrder) ? change.sortOrder : index,
+    };
+  });
+}
+
+function parseKnowledgeProposalCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "id", "title", "sourceType", "sourceSnapshot", "developmentContext",
+    "status", "summary", "error", "changes",
+  ]));
+  const sourceType = stringField(body.sourceType, "sourceType", { required: true, maxLength: 64 });
+  if (!["project_scan", "issue", "comments", "question", "stale_refresh", "project_review"].includes(sourceType)) {
+    throw new ApiError(400, "INVALID_FIELD", "Unknown knowledge proposal source type");
+  }
+  const sourceSnapshot = body.sourceSnapshot ?? {};
+  if (sourceSnapshot === null || typeof sourceSnapshot !== "object" || Array.isArray(sourceSnapshot)) {
+    throw new ApiError(400, "INVALID_FIELD", "Knowledge source snapshot must be an object");
+  }
+  const status = stringField(body.status ?? "ready", "status", { required: true, maxLength: 32 });
+  if (!["generating", "ready", "failed"].includes(status)) {
+    throw new ApiError(400, "INVALID_FIELD", "New knowledge proposals must be generating, ready or failed");
+  }
+  return {
+    id: stringField(body.id ?? uuid(), "id", { required: true, maxLength: 128 }),
+    title: stringField(body.title, "title", { required: true, maxLength: 240 }),
+    sourceType,
+    sourceSnapshot,
+    developmentContext: parseKnowledgeContext(body.developmentContext),
+    status,
+    summary: stringField(body.summary ?? "", "summary", { maxLength: 20_000 }),
+    error: stringField(body.error ?? null, "error", { nullable: true, maxLength: 65_536 }),
+    changes: parseKnowledgeChanges(body.changes ?? []),
+  };
+}
+
+function parseKnowledgeProposalPatch(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version", "title", "summary", "status", "error", "changes"]));
+  const changes = {};
+  if (body.title !== undefined) changes.title = stringField(body.title, "title", { required: true, maxLength: 240 });
+  if (body.summary !== undefined) changes.summary = stringField(body.summary, "summary", { maxLength: 20_000 });
+  if (body.error !== undefined) changes.error = stringField(body.error, "error", { nullable: true, maxLength: 65_536 });
+  if (body.status !== undefined) {
+    const status = stringField(body.status, "status", { required: true, maxLength: 32 });
+    if (!["generating", "ready", "published", "rejected", "failed"].includes(status)) {
+      throw new ApiError(400, "INVALID_FIELD", "Unknown knowledge proposal status");
+    }
+    changes.status = status;
+  }
+  if (body.changes !== undefined) changes.changes = parseKnowledgeChanges(body.changes);
+  return { version: parseVersion(body.version), changes };
+}
+
 function parseVersionMutation(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set(["version", "threadId"]));
@@ -851,6 +1024,12 @@ function parseVersionMutation(body) {
     version: parseVersion(body.version),
     threadId: parseThreadId(body.threadId),
   };
+}
+
+function parseTaskThreadDelete(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version"]));
+  return { version: parseVersion(body.version) };
 }
 
 function parseCommentCreate(body) {
@@ -871,7 +1050,7 @@ function parseCommentPatch(body) {
   return {
     version: parseVersion(body.version),
     body: stringField(body.body, "body", { maxLength: 100_000 }),
-    threadId: parseThreadId(body.threadId),
+    threadId: body.threadId === null ? null : parseThreadId(body.threadId),
   };
 }
 
@@ -1084,6 +1263,168 @@ async function createProject(env, input) {
   return getProject(env, input.id);
 }
 
+async function knowledgeChanges(env, proposalId) {
+  const rows = await all(env.DB.prepare(`
+    SELECT * FROM knowledge_proposal_changes
+    WHERE proposal_id = ?
+    ORDER BY sort_order, id
+  `).bind(proposalId));
+  return rows.map(knowledgeChangeFromRow);
+}
+
+async function getKnowledgeProposal(env, id) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM knowledge_proposals WHERE id = ?",
+  ).bind(id).first();
+  return row ? knowledgeProposalFromRow(row, await knowledgeChanges(env, id)) : null;
+}
+
+async function listKnowledgeProposals(env, projectId, status) {
+  await requireProject(env, projectId);
+  const rows = await all(env.DB.prepare(`
+    SELECT * FROM knowledge_proposals
+    WHERE project_id = ? AND (? IS NULL OR status = ?)
+    ORDER BY
+      CASE status
+        WHEN 'ready' THEN 1
+        WHEN 'generating' THEN 2
+        WHEN 'failed' THEN 3
+        WHEN 'published' THEN 4
+        WHEN 'rejected' THEN 5
+      END,
+      updated_at DESC,
+      id DESC
+  `).bind(projectId, status ?? null, status ?? null));
+  return Promise.all(rows.map(async (row) => (
+    knowledgeProposalFromRow(row, await knowledgeChanges(env, row.id))
+  )));
+}
+
+async function createKnowledgeProposal(env, projectId, input, actor) {
+  await requireProject(env, projectId);
+  const timestamp = now();
+  const context = input.developmentContext ?? null;
+  const statements = [env.DB.prepare(`
+    INSERT INTO knowledge_proposals (
+      id, project_id, title, source_type, source_snapshot,
+      development_context_type, development_branch, status, summary, error,
+      creator_type, creator_id, creator_name, version, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+  `).bind(
+    input.id,
+    projectId,
+    input.title,
+    input.sourceType,
+    JSON.stringify(input.sourceSnapshot),
+    context?.type ?? null,
+    context?.branch ?? null,
+    input.status,
+    input.summary,
+    input.error ?? null,
+    actor.type,
+    actor.id,
+    actor.name,
+    timestamp,
+    timestamp,
+  )];
+  for (const [index, change] of input.changes.entries()) {
+    statements.push(env.DB.prepare(`
+      INSERT INTO knowledge_proposal_changes (
+        id, proposal_id, target_path, operation, base_digest,
+        before_content, after_content, sort_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      change.id,
+      input.id,
+      change.targetPath,
+      change.operation,
+      change.baseDigest ?? null,
+      change.beforeContent ?? null,
+      change.afterContent ?? null,
+      change.sortOrder ?? index,
+    ));
+  }
+  await env.DB.batch(statements);
+  return getKnowledgeProposal(env, input.id);
+}
+
+async function updateKnowledgeProposal(env, id, input, actor) {
+  const current = await getKnowledgeProposal(env, id);
+  if (!current) {
+    throw new ApiError(404, "KNOWLEDGE_PROPOSAL_NOT_FOUND", `Knowledge proposal '${id}' does not exist`);
+  }
+  if (current.version !== input.version) {
+    throw new ApiError(409, "VERSION_CONFLICT", "Knowledge proposal was changed by another client", {
+      expectedVersion: input.version,
+      actualVersion: current.version,
+    });
+  }
+  const nextStatus = input.changes.status ?? current.status;
+  const allowedTransitions = {
+    generating: new Set(["generating", "ready", "failed", "rejected"]),
+    failed: new Set(["failed", "generating", "ready", "rejected"]),
+    ready: new Set(["ready", "published", "rejected"]),
+    published: new Set(["published"]),
+    rejected: new Set(["rejected"]),
+  };
+  if (!allowedTransitions[current.status]?.has(nextStatus)) {
+    throw new ApiError(409, "INVALID_PROPOSAL_TRANSITION", `Cannot change proposal from ${current.status} to ${nextStatus}`);
+  }
+  const timestamp = now();
+  const publisher = nextStatus === "published" ? actor : current.publisher;
+  const publishedAt = nextStatus === "published" ? (current.publishedAt ?? timestamp) : current.publishedAt;
+  const statements = [env.DB.prepare(`
+    UPDATE knowledge_proposals
+    SET title = ?, summary = ?, status = ?, error = ?,
+        publisher_type = ?, publisher_id = ?, publisher_name = ?, published_at = ?,
+        version = version + 1, updated_at = ?
+    WHERE id = ? AND version = ?
+  `).bind(
+    input.changes.title ?? current.title,
+    input.changes.summary ?? current.summary,
+    nextStatus,
+    Object.hasOwn(input.changes, "error") ? input.changes.error : current.error,
+    publisher?.type ?? null,
+    publisher?.id ?? null,
+    publisher?.name ?? null,
+    publishedAt,
+    timestamp,
+    id,
+    input.version,
+  )];
+  if (input.changes.changes) {
+    statements.push(env.DB.prepare(
+      "DELETE FROM knowledge_proposal_changes WHERE proposal_id = ?",
+    ).bind(id));
+    for (const [index, change] of input.changes.changes.entries()) {
+      statements.push(env.DB.prepare(`
+        INSERT INTO knowledge_proposal_changes (
+          id, proposal_id, target_path, operation, base_digest,
+          before_content, after_content, sort_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        change.id,
+        id,
+        change.targetPath,
+        change.operation,
+        change.baseDigest ?? null,
+        change.beforeContent ?? null,
+        change.afterContent ?? null,
+        change.sortOrder ?? index,
+      ));
+    }
+  }
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
+    const latest = await getKnowledgeProposal(env, id);
+    throw new ApiError(409, "VERSION_CONFLICT", "Knowledge proposal was changed by another client", {
+      expectedVersion: input.version,
+      actualVersion: latest?.version,
+    });
+  }
+  return getKnowledgeProposal(env, id);
+}
+
 async function listTasks(env, filters) {
   const where = [];
   const values = [];
@@ -1288,6 +1629,47 @@ async function updateTask(env, id, input, actor) {
   return getTask(env, current.id);
 }
 
+async function unlinkTaskThread(env, id, threadId, input) {
+  const current = await requireTaskRow(env, id);
+  assertTaskVersion(current, input.version);
+  const linked = await env.DB.prepare(`
+    SELECT 1 FROM task_threads WHERE task_id = ? AND thread_id = ?
+  `).bind(current.id, threadId).first();
+  if (!linked) {
+    throw new ApiError(404, "THREAD_LINK_NOT_FOUND", "This conversation is not linked to the issue");
+  }
+
+  const timestamp = now();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE tasks
+      SET
+        thread_id = CASE WHEN thread_id = ? THEN NULL ELSE thread_id END,
+        version = version + 1,
+        updated_at = ?
+      WHERE id = ? AND version = ?
+    `).bind(threadId, timestamp, current.id, input.version),
+    env.DB.prepare(`
+      UPDATE comments
+      SET thread_id = NULL, version = version + 1, updated_at = ?
+      WHERE task_id = ? AND thread_id = ?
+    `).bind(timestamp, current.id, threadId),
+    env.DB.prepare(`
+      DELETE FROM task_threads WHERE task_id = ? AND thread_id = ?
+    `).bind(current.id, threadId),
+  ]);
+  if (!changed(results[0])) {
+    const latest = await requireTaskRow(env, current.id);
+    throw new ApiError(
+      409,
+      "VERSION_CONFLICT",
+      "Task was changed by another client",
+      { expectedVersion: input.version, actualVersion: latest.version },
+    );
+  }
+  return getTask(env, current.id);
+}
+
 async function moveTask(env, id, input) {
   const current = await requireTaskRow(env, id);
   assertTaskVersion(current, input.version);
@@ -1336,6 +1718,128 @@ async function moveTask(env, id, input) {
     );
   }
   return getTask(env, current.id);
+}
+
+async function transferTask(env, id, input) {
+  const current = await requireTaskRow(env, id);
+  assertTaskVersion(current, input.version);
+  if (current.project_id === input.projectId) {
+    throw new ApiError(409, "TASK_ALREADY_IN_PROJECT", "Issue already belongs to the target project");
+  }
+  await requireProject(env, input.projectId);
+  const currentTask = await hydrateTask(env, current);
+  const detachedRelations = [
+    ...(currentTask.relations.parent
+      ? [{ type: "parent", task: currentTask.relations.parent }]
+      : []),
+    ...currentTask.relations.subIssues.map((task) => ({ type: "sub_issue", task })),
+    ...currentTask.relations.blockedBy.map((task) => ({ type: "blocked_by", task })),
+    ...currentTask.relations.blocks.map((task) => ({ type: "blocks", task })),
+    ...currentTask.relations.related.map((task) => ({ type: "related", task })),
+  ];
+  const order = await env.DB.prepare(`
+    SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_order
+    FROM tasks
+    WHERE project_id = ? AND status = ? AND id != ?
+  `).bind(input.projectId, current.status, current.id).first();
+  const timestamp = now();
+  const statements = [
+    env.DB.prepare(`
+      UPDATE tasks
+      SET
+        identifier = (
+          SELECT ? || '-' || CAST(next_task_number AS TEXT)
+          FROM projects WHERE id = ?
+        ),
+        project_id = ?,
+        sort_order = ?,
+        thread_id = COALESCE(?, thread_id),
+        version = version + 1,
+        updated_at = ?
+      WHERE id = ? AND version = ?
+        AND EXISTS (SELECT 1 FROM projects WHERE id = ?)
+    `).bind(
+      projectPrefix(input.projectId),
+      input.projectId,
+      input.projectId,
+      order.next_order,
+      input.threadId ?? null,
+      timestamp,
+      current.id,
+      input.version,
+      input.projectId,
+    ),
+    env.DB.prepare(`
+      UPDATE projects
+      SET next_task_number = next_task_number + 1, updated_at = ?
+      WHERE id = ?
+        AND EXISTS (
+          SELECT 1 FROM tasks
+          WHERE id = ? AND project_id = ? AND version = ? AND updated_at = ?
+        )
+    `).bind(
+      timestamp,
+      input.projectId,
+      current.id,
+      input.projectId,
+      input.version + 1,
+      timestamp,
+    ),
+    env.DB.prepare(`
+      UPDATE projects SET updated_at = ?
+      WHERE id = ?
+        AND EXISTS (
+          SELECT 1 FROM tasks
+          WHERE id = ? AND project_id = ? AND version = ? AND updated_at = ?
+        )
+    `).bind(
+      timestamp,
+      current.project_id,
+      current.id,
+      input.projectId,
+      input.version + 1,
+      timestamp,
+    ),
+    env.DB.prepare(`
+      DELETE FROM task_relations
+      WHERE (source_task_id = ? OR target_task_id = ?)
+        AND EXISTS (
+          SELECT 1 FROM tasks
+          WHERE id = ? AND project_id = ? AND version = ? AND updated_at = ?
+        )
+    `).bind(
+      current.id,
+      current.id,
+      current.id,
+      input.projectId,
+      input.version + 1,
+      timestamp,
+    ),
+  ];
+  const threadStatement = linkTaskThreadStatement(
+    env,
+    current.id,
+    input.threadId,
+    timestamp,
+    input.version + 1,
+  );
+  if (threadStatement) statements.push(threadStatement);
+  const results = await env.DB.batch(statements);
+  if (!changed(results[0])) {
+    const latest = await requireTaskRow(env, current.id);
+    throw new ApiError(
+      409,
+      "VERSION_CONFLICT",
+      "Task was changed by another client",
+      { expectedVersion: input.version, actualVersion: latest.version },
+    );
+  }
+  return {
+    task: await getTask(env, current.id),
+    previousProjectId: current.project_id,
+    previousIdentifier: current.identifier,
+    detachedRelations,
+  };
 }
 
 async function archiveTask(env, id, input) {
@@ -1795,12 +2299,13 @@ async function updateComment(env, id, input) {
     UPDATE comments
     SET
       body = ?,
-      thread_id = COALESCE(?, thread_id),
+      thread_id = CASE WHEN ? = 1 THEN ? ELSE thread_id END,
       version = version + 1,
       updated_at = ?
     WHERE id = ? AND version = ?
   `).bind(
     input.body,
+    input.threadId !== undefined ? 1 : 0,
     input.threadId ?? null,
     timestamp,
     current.id,
@@ -1815,6 +2320,25 @@ async function updateComment(env, id, input) {
     input.version + 1,
   );
   if (threadStatement) statements.push(threadStatement);
+  if (input.threadId === null && current.thread_id) {
+    statements.push(env.DB.prepare(`
+      DELETE FROM task_threads
+      WHERE task_id = ? AND thread_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM tasks WHERE id = ? AND thread_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM comments WHERE task_id = ? AND thread_id = ?
+        )
+    `).bind(
+      current.task_id,
+      current.thread_id,
+      current.task_id,
+      current.thread_id,
+      current.task_id,
+      current.thread_id,
+    ));
+  }
   const results = await env.DB.batch(statements);
   if (!changed(results[0])) {
     const latest = await requireCommentRow(env, current.id);
@@ -2037,7 +2561,8 @@ async function routeApi(request, env, actor, url) {
   }
 
   if (
-    pathname === "/api/device-workspaces"
+    pathname.startsWith("/api/local/")
+    || pathname === "/api/device-workspaces"
     || pathname === "/api/workflow-capabilities"
     || /^\/api\/projects\/[^/]+\/development-contexts$/.test(pathname)
   ) {
@@ -2069,6 +2594,64 @@ async function routeApi(request, env, actor, url) {
       });
     }
     methodNotAllowed(["GET", "POST"]);
+  }
+
+  const projectKnowledgeProposalsMatch = pathname.match(
+    /^\/api\/projects\/([^/]+)\/knowledge-proposals$/,
+  );
+  if (projectKnowledgeProposalsMatch) {
+    const projectId = validateProjectId(
+      decodePathPart(projectKnowledgeProposalsMatch[1], "Project id"),
+    );
+    if (request.method === "GET") {
+      const unknown = [...url.searchParams.keys()].filter((key) => key !== "status");
+      if (unknown.length > 0 || url.searchParams.getAll("status").length > 1) {
+        throw new ApiError(400, "INVALID_QUERY_PARAMETER", "Only one status filter is allowed");
+      }
+      const status = url.searchParams.get("status");
+      if (status && !["generating", "ready", "published", "rejected", "failed"].includes(status)) {
+        throw new ApiError(400, "INVALID_QUERY_PARAMETER", "Unknown knowledge proposal status");
+      }
+      return json(200, {
+        proposals: await listKnowledgeProposals(env, projectId, status),
+      });
+    }
+    if (request.method === "POST") {
+      requireNoQuery(url, "POST project knowledge proposal");
+      return json(201, {
+        proposal: await createKnowledgeProposal(
+          env,
+          projectId,
+          parseKnowledgeProposalCreate(await readJson(request)),
+          actor,
+        ),
+      });
+    }
+    methodNotAllowed(["GET", "POST"]);
+  }
+
+  const knowledgeProposalMatch = pathname.match(/^\/api\/knowledge-proposals\/([^/]+)$/);
+  if (knowledgeProposalMatch) {
+    requireNoQuery(url, "Knowledge proposal routes");
+    const proposalId = decodePathPart(knowledgeProposalMatch[1], "Knowledge proposal id");
+    if (request.method === "GET") {
+      const proposal = await getKnowledgeProposal(env, proposalId);
+      if (!proposal) {
+        throw new ApiError(404, "KNOWLEDGE_PROPOSAL_NOT_FOUND", `Knowledge proposal '${proposalId}' does not exist`);
+      }
+      return json(200, { proposal });
+    }
+    if (request.method === "PATCH") {
+      return json(200, {
+        proposal: await updateKnowledgeProposal(
+          env,
+          proposalId,
+          parseKnowledgeProposalPatch(await readJson(request)),
+          actor,
+        ),
+      });
+    }
+    methodNotAllowed(["GET", "PATCH"]);
   }
 
   const workflowMatch = pathname.match(
@@ -2187,6 +2770,28 @@ async function routeApi(request, env, actor, url) {
     methodNotAllowed(["PATCH", "DELETE"]);
   }
 
+  const taskThreadMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/threads\/([^/]+)$/,
+  );
+  if (taskThreadMatch) {
+    requireNoQuery(url, "Task thread routes");
+    if (request.method !== "DELETE") methodNotAllowed(["DELETE"]);
+    const taskId = decodePathPart(taskThreadMatch[1], "Task id");
+    const threadId = stringField(
+      decodePathPart(taskThreadMatch[2], "Thread id"),
+      "threadId",
+      { required: true, maxLength: 256 },
+    );
+    return json(200, {
+      task: await unlinkTaskThread(
+        env,
+        taskId,
+        threadId,
+        parseTaskThreadDelete(await readJson(request)),
+      ),
+    });
+  }
+
   const taskAttachmentsMatch = pathname.match(
     /^\/api\/tasks\/([^/]+)\/attachments$/,
   );
@@ -2231,7 +2836,7 @@ async function routeApi(request, env, actor, url) {
   }
 
   const taskMatch = pathname.match(
-    /^\/api\/tasks\/([^/]+)(?:\/(archive|restore|move))?$/,
+    /^\/api\/tasks\/([^/]+)(?:\/(archive|restore|move|transfer))?$/,
   );
   if (taskMatch) {
     const taskId = decodePathPart(taskMatch[1], "Task id");
@@ -2258,6 +2863,13 @@ async function routeApi(request, env, actor, url) {
       return json(200, {
         task: await moveTask(env, taskId, parseMove(await readJson(request))),
       });
+    }
+    if (action === "transfer" && request.method === "POST") {
+      return json(200, await transferTask(
+        env,
+        taskId,
+        parseTaskTransfer(await readJson(request)),
+      ));
     }
     if (action === "archive" && request.method === "POST") {
       return json(200, {

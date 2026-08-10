@@ -25,8 +25,9 @@ test("issue detail renders descriptions and comments with GFM markdown", () => {
   assert.match(detailSource, /import remarkGfm from "remark-gfm";/);
   assert.match(
     detailSource,
-    /<ReactMarkdown[\s\S]*remarkPlugins=\{\[remarkGfm\]\}[\s\S]*>\s*\{value\}\s*<\/ReactMarkdown>/,
+    /<ReactMarkdown[\s\S]*remarkPlugins=\{\[remarkGfm\]\}[\s\S]*>\s*\{normalizeOrderedListMarkers\(value\)\}\s*<\/ReactMarkdown>/,
   );
+  assert.match(detailSource, /function normalizeOrderedListMarkers/);
   assert.match(
     detailSource,
     /\{description \? <DescriptionDocument value=\{description\} \/> : "添加描述…"\}/,

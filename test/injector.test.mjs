@@ -42,6 +42,9 @@ test("the CDP bridge accepts service, composer, and exact thread correlation act
   assert.match(runtimeSource, /request\.instruction\.length <= 8_192/);
   assert.match(runtimeSource, /request\.skillPath\.length <= 1_024/);
   assert.match(source, /function prefillTaskComposerViaCdp/);
+  assert.match(source, /function submitTaskComposerViaCdp/);
+  assert.match(source, /label === "发送" \|\| label === "send" \|\| label === "submit"/);
+  assert.match(runtimeSource, /typeof request\.submit === "boolean"/);
   assert.match(source, /resolveCodexSessionByMarker/);
   assert.match(source, /cdp\.send\("Input\.insertText", \{ text: "\$" \}\)/);
   assert.match(source, /data-composer-overlay-floating-ui/);
@@ -63,6 +66,8 @@ test("new task threads use a durable request marker instead of sidebar ordering"
   assert.match(injectionSource, /requestHost\("resolve-task-thread"/);
   assert.doesNotMatch(injectionSource, /检测到多个新会话/);
   assert.doesNotMatch(injectionSource, /ambiguitySeenCount/);
+  assert.match(injectionSource, /THREAD_LINK_BLOCKING_TIMEOUT_MS = 5 \* 60 \* 1_000/);
+  assert.match(injectionSource, /releaseExpiredThreadTransaction\(\)/);
 });
 
 test("the CDP bridge exposes only the fixed Taskboard automation operations", () => {
@@ -97,6 +102,8 @@ test("the macOS Dock launcher enables loopback-only CDP before Codex starts", ()
   assert.match(launcherSource, /--remote-debugging-address=127\.0\.0\.1/);
   assert.match(launcherSource, /--remote-debugging-port=\$cdp_port/);
   assert.match(launcherSource, /--remote-allow-origins=http:\/\/127\.0\.0\.1:/);
+  assert.match(launcherSource, /--disable-features=LocalNetworkAccessChecks/);
+  assert.match(source, /--disable-features=LocalNetworkAccessChecks/);
   assert.match(launcherSource, /if codex_is_running; then/);
   assert.match(launcherSource, /inject_current_codex/);
   assert.match(launcherSource, /--port "\$cdp_port" --open/);
@@ -106,7 +113,7 @@ test("the macOS Dock launcher enables loopback-only CDP before Codex starts", ()
 });
 
 test("the login supervisor is passive and never requests a Codex restart", () => {
-  assert.match(supervisorSource, /--watch --open/);
+  assert.match(supervisorSource, /--watch --open --attach-existing/);
   assert.match(supervisorSource, /attached_cdp_signature/);
   assert.match(supervisorSource, /Detected a new Codex CDP instance/);
   assert.match(supervisorSource, /function stop_duplicate_injectors|stop_duplicate_injectors\(\)/);
@@ -143,7 +150,31 @@ test("a completed web build reloads the current injection source and iframe", ()
   assert.match(source, /--remote-debugging-port=/);
   assert.match(source, /taskboard\.reloadFrame\(\)/);
   assert.match(source, /__codex_taskboard_refresh/);
-  assert.match(source, /await restartResidentInjectorForRefresh\(port\)/);
+  assert.match(source, /if \(options\.refresh\) await restartResidentInjectorForRefresh\(port\)/);
+});
+
+test("renderer recovery tolerates transient delays and reattaches without reloading Codex", () => {
+  assert.match(source, /const hostHeartbeatTimeoutMs = 5_000/);
+  assert.match(source, /const hostHeartbeatFailureThreshold = 3/);
+  assert.match(source, /const heartbeatFailures = new Map\(\)/);
+  assert.match(source, /"cdp-heartbeat-delayed"/);
+  assert.match(source, /"cdp-reconnect-required"/);
+  assert.match(source, /classifyHeartbeatFailure/);
+  assert.match(source, /true,\s*options\.startupToken,/);
+  assert.match(launcherSource, /--open --attach-existing/);
+});
+
+test("a fresh renderer performs one CSP bootstrap reload before loading Taskboard", () => {
+  assert.match(source, /rendererBootstrapReason/);
+  assert.match(source, /event: "cdp-csp-bootstrap-reload"/);
+  assert.match(source, /reason: bootstrapReason/);
+  assert.match(source, /await cdp\.send\("Page\.reload"\)/);
+});
+
+test("an iframe URL is not reported loaded before the Taskboard ready handshake makes it visible", () => {
+  assert.match(source, /frameVisible: document\.getElementById\("codex-taskboard-frame"\)\?\.hidden === false/);
+  assert.match(source, /!status\.pageVisible \|\| !status\.frameUrl \|\| !status\.frameVisible/);
+  assert.match(source, /status\.frameVisible && status\.frameUrl/);
 });
 
 test("the injected iframe follows the configured local service port", () => {

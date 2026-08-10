@@ -77,7 +77,8 @@ test("health and the default local project are available", async () => {
   assert.equal(metadata.response.status, 200);
   assert.deepEqual(metadata.body, {
     manageTaskboardSkillPath: skillPath,
-    capabilities: { localAiChat: true },
+    claudeRuntime: true,
+    capabilities: { localAiChat: true, localKnowledge: true },
   });
 
   const result = await request(baseUrl, "/api/projects");
@@ -1599,6 +1600,20 @@ test("issue comments can be created, edited, listed, and deleted", async () => {
   const taskAfterUpdate = await request(baseUrl, `/api/tasks/${task.id}`);
   assert.equal(taskAfterUpdate.body.task.threadId, null);
 
+  const unlinkResult = await request(baseUrl, `/api/comments/${comment.id}`, {
+    method: "PATCH",
+    body: { version: updated.version, body: updated.body, threadId: null },
+  });
+  assert.equal(unlinkResult.response.status, 200);
+  const unlinked = unlinkResult.body.comment;
+  assert.equal(unlinked.threadId, null);
+  assert.equal(unlinked.version, 3);
+  const taskAfterUnlink = await request(baseUrl, `/api/tasks/${task.id}`);
+  assert.equal(
+    taskAfterUnlink.body.task.threadIds.includes("00000000-0000-4000-8000-000000000013"),
+    false,
+  );
+
   const staleUpdate = await request(baseUrl, `/api/comments/${comment.id}`, {
     method: "PATCH",
     body: { version: comment.version, body: "Stale edit" },
@@ -1608,7 +1623,7 @@ test("issue comments can be created, edited, listed, and deleted", async () => {
 
   const deleteResult = await request(baseUrl, `/api/comments/${comment.id}`, {
     method: "DELETE",
-    body: { version: updated.version, threadId: "00000000-0000-4000-8000-000000000014" },
+    body: { version: unlinked.version, threadId: "00000000-0000-4000-8000-000000000014" },
   });
   assert.equal(deleteResult.response.status, 204);
 

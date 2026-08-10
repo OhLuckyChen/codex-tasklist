@@ -3,8 +3,8 @@ export const TASK_STATUSES = [
   "todo",
   "in_progress",
   "in_review",
-  "blocked",
   "done",
+  "blocked",
   "canceled",
   "archived",
 ] as const;
@@ -13,7 +13,8 @@ export const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"] as co
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export type ActorType = "user" | "agent";
-export type AssigneeTarget = "current-user" | "codex-agent";
+export type AssigneeTarget = "current-user" | "codex-agent" | "claude-agent";
+export type TaskRuntime = "codex" | "claude";
 export type IssueRelationType = "parent" | "blocks" | "blocked_by" | "related";
 
 export interface ActorIdentity {
@@ -39,6 +40,7 @@ export interface DevelopmentScan {
 
 export interface TaskboardMetadata {
   manageTaskboardSkillPath?: string;
+  claudeRuntime?: boolean;
   capabilities?: TaskboardCapabilities;
   mode?: "local" | "cloud";
   realtime?: {
@@ -52,6 +54,114 @@ export interface TaskboardMetadata {
 
 export interface TaskboardCapabilities {
   localAiChat: boolean;
+  localKnowledge?: boolean;
+}
+
+export type KnowledgeSourceType =
+  | "project_scan"
+  | "issue"
+  | "comments"
+  | "question"
+  | "stale_refresh"
+  | "project_review";
+
+export type KnowledgeProposalStatus = "generating" | "ready" | "published" | "rejected" | "failed";
+export type KnowledgeOperation = "create" | "update" | "delete";
+export type KnowledgeHealthStatus = "fresh" | "stale" | "unverified" | "missing_sources";
+
+export interface KnowledgeDevelopmentContext {
+  type: "branch" | "worktree";
+  branch: string | null;
+}
+
+export interface KnowledgeSourceState {
+  type?: string;
+  ref?: string;
+  revision?: string;
+  symbol?: string;
+  actualRevision?: string | number | null;
+  status: "fresh" | "stale" | "missing" | "unverified";
+}
+
+export interface KnowledgePageSummary {
+  path: string;
+  id: string;
+  title: string;
+  kind: string;
+  updatedAt: string | null;
+  health: KnowledgeHealthStatus;
+  sources: KnowledgeSourceState[];
+}
+
+export interface KnowledgePage extends KnowledgePageSummary {
+  content: string;
+}
+
+export interface KnowledgeOverview {
+  initialized: boolean;
+  pages: KnowledgePageSummary[];
+  health: {
+    fresh: number;
+    stale: number;
+    unverified: number;
+    missingSources: number;
+  };
+  indexPath: string | null;
+}
+
+export interface KnowledgeSearchResult {
+  path: string;
+  title: string;
+  kind: string;
+  excerpt: string;
+}
+
+export interface KnowledgeProposalChange {
+  id: string;
+  proposalId?: string;
+  targetPath: string;
+  operation: KnowledgeOperation;
+  baseDigest: string | null;
+  beforeContent: string | null;
+  afterContent: string | null;
+  sortOrder: number;
+}
+
+export interface KnowledgeProposal {
+  id: string;
+  projectId: string;
+  title: string;
+  sourceType: KnowledgeSourceType;
+  sourceSnapshot: Record<string, unknown>;
+  developmentContext: KnowledgeDevelopmentContext | null;
+  status: KnowledgeProposalStatus;
+  summary: string;
+  error: string | null;
+  creator: Pick<ActorIdentity, "type" | "id" | "name">;
+  publisher: Pick<ActorIdentity, "type" | "id" | "name"> | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  changes: KnowledgeProposalChange[];
+}
+
+export interface GeneratedKnowledgeProposal {
+  title: string;
+  summary: string;
+  sourceType: KnowledgeSourceType;
+  sourceSnapshot: Record<string, unknown>;
+  developmentContext: KnowledgeDevelopmentContext | null;
+  changes: KnowledgeProposalChange[];
+}
+
+export interface KnowledgeAnswer {
+  answer: string;
+  citations: Array<{
+    type: "knowledge" | "file" | "issue";
+    ref: string;
+    label: string;
+  }>;
 }
 
 export type AiChatSandbox = "read-only" | "workspace-write" | "danger-full-access";
@@ -193,6 +303,23 @@ export interface TaskRelations {
   related: TaskRelationSummary[];
 }
 
+export type DetachedTaskRelationType =
+  | "parent"
+  | "sub_issue"
+  | "blocked_by"
+  | "blocks"
+  | "related";
+
+export interface TaskProjectTransferResult {
+  task: Task;
+  previousProjectId: string;
+  previousIdentifier: string;
+  detachedRelations: Array<{
+    type: DetachedTaskRelationType;
+    task: TaskRelationSummary;
+  }>;
+}
+
 export interface Task {
   id: string;
   identifier: string;
@@ -205,6 +332,7 @@ export interface Task {
   sortOrder: number;
   threadId: string | null;
   threadIds: string[];
+  runtime: TaskRuntime;
   creatorType: ActorType;
   creatorId: string;
   creatorName: string;
@@ -275,6 +403,14 @@ export interface TaskDraft {
   developmentContext: DevelopmentContext | null;
   dueDate: string | null;
   recurrence: Recurrence | null;
+}
+
+export interface IssueDraft {
+  id: string;
+  projectId: string;
+  content: TaskDraft;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface TaskEvent {

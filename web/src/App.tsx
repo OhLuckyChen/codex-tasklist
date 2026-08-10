@@ -26,10 +26,15 @@ import {
   chooseLocalDirectory,
   createProject as createProjectRequest,
   createTask as createTaskRequest,
+  createKnowledgeProposal,
+  createClaudeSession,
+  generateKnowledgeProposal,
+  resumeClaudeSession,
   getTaskboardRevision,
   getWorkflowWorkspace,
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
+  unlinkTaskThread as unlinkTaskThreadRequest,
   listComments,
   listDevelopmentContexts,
   listDeviceWorkspaces,
@@ -38,6 +43,7 @@ import {
   moveTask as moveTaskRequest,
   removeTaskRelation,
   setCurrentUserActor,
+  transferTaskProject as transferTaskProjectRequest,
   uploadAttachment,
   updateComment as updateCommentRequest,
   updateTask as updateTaskRequest,
@@ -49,7 +55,10 @@ import {
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { AiChat } from "./components/AiChat";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
+import { DraftBox } from "./components/DraftBox";
+import { FavoriteTaskList } from "./components/FavoriteTaskList";
 import { HiddenColumns } from "./components/HiddenColumns";
+import { KnowledgeCenter } from "./components/KnowledgeCenter";
 import {
   resolveInlineMediaMarkdown,
   type PendingInlineImage,
@@ -78,11 +87,13 @@ import {
   type Comment,
   type DevelopmentScan,
   type HostContext,
+  type IssueDraft,
   type IssueRelationType,
   type Project,
   type Task,
   type TaskboardMetadata,
   type TaskDraft,
+  type TaskRuntime,
   type TaskStatus,
   type WorkflowOption,
 } from "./types";
@@ -97,8 +108,11 @@ import { createRevisionPoller, getRevisionPollingInterval } from "./revisionPoll
 
 type ConnectionState = "connecting" | "live" | "reconnecting";
 type Theme = "light" | "dark";
-type BoardView = "issues" | "workflow";
+type BoardView = "issues" | "drafts" | "knowledge" | "workflow";
 const SHOW_WORKFLOW_BOARD_ENTRY = false;
+const GLOBAL_PROJECT_ID = "__all_projects__";
+const GLOBAL_VIEW_QUERY_PARAM = "view";
+const GLOBAL_VIEW_QUERY_VALUE = "global";
 
 const WorkflowBoard = lazy(() => import("./components/WorkflowBoard").then((module) => ({
   default: module.WorkflowBoard,
@@ -107,6 +121,8 @@ const WorkflowBoard = lazy(() => import("./components/WorkflowBoard").then((modu
 interface EditorState {
   task: Task | null;
   status: TaskStatus;
+  projectId: string;
+  draft?: IssueDraft;
   parentTaskId?: string;
 }
 
@@ -147,6 +163,8 @@ interface PendingThreadRequest {
   taskId: string;
   projectId: string;
   commentId?: string;
+  action?: "create" | "follow-up";
+  threadId?: string;
   createdAt: number;
 }
 
@@ -224,8 +242,10 @@ const DEFAULT_USER_ACTOR: ActorIdentity = {
 
 const LAST_PROJECT_KEY = "taskboard.lastProjectId";
 const PENDING_THREAD_REQUESTS_KEY = "taskboard.pendingThreadRequests.v1";
-const PENDING_THREAD_REQUEST_TTL_MS = 24 * 60 * 60 * 1_000;
+const PENDING_THREAD_REQUEST_TTL_MS = 5 * 60 * 1_000;
 const FAVORITE_PROJECTS_KEY = "taskboard.favoriteProjectIds";
+const FAVORITE_TASKS_KEY = "taskboard.favoriteTaskIds.v1";
+const FAVORITE_VIEW_MODE_KEY = "taskboard.favoriteTaskViewMode.v1";
 const PROJECT_ALIASES_KEY = "taskboard.projectAliases.v1";
 const PROJECT_ORDER_KEY = "taskboard.projectOrder.v1";
 const ARCHIVED_PROJECTS_KEY = "taskboard.archivedProjectIds.v1";
@@ -234,7 +254,9 @@ const DEVICE_WORKSPACE_PATHS_KEY = "taskboard.deviceWorkspacePaths.v1";
 const SHOW_EMPTY_COLUMNS_KEY = "taskboard.showEmptyColumns.v1";
 const COLUMN_VISIBILITY_KEY = "taskboard.columnVisibility.v1";
 const GLOBAL_COLUMN_VISIBILITY_KEY = "taskboard.globalColumnVisibility.v1";
+const COLUMN_ORDER_KEY = "taskboard.columnOrder.v1";
 const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
+const ISSUE_DRAFTS_KEY = "taskboard.issueDrafts.v1";
 const DEFAULT_AUTOMATION_OPTIONS = {
   enabledByUser: false,
   quotaAware: false,
@@ -257,6 +279,8 @@ const EVENT_NAMES = [
   "attachment.deleted",
   "project.created",
   "workflow.updated",
+  "knowledge-proposal.created",
+  "knowledge-proposal.updated",
 ] as const;
 
 function isTheme(value: unknown): value is Theme {
@@ -278,6 +302,19 @@ function readFavoriteProjectIds(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+function readFavoriteTaskIds(): Set<string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(FAVORITE_TASKS_KEY) ?? "[]");
+    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function readFavoriteViewMode(): "list" | "board" {
+  return window.localStorage.getItem(FAVORITE_VIEW_MODE_KEY) === "list" ? "list" : "board";
 }
 
 function readProjectAliases(): Record<string, string> {
@@ -328,6 +365,8 @@ function readPendingThreadRequests(): Map<string, PendingThreadRequest> {
         || typeof candidate.taskId !== "string"
         || typeof candidate.projectId !== "string"
         || (candidate.commentId !== undefined && typeof candidate.commentId !== "string")
+        || (candidate.action !== undefined && candidate.action !== "create" && candidate.action !== "follow-up")
+        || (candidate.threadId !== undefined && typeof candidate.threadId !== "string")
         || typeof candidate.createdAt !== "number"
         || candidate.createdAt < cutoff
       ) continue;
@@ -483,6 +522,50 @@ function readGlobalColumnVisibility(): Partial<Record<TaskStatus, boolean>> | nu
   }
 }
 
+function readColumnOrder(): TaskStatus[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(COLUMN_ORDER_KEY) ?? "[]");
+    if (!Array.isArray(value)) return [...TASK_STATUSES];
+    const stored = value.filter(
+      (status, index): status is TaskStatus => (
+        TASK_STATUSES.includes(status as TaskStatus) && value.indexOf(status) === index
+      ),
+    );
+    return [...stored, ...TASK_STATUSES.filter((status) => !stored.includes(status))];
+  } catch {
+    return [...TASK_STATUSES];
+  }
+}
+
+function readIssueDrafts(): IssueDraft[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(ISSUE_DRAFTS_KEY) ?? "[]");
+    if (!Array.isArray(value)) return [];
+    return value.filter((candidate): candidate is IssueDraft => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+      const draft = candidate as Partial<IssueDraft>;
+      const content = draft.content as Partial<TaskDraft> | undefined;
+      return (
+        typeof draft.id === "string"
+        && typeof draft.projectId === "string"
+        && typeof draft.createdAt === "string"
+        && typeof draft.updatedAt === "string"
+        && content !== undefined
+        && typeof content.title === "string"
+        && typeof content.description === "string"
+        && TASK_STATUSES.includes(content.status as TaskStatus)
+        && Array.isArray(content.labels)
+      );
+    }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  } catch {
+    return [];
+  }
+}
+
+function persistIssueDrafts(drafts: IssueDraft[]) {
+  window.localStorage.setItem(ISSUE_DRAFTS_KEY, JSON.stringify(drafts));
+}
+
 function workspaceName(path?: string): string | null {
   if (!path) return null;
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -546,6 +629,7 @@ function taskToDraft(task: Task): TaskDraft {
 interface LocalRealtimeSyncProps {
   selectedProjectId: string;
   detailTaskId: string | null;
+  onTaskChange: (task: Task) => void;
   refreshProjectList: () => Promise<void>;
   refreshTasks: (
     projectId: string,
@@ -555,18 +639,22 @@ interface LocalRealtimeSyncProps {
   setConnection: Dispatch<SetStateAction<ConnectionState>>;
   setCommentsRevision: Dispatch<SetStateAction<number>>;
   setAttachmentsRevision: Dispatch<SetStateAction<number>>;
+  setKnowledgeRevision: Dispatch<SetStateAction<number>>;
 }
 
 function LocalRealtimeSync({
   selectedProjectId,
   detailTaskId,
+  onTaskChange,
   refreshProjectList,
   refreshTasks,
   refreshWorkflowOptions,
   setConnection,
   setCommentsRevision,
   setAttachmentsRevision,
+  setKnowledgeRevision,
 }: LocalRealtimeSyncProps) {
+  const isGlobalBoard = selectedProjectId === GLOBAL_PROJECT_ID;
   useEffect(() => {
     const source = new EventSource("/api/events");
     let refreshTimer: number | undefined;
@@ -589,25 +677,26 @@ function LocalRealtimeSync({
 
     const handleEvent = (event: Event) => {
       const message = event as MessageEvent<string>;
-      let payload: { projectId?: string; taskId?: string } = {};
+      let payload: { projectId?: string; taskId?: string; task?: Task } = {};
       try {
-        payload = JSON.parse(message.data) as { projectId?: string; taskId?: string };
+        payload = JSON.parse(message.data) as { projectId?: string; taskId?: string; task?: Task };
       } catch {
         // A malformed event should not interrupt later updates.
       }
       const affectsSelectedProject = Boolean(selectedProjectId)
-        && (!payload.projectId || payload.projectId === selectedProjectId);
+        && (isGlobalBoard || !payload.projectId || payload.projectId === selectedProjectId);
       if (event.type === "project.created") {
         scheduleRefresh({ projects: true });
         return;
       }
       if (event.type.startsWith("task.")) {
+        if (payload.task) onTaskChange(payload.task);
         scheduleRefresh({ projects: true, tasks: affectsSelectedProject });
         return;
       }
       if (!affectsSelectedProject) return;
       if (event.type === "workflow.updated") {
-        if (selectedProjectId) void refreshWorkflowOptions(selectedProjectId);
+        if (selectedProjectId && !isGlobalBoard) void refreshWorkflowOptions(selectedProjectId);
         return;
       }
       if (event.type.startsWith("comment.")) {
@@ -615,6 +704,10 @@ function LocalRealtimeSync({
           setCommentsRevision((current) => current + 1);
         }
         scheduleRefresh({ tasks: true });
+        return;
+      }
+      if (event.type.startsWith("knowledge-proposal.")) {
+        setKnowledgeRevision((current) => current + 1);
         return;
       }
       if (event.type.startsWith("attachment.")) {
@@ -629,7 +722,7 @@ function LocalRealtimeSync({
     source.onopen = () => {
       setConnection("live");
       scheduleRefresh({ projects: true, tasks: Boolean(selectedProjectId) });
-      if (selectedProjectId) void refreshWorkflowOptions(selectedProjectId);
+      if (selectedProjectId && !isGlobalBoard) void refreshWorkflowOptions(selectedProjectId);
       if (detailTaskId) {
         setCommentsRevision((current) => current + 1);
         setAttachmentsRevision((current) => current + 1);
@@ -644,11 +737,14 @@ function LocalRealtimeSync({
     };
   }, [
     detailTaskId,
+    isGlobalBoard,
+    onTaskChange,
     refreshProjectList,
     refreshTasks,
     refreshWorkflowOptions,
     selectedProjectId,
     setAttachmentsRevision,
+    setKnowledgeRevision,
     setCommentsRevision,
     setConnection,
   ]);
@@ -665,8 +761,10 @@ export function App() {
   const [developmentScan, setDevelopmentScan] = useState<DevelopmentScan>({ workspacePath: null, contexts: [] });
   const [developmentScanLoading, setDevelopmentScanLoading] = useState(false);
   const [manageTaskboardSkillPath, setManageTaskboardSkillPath] = useState("");
+  const [claudeRuntimeSupported, setClaudeRuntimeSupported] = useState(false);
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [localAiChatAvailable, setLocalAiChatAvailable] = useState(false);
+  const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -681,19 +779,28 @@ export function App() {
   const [showEmptyColumns] = useState(readShowEmptyColumns);
   const [columnVisibilityByProject, setColumnVisibilityByProject] = useState(readColumnVisibilityByProject);
   const [globalColumnVisibility, setGlobalColumnVisibility] = useState(readGlobalColumnVisibility);
+  const [columnOrder, setColumnOrder] = useState(readColumnOrder);
   const [boardView, setBoardView] = useState<BoardView>("issues");
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [issueDrafts, setIssueDrafts] = useState(readIssueDrafts);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
     () => readIssueIdentifier(window.location.search),
   );
   const [commentsRevision, setCommentsRevision] = useState(0);
   const [attachmentsRevision, setAttachmentsRevision] = useState(0);
   const [workflowRevision, setWorkflowRevision] = useState(0);
+  const [knowledgeRevision, setKnowledgeRevision] = useState(0);
+  const [knowledgeProposalCount, setKnowledgeProposalCount] = useState(0);
   const [workflowOptions, setWorkflowOptions] = useState<WorkflowOption[]>(DEFAULT_WORKFLOW_OPTIONS);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [draggedTaskHeight, setDraggedTaskHeight] = useState(0);
   const [dropTarget, setDropTarget] = useState<TaskStatus | null>(null);
+  const [draggedColumnStatus, setDraggedColumnStatus] = useState<TaskStatus | null>(null);
+  const [columnDropTarget, setColumnDropTarget] = useState<{
+    status: TaskStatus;
+    position: "before" | "after";
+  } | null>(null);
   const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
   const [settlingTaskId, setSettlingTaskId] = useState<string | null>(null);
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
@@ -702,6 +809,9 @@ export function App() {
   const finalizingThreadRequestsRef = useRef(new Set<string>());
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
+  const [favoriteTaskIds, setFavoriteTaskIds] = useState(readFavoriteTaskIds);
+  const [favoriteTasksOnly, setFavoriteTasksOnly] = useState(false);
+  const [favoriteViewMode, setFavoriteViewMode] = useState(readFavoriteViewMode);
   const [projectAliases, setProjectAliases] = useState(readProjectAliases);
   const [projectOrder, setProjectOrder] = useState(readProjectOrder);
   const [archivedProjectIds, setArchivedProjectIds] = useState(readArchivedProjectIds);
@@ -720,6 +830,8 @@ export function App() {
   const [undoNotice, setUndoNotice] = useState<UndoNotice | null>(null);
   const tasksRequestRef = useRef(0);
   const tasksRef = useRef<Task[]>([]);
+  const reviewTaskSnapshotsRef = useRef(new Map<string, Pick<Task, "status" | "version">>());
+  const reviewTaskSnapshotsReadyRef = useRef(false);
   const undoSequenceRef = useRef(0);
   const undoStackRef = useRef<UndoOperation[]>([]);
   const undoInFlightRef = useRef(false);
@@ -737,6 +849,67 @@ export function App() {
     setUndoNotice(null);
     setAnnouncementValue(message);
   }, []);
+
+  const showReviewNotification = useCallback((task: Task) => {
+    const threadId = normalizeCodexThreadId(task.threadId ?? "");
+    if (!threadId || typeof Notification !== "function" || Notification.permission !== "granted") return;
+    const notification = new Notification("任务已完成，等待审核", {
+      body: `${task.identifier} · ${task.title}`,
+      tag: `taskboard-review-${task.id}-${task.version}`,
+    });
+    notification.onclick = () => {
+      notification.close();
+      window.focus();
+      openThread(threadId);
+    };
+  }, [embedded]);
+
+  const recordReviewTaskChange = useCallback((task: Task) => {
+    const previous = reviewTaskSnapshotsRef.current.get(task.id);
+    reviewTaskSnapshotsRef.current.set(task.id, {
+      status: task.status,
+      version: task.version,
+    });
+    if (
+      reviewTaskSnapshotsReadyRef.current
+      && previous
+      && previous.status !== "in_review"
+      && task.status === "in_review"
+    ) {
+      showReviewNotification(task);
+    }
+  }, [showReviewNotification]);
+
+  const refreshReviewTaskSnapshots = useCallback(async (
+    notifyChanges: boolean,
+    signal?: AbortSignal,
+  ) => {
+    try {
+      const nextTasks = await listTasks(undefined, signal);
+      if (signal?.aborted) return;
+      const previousSnapshots = reviewTaskSnapshotsRef.current;
+      const nextSnapshots = new Map<string, Pick<Task, "status" | "version">>();
+      for (const task of nextTasks) {
+        const previous = previousSnapshots.get(task.id);
+        nextSnapshots.set(task.id, { status: task.status, version: task.version });
+        if (
+          notifyChanges
+          && reviewTaskSnapshotsReadyRef.current
+          && previous
+          && previous.status !== "in_review"
+          && task.status === "in_review"
+        ) {
+          showReviewNotification(task);
+        }
+      }
+      reviewTaskSnapshotsRef.current = nextSnapshots;
+      reviewTaskSnapshotsReadyRef.current = true;
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        // Notification synchronization must not interrupt the board itself.
+      }
+    }
+  }, [showReviewNotification]);
 
   const activateCodexProject = useCallback((draft: ProjectCreateDraft) => {
     if (!embedded || window.parent === window) {
@@ -774,7 +947,21 @@ export function App() {
     });
   }, []);
 
+  const isGlobalBoard = selectedProjectId === GLOBAL_PROJECT_ID;
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
+  const projectNames = useMemo(
+    () => Object.fromEntries(projects.map((project) => [
+      project.id,
+      projectAliases[project.id] ?? project.name,
+    ])),
+    [projectAliases, projects],
+  );
+  const visibleIssueDrafts = useMemo(
+    () => (isGlobalBoard
+      ? issueDrafts
+      : issueDrafts.filter((draft) => draft.projectId === selectedProjectId)),
+    [isGlobalBoard, issueDrafts, selectedProjectId],
+  );
   const currentUser = hostContext?.user ?? DEFAULT_USER_ACTOR;
   const selectedDeviceWorkspacePath = deviceWorkspacePaths[selectedProjectId];
   const selectedProjectAutomation = projectAutomations[selectedProjectId];
@@ -1121,9 +1308,23 @@ export function App() {
   function openTaskDetail(task: Pick<Task, "identifier" | "projectId">) {
     closeContextMenu();
     setProjectMenuOpen(false);
+    const fromGlobalBoard = selectedProjectId === GLOBAL_PROJECT_ID;
+    if (fromGlobalBoard) {
+      setSelectedProjectId(task.projectId);
+      window.localStorage.setItem(LAST_PROJECT_KEY, task.projectId);
+    }
     setDetailTaskIdentifier(task.identifier);
     const currentIssue = readIssueIdentifier(window.location.search);
-    const boardUrl = buildIssueUrl(window.location.href, task.projectId, null);
+    const boardUrl = buildIssueUrl(
+      window.location.href,
+      fromGlobalBoard ? null : task.projectId,
+      null,
+    );
+    if (fromGlobalBoard) {
+      boardUrl.searchParams.set(GLOBAL_VIEW_QUERY_PARAM, GLOBAL_VIEW_QUERY_VALUE);
+    } else {
+      boardUrl.searchParams.delete(GLOBAL_VIEW_QUERY_PARAM);
+    }
     if (!currentIssue) {
       window.history.replaceState(window.history.state, "", boardUrl);
     }
@@ -1136,16 +1337,32 @@ export function App() {
   }
 
   function closeTaskDetail() {
+    const currentUrl = new URL(window.location.href);
+    const returnToGlobal = currentUrl.searchParams.get(GLOBAL_VIEW_QUERY_PARAM) === GLOBAL_VIEW_QUERY_VALUE;
     setDetailTaskIdentifier(null);
-    const url = buildIssueUrl(window.location.href, selectedProjectId || null, null);
+    if (returnToGlobal) {
+      setBoardView("issues");
+      setSelectedProjectId(GLOBAL_PROJECT_ID);
+      window.localStorage.removeItem(LAST_PROJECT_KEY);
+    }
+    const url = buildIssueUrl(
+      window.location.href,
+      returnToGlobal ? null : selectedProjectId || null,
+      null,
+    );
     window.history.replaceState(window.history.state, "", url);
   }
 
   useEffect(() => {
     function syncRouteFromLocation() {
       const url = new URL(window.location.href);
-      const routeProjectId = url.searchParams.get("project") ?? "";
-      setDetailTaskIdentifier(readIssueIdentifier(url.search));
+      const routeIssueIdentifier = readIssueIdentifier(url.search);
+      const routeIsGlobalBoard = !routeIssueIdentifier
+        && url.searchParams.get(GLOBAL_VIEW_QUERY_PARAM) === GLOBAL_VIEW_QUERY_VALUE;
+      const routeProjectId = routeIsGlobalBoard
+        ? GLOBAL_PROJECT_ID
+        : url.searchParams.get("project") ?? "";
+      setDetailTaskIdentifier(routeIssueIdentifier);
       if (routeProjectId === selectedProjectId) return;
       setBoardView("issues");
       setSelectedProjectId(routeProjectId);
@@ -1171,6 +1388,13 @@ export function App() {
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+
+  useEffect(() => {
+    if (!taskboardMetadata) return;
+    const controller = new AbortController();
+    void refreshReviewTaskSnapshots(false, controller.signal);
+    return () => controller.abort();
+  }, [refreshReviewTaskSnapshots, taskboardMetadata]);
 
   useEffect(() => {
     if (!projectMenuOpen) return;
@@ -1268,56 +1492,68 @@ export function App() {
           || typeof payload.threadId !== "string"
         ) return;
         const pendingRequest = pendingThreadRequestsRef.current.get(payload.requestId);
-        if (!pendingRequest || pendingRequest.taskId !== payload.taskId) return;
-        if (finalizingThreadRequestsRef.current.has(payload.requestId)) return;
+        if (
+          !pendingRequest
+          || pendingRequest.action === "follow-up"
+          || pendingRequest.taskId !== payload.taskId
+        ) return;
         const threadId = normalizeCodexThreadId(payload.threadId);
         if (!threadId) return;
         const commentId = pendingRequest.commentId ?? (
           typeof payload.commentId === "string" ? payload.commentId : undefined
         );
         if (pendingRequest.commentId && pendingRequest.commentId !== payload.commentId) return;
+        void finalizeThreadLink({
+          requestId: payload.requestId,
+          taskId: payload.taskId,
+          projectId: pendingRequest.projectId,
+          commentId,
+          threadId,
+          runtime: "codex",
+          sendAck: true,
+        });
+        return;
+      }
+
+      if (message.type === "taskboard:thread-followed-up" && message.payload) {
+        const payload = message.payload as {
+          requestId?: unknown;
+          taskId?: unknown;
+          threadId?: unknown;
+        };
+        if (
+          typeof payload.requestId !== "string"
+          || typeof payload.taskId !== "string"
+          || typeof payload.threadId !== "string"
+        ) return;
+        const pendingRequest = pendingThreadRequestsRef.current.get(payload.requestId);
+        if (
+          !pendingRequest
+          || pendingRequest.action !== "follow-up"
+          || pendingRequest.taskId !== payload.taskId
+        ) return;
+        if (finalizingThreadRequestsRef.current.has(payload.requestId)) return;
+        const threadId = normalizeCodexThreadId(payload.threadId);
+        if (!threadId || normalizeCodexThreadId(pendingRequest.threadId) !== threadId) return;
         finalizingThreadRequestsRef.current.add(payload.requestId);
         void (async () => {
           try {
-            if (commentId) {
-              let commentLinked = false;
-              for (let attempt = 0; attempt < 2 && !commentLinked; attempt += 1) {
-                const comments = await listComments(payload.taskId as string);
-                const comment = comments.find((candidate) => candidate.id === commentId);
-                if (!comment) throw new Error("没有找到需要关联会话的评论。");
-                if (normalizeCodexThreadId(comment.threadId) === threadId) {
-                  commentLinked = true;
-                  break;
-                }
-                try {
-                  await updateCommentRequest(comment, comment.body, threadId);
-                  commentLinked = true;
-                } catch (error) {
-                  if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT" || attempt > 0) {
-                    throw error;
-                  }
-                }
-              }
-              if (!commentLinked) throw new Error("评论会话关联没有完成。");
-              setCommentsRevision((current) => current + 1);
-            }
-
             let latestTasks = await listTasks(pendingRequest.projectId);
             let task = latestTasks.find((candidate) => candidate.id === payload.taskId);
-            if (!task) throw new Error("没有找到需要关联会话的议题。");
-            if (normalizeCodexThreadId(task.threadId) !== threadId) {
+            if (!task) throw new Error("没有找到需要继续跟进的议题。");
+            let resumed = false;
+            for (let attempt = 0; task.status === "in_review" && attempt < 2; attempt += 1) {
               try {
-                task = await linkTaskThreadRequest(task, threadId);
+                task = await moveTaskRequest(task, "in_progress", undefined, threadId);
+                resumed = true;
                 latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
               } catch (error) {
-                if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT") throw error;
+                if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT" || attempt > 0) {
+                  throw error;
+                }
                 latestTasks = await listTasks(pendingRequest.projectId);
                 task = latestTasks.find((candidate) => candidate.id === payload.taskId);
-                if (!task) throw new Error("没有找到需要关联会话的议题。");
-                if (normalizeCodexThreadId(task.threadId) !== threadId) {
-                  task = await linkTaskThreadRequest(task, threadId);
-                  latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
-                }
+                if (!task) throw new Error("没有找到需要继续跟进的议题。");
               }
             }
             if (selectedProjectIdRef.current === pendingRequest.projectId) {
@@ -1326,12 +1562,15 @@ export function App() {
             pendingThreadRequestsRef.current.delete(payload.requestId as string);
             writePendingThreadRequests(pendingThreadRequestsRef.current);
             setOpeningThreadTaskId(null);
+            if (resumed) {
+              setAnnouncement(`${task.identifier} 已恢复为进行中。`);
+            }
             window.parent.postMessage({
               type: "taskboard:thread-link-ack",
-              payload: { requestId: payload.requestId, taskId: payload.taskId, commentId, threadId },
+              payload: { requestId: payload.requestId, taskId: payload.taskId, threadId },
             }, "*");
           } catch (error) {
-            setActionError(`会话已创建，但关联尚未完成：${errorMessage(error)} 将自动重试。`);
+            setActionError(`跟进消息已发送，但状态尚未更新：${errorMessage(error)} 将自动重试。`);
           } finally {
             finalizingThreadRequestsRef.current.delete(payload.requestId as string);
           }
@@ -1403,7 +1642,9 @@ export function App() {
           : metadata
       ));
       setManageTaskboardSkillPath(metadata.manageTaskboardSkillPath ?? "");
+      setClaudeRuntimeSupported(metadata.claudeRuntime === true);
       setLocalAiChatAvailable(metadata.capabilities?.localAiChat === true);
+      setLocalKnowledgeAvailable(metadata.capabilities?.localKnowledge === true);
       setDeviceWorkspacePaths((current) => {
         const next = { ...current, ...workspaces };
         if (JSON.stringify(next) === JSON.stringify(current)) return current;
@@ -1412,9 +1653,14 @@ export function App() {
       });
       setProjects(nextProjects);
       setSelectedProjectId((current) => {
-        const fromQuery = new URLSearchParams(window.location.search).get("project");
+        const route = new URLSearchParams(window.location.search);
+        const fromQuery = route.get("project");
+        const fromGlobalView = !readIssueIdentifier(route.toString())
+          && route.get(GLOBAL_VIEW_QUERY_PARAM) === GLOBAL_VIEW_QUERY_VALUE;
         const remembered = window.localStorage.getItem(LAST_PROJECT_KEY);
         if (fromQuery && nextProjects.some((project) => project.id === fromQuery)) return fromQuery;
+        if (fromGlobalView) return GLOBAL_PROJECT_ID;
+        if (current === GLOBAL_PROJECT_ID) return current;
         if (current && nextProjects.some((project) => project.id === current)) return current;
         if (remembered && nextProjects.some((project) => project.id === remembered)) return remembered;
         return "";
@@ -1448,7 +1694,10 @@ export function App() {
     if (!options.quiet) setTasksLoading(true);
     setLoadError(null);
     try {
-      const nextTasks = await listTasks(projectId, options.signal);
+      const nextTasks = await listTasks(
+        projectId === GLOBAL_PROJECT_ID ? undefined : projectId,
+        options.signal,
+      );
       if (requestId !== tasksRequestRef.current) return;
       setTasks(sortTasks(nextTasks));
       setHasLoadedTasks(true);
@@ -1479,7 +1728,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!selectedProjectId || isGlobalBoard) {
       setWorkflowOptions(DEFAULT_WORKFLOW_OPTIONS);
       return;
     }
@@ -1491,10 +1740,10 @@ export function App() {
       }
     });
     return () => controller.abort();
-  }, [refreshWorkflowOptions, selectedProjectId]);
+  }, [isGlobalBoard, refreshWorkflowOptions, selectedProjectId]);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!selectedProjectId || isGlobalBoard) {
       setDevelopmentScan({ workspacePath: null, contexts: [] });
       return;
     }
@@ -1528,6 +1777,7 @@ export function App() {
     hostContext?.projectId,
     hostContext?.threadId,
     rememberDeviceWorkspacePath,
+    isGlobalBoard,
     selectedProjectId,
     selectedDeviceWorkspacePath,
   ]);
@@ -1549,13 +1799,15 @@ export function App() {
         }
       },
       onInvalidate: () => {
+        void refreshReviewTaskSnapshots(true);
         void refreshProjectList();
         const projectId = selectedProjectIdRef.current;
         if (projectId) {
           void refreshTasks(projectId, { quiet: true });
-          void refreshWorkflowOptions(projectId).catch(() => {});
+          if (projectId !== GLOBAL_PROJECT_ID) void refreshWorkflowOptions(projectId).catch(() => {});
         }
         setWorkflowRevision((current) => current + 1);
+        setKnowledgeRevision((current) => current + 1);
         setCommentsRevision((current) => current + 1);
         setAttachmentsRevision((current) => current + 1);
       },
@@ -1567,6 +1819,7 @@ export function App() {
     };
   }, [
     revisionPollingInterval,
+    refreshReviewTaskSnapshots,
     refreshProjectList,
     refreshTasks,
     refreshWorkflowOptions,
@@ -1637,7 +1890,7 @@ export function App() {
         && boardView === "issues"
       ) {
         event.preventDefault();
-        setEditor({ task: null, status: "todo" });
+        openNewIssue();
       }
       if (event.key === "/" && !detailTaskId && selectedProjectId && boardView === "issues") {
         event.preventDefault();
@@ -1654,9 +1907,18 @@ export function App() {
 
   const filteredTasks = useMemo(() => {
     return tasks.filter(
-      (task) => matchesTaskSearch(task, search) && matchesTaskFilters(task, filters),
+      (task) => (
+        (!favoriteTasksOnly || favoriteTaskIds.has(task.id))
+        && matchesTaskSearch(task, search)
+        && matchesTaskFilters(task, filters)
+      ),
     );
-  }, [filters, search, tasks]);
+  }, [favoriteTaskIds, favoriteTasksOnly, filters, search, tasks]);
+
+  const favoriteTaskCount = useMemo(
+    () => tasks.filter((task) => favoriteTaskIds.has(task.id)).length,
+    [favoriteTaskIds, tasks],
+  );
 
   const activeFilterCount = taskFilterCount(filters);
 
@@ -1669,18 +1931,35 @@ export function App() {
   const columnVisibility = globalColumnVisibility ?? columnVisibilityByProject[selectedProjectId];
 
   const visibleStatuses = useMemo(
-    () => TASK_STATUSES.filter((status) => (
+    () => columnOrder.filter((status) => (
       columnVisibility?.[status] ?? (showEmptyColumns || tasksByStatus[status].length > 0)
     )),
-    [columnVisibility, showEmptyColumns, tasksByStatus],
+    [columnOrder, columnVisibility, showEmptyColumns, tasksByStatus],
   );
 
   const hiddenStatuses = useMemo(
-    () => TASK_STATUSES.filter((status) => !(
+    () => columnOrder.filter((status) => !(
       columnVisibility?.[status] ?? (showEmptyColumns || tasksByStatus[status].length > 0)
     )),
-    [columnVisibility, showEmptyColumns, tasksByStatus],
+    [columnOrder, columnVisibility, showEmptyColumns, tasksByStatus],
   );
+
+  function moveColumn(
+    source: TaskStatus,
+    target: TaskStatus,
+    position: "before" | "after",
+  ) {
+    setColumnOrder((current) => {
+      const next = current.filter((status) => status !== source);
+      const targetIndex = next.indexOf(target);
+      if (targetIndex < 0) return current;
+      next.splice(targetIndex + (position === "after" ? 1 : 0), 0, source);
+      window.localStorage.setItem(COLUMN_ORDER_KEY, JSON.stringify(next));
+      return next;
+    });
+    setDraggedColumnStatus(null);
+    setColumnDropTarget(null);
+  }
 
   function updateColumnVisibility(status: TaskStatus, visible: boolean) {
     if (globalColumnVisibility !== null) {
@@ -1723,21 +2002,73 @@ export function App() {
     setBoardView(view);
   }
 
+  function openNewIssue(status: TaskStatus = "todo", projectId?: string) {
+    const targetProjectId = projectId
+      ?? selectedProject?.id
+      ?? projects.find((project) => !archivedProjectIds.has(project.id))?.id
+      ?? "";
+    if (!targetProjectId) {
+      setActionError("请先新增一个项目，再创建议题或草稿。");
+      return;
+    }
+    setEditor({ task: null, status, projectId: targetProjectId });
+  }
+
+  function editIssueDraft(draft: IssueDraft) {
+    setEditor({
+      task: null,
+      status: draft.content.status,
+      projectId: draft.projectId,
+      draft,
+    });
+  }
+
+  function saveIssueDraft(content: TaskDraft) {
+    if (!editor || editor.task || !editor.projectId) return;
+    const timestamp = new Date().toISOString();
+    const saved: IssueDraft = {
+      id: editor.draft?.id ?? crypto.randomUUID(),
+      projectId: editor.projectId,
+      content,
+      createdAt: editor.draft?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    };
+    setIssueDrafts((current) => {
+      const next = [saved, ...current.filter((draft) => draft.id !== saved.id)]
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      persistIssueDrafts(next);
+      return next;
+    });
+    setEditor(null);
+    setAnnouncement("草稿已保存。");
+  }
+
+  function deleteIssueDraft(draft: IssueDraft) {
+    setIssueDrafts((current) => {
+      const next = current.filter((candidate) => candidate.id !== draft.id);
+      persistIssueDrafts(next);
+      return next;
+    });
+    setAnnouncement("草稿已删除。");
+  }
+
   async function saveEditor(
     draft: TaskDraft,
     attachments: File[],
     inlineImages: PendingInlineImage[],
   ) {
-    if (!selectedProjectId || !editor) return;
+    if (!editor) return;
+    const editorProjectId = editor.task?.projectId ?? editor.projectId;
+    if (!editorProjectId) return;
     setActionError(null);
     try {
       const creating = editor.task === null;
       let saved = editor.task
         ? await updateTaskRequest(editor.task, draft)
-        : await createTaskRequest(selectedProjectId, draft);
+        : await createTaskRequest(editorProjectId, draft);
       if (creating) {
         setProjects((current) => current.map((project) => (
-          project.id === selectedProjectId
+          project.id === editorProjectId
             ? { ...project, issueCount: project.issueCount + 1 }
             : project
         )));
@@ -1775,6 +2106,13 @@ export function App() {
         saved,
       ]));
       setEditor(null);
+      if (editor.draft) {
+        setIssueDrafts((current) => {
+          const next = current.filter((candidate) => candidate.id !== editor.draft?.id);
+          persistIssueDrafts(next);
+          return next;
+        });
+      }
       if (failedAttachments > 0) {
         setActionError(`${saved.identifier} 已创建，但有 ${failedAttachments} 个附件上传失败，可在详情页重试。`);
       }
@@ -1799,10 +2137,88 @@ export function App() {
       }
     } catch (error) {
       if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
-        void refreshTasks(selectedProjectId, { quiet: true });
+        void refreshTasks(selectedProjectId || editorProjectId, { quiet: true });
       }
       throw error;
     }
+  }
+
+  function knowledgeWorkspaceForTask(task: Task): string | undefined {
+    const taskContext = task.developmentContext;
+    if (taskContext?.type === "worktree") {
+      const matchingWorktree = developmentScan.contexts.find((context) => (
+        context.type === "worktree"
+        && (context.path === taskContext.path
+          || (taskContext.branch && context.branch === taskContext.branch))
+      ));
+      if (matchingWorktree?.type === "worktree") return matchingWorktree.path;
+    }
+    return selectedDeviceWorkspacePath
+      ?? developmentScan.workspacePath
+      ?? selectedProject?.workspacePath
+      ?? hostContext?.workspacePath;
+  }
+
+  async function createTaskKnowledgeProposal(
+    task: Task,
+    selectedComments?: Comment[],
+    trigger = "manual",
+  ): Promise<boolean> {
+    if (!localKnowledgeAvailable) {
+      throw new Error("当前入口无法访问本地项目文件，请通过本地 companion 打开。");
+    }
+    const workspacePath = knowledgeWorkspaceForTask(task);
+    if (!workspacePath) throw new Error("请先为项目映射本地目录。");
+    const comments = selectedComments ?? await listComments(task.id);
+    const sourceType = selectedComments ? "comments" as const : "issue" as const;
+    const generated = await generateKnowledgeProposal(task.projectId, {
+      workspacePath,
+      sourceType,
+      developmentContext: task.developmentContext
+        ? { type: task.developmentContext.type, branch: task.developmentContext.branch }
+        : null,
+      sourceSnapshot: {
+        trigger,
+        capturedAt: new Date().toISOString(),
+        issue: {
+          id: task.id,
+          identifier: task.identifier,
+          title: task.title,
+          description: task.description,
+          status: task.status,
+          version: task.version,
+          updatedAt: task.updatedAt,
+          labels: task.labels,
+        },
+        comments: comments.map((comment) => ({
+          id: comment.id,
+          body: comment.body,
+          authorName: comment.authorName,
+          version: comment.version,
+          updatedAt: comment.updatedAt,
+          attachments: comment.attachments.map((attachment) => ({
+            id: attachment.id,
+            filename: attachment.filename,
+            contentType: attachment.contentType,
+          })),
+        })),
+      },
+    });
+    if (generated.changes.length === 0) return false;
+    await createKnowledgeProposal(task.projectId, generated);
+    setKnowledgeRevision((current) => current + 1);
+    return true;
+  }
+
+  function queueAutomaticKnowledgeReview(task: Task, trigger: "in_review" | "completed") {
+    if (!localKnowledgeAvailable || !knowledgeWorkspaceForTask(task)) return;
+    void createTaskKnowledgeProposal(task, undefined, trigger)
+      .then((created) => {
+        setAnnouncement(created
+          ? `${task.identifier} 已生成待确认知识提案。`
+          : `${task.identifier} 复盘完成，没有新的长期知识。`);
+      })
+      .catch((error) => setActionError(`知识复盘未完成：${errorMessage(error)}`));
   }
 
   async function moveTask(
@@ -1857,6 +2273,9 @@ export function App() {
       setTasks((current) => sortTasks(current.map((candidate) =>
         candidate.id === moved.id ? moved : candidate,
       )));
+      if (task.status !== moved.status && (moved.status === "in_review" || moved.status === "done")) {
+        queueAutomaticKnowledgeReview(moved, moved.status === "done" ? "completed" : "in_review");
+      }
       const message = task.status === status
         ? `${task.identifier} 排序已调整。`
         : `${task.identifier} 已移至${STATUS_DETAILS[status].label}。`;
@@ -1913,6 +2332,9 @@ export function App() {
       setTasks((current) => sortTasks(current.map((candidate) =>
         candidate.id === updated.id ? updated : candidate,
       )));
+      if (previous.status !== updated.status && (updated.status === "in_review" || updated.status === "done")) {
+        queueAutomaticKnowledgeReview(updated, updated.status === "done" ? "completed" : "in_review");
+      }
       const previousAssigneeTarget = assigneeTargetForActor(previous.assignee, currentUser);
       if (!assigneeTarget || previousAssigneeTarget) {
         pushUndo(
@@ -1933,10 +2355,62 @@ export function App() {
     }
   }
 
+  async function transferTaskToProject(task: Task, projectId: string) {
+    setActionError(null);
+    try {
+      const result = await transferTaskProjectRequest(task, projectId);
+      setProjects((current) => current.map((project) => {
+        if (project.id === result.previousProjectId) {
+          return { ...project, issueCount: Math.max(0, project.issueCount - 1) };
+        }
+        if (project.id === projectId) {
+          return { ...project, issueCount: project.issueCount + 1 };
+        }
+        return project;
+      }));
+      setBoardView("issues");
+      setSelectedProjectId(projectId);
+      setTasks([result.task]);
+      setDetailTaskIdentifier(result.task.identifier);
+      setSearch("");
+      setFilters(EMPTY_TASK_FILTERS);
+      setFavoriteTasksOnly(false);
+      window.localStorage.setItem(LAST_PROJECT_KEY, projectId);
+      const url = buildIssueUrl(window.location.href, projectId, result.task.identifier);
+      url.searchParams.delete(GLOBAL_VIEW_QUERY_PARAM);
+      window.history.replaceState(window.history.state, "", url);
+      void refreshTasks(projectId, { quiet: true });
+      void refreshProjectList();
+      return result;
+    } catch (error) {
+      setActionError(error instanceof ApiError && error.code === "VERSION_CONFLICT"
+        ? "该议题已在其他位置更新，请刷新后重试迁移。"
+        : errorMessage(error));
+      throw error;
+    }
+  }
+
   async function linkTaskToThread(task: Task, threadId: string): Promise<Task> {
     setActionError(null);
     try {
       const updated = await linkTaskThreadRequest(task, threadId);
+      setTasks((current) => sortTasks(current.map((candidate) => (
+        candidate.id === updated.id ? updated : candidate
+      ))));
+      return updated;
+    } catch (error) {
+      setActionError(error instanceof ApiError && error.code === "VERSION_CONFLICT"
+        ? "该议题已在其他位置更新，看板已重新同步。"
+        : errorMessage(error));
+      if (selectedProjectId) void refreshTasks(selectedProjectId, { quiet: true });
+      throw error;
+    }
+  }
+
+  async function unlinkTaskFromThread(task: Task, threadId: string): Promise<Task> {
+    setActionError(null);
+    try {
+      const updated = await unlinkTaskThreadRequest(task, threadId);
       setTasks((current) => sortTasks(current.map((candidate) => (
         candidate.id === updated.id ? updated : candidate
       ))));
@@ -2010,10 +2484,22 @@ export function App() {
     }
   }
 
-  function openThread(threadId: string) {
+  function openThread(threadId: string, task?: Task) {
     const normalizedThreadId = normalizeCodexThreadId(threadId);
     if (!normalizedThreadId) {
-      setActionError("该任务关联的是旧版临时会话 ID，尚未形成可打开的 Codex 会话。");
+      setActionError("该任务关联的是旧版临时会话 ID，尚未形成可打开的会话。");
+      return;
+    }
+    const resolvedTask = task ?? tasks.find((candidate) => candidate.threadId === normalizedThreadId);
+    if (resolvedTask?.runtime === "claude") {
+      const workspacePath = resolveTaskWorkspacePath(resolvedTask);
+      if (!workspacePath) {
+        setActionError("该任务所属项目尚未映射本地目录，无法打开 Claude 会话。");
+        return;
+      }
+      void resumeClaudeSession({ threadId: normalizedThreadId, workspacePath }).catch((error) => {
+        setActionError(errorMessage(error));
+      });
       return;
     }
     if (embedded && window.parent !== window) {
@@ -2032,6 +2518,18 @@ export function App() {
     window.parent.postMessage({ type: "taskboard:expand-sidebar" }, "*");
   }
 
+  function resolveTaskWorkspacePath(task: Task): string | null {
+    const worktreePath = task.developmentContext?.type === "worktree"
+      ? task.developmentContext.path
+      : null;
+    const taskProject = projects.find((project) => project.id === task.projectId) ?? null;
+    const workspacePath = worktreePath
+      ?? deviceWorkspacePaths[task.projectId]
+      ?? taskProject?.workspacePath
+      ?? (task.projectId === selectedProjectId ? developmentScan.workspacePath : null);
+    return workspacePath ?? null;
+  }
+
   function taskThreadInstruction(task: Task, followUp?: string) {
     const instruction = `e-taskboard Addressing the issues mentioned in ${task.identifier}`;
     const normalizedFollowUp = followUp?.trim();
@@ -2040,19 +2538,136 @@ export function App() {
       : instruction;
   }
 
-  function openTaskInThread(task: Task, followUp?: string, comment?: Comment) {
+  async function finalizeThreadLink(args: {
+    requestId: string;
+    taskId: string;
+    projectId: string;
+    commentId?: string;
+    threadId: string;
+    runtime: TaskRuntime;
+    sendAck: boolean;
+  }) {
+    if (finalizingThreadRequestsRef.current.has(args.requestId)) return;
+    finalizingThreadRequestsRef.current.add(args.requestId);
+    try {
+      if (args.commentId) {
+        let commentLinked = false;
+        for (let attempt = 0; attempt < 2 && !commentLinked; attempt += 1) {
+          const comments = await listComments(args.taskId);
+          const comment = comments.find((candidate) => candidate.id === args.commentId);
+          if (!comment) throw new Error("没有找到需要关联会话的评论。");
+          if (normalizeCodexThreadId(comment.threadId) === args.threadId) {
+            commentLinked = true;
+            break;
+          }
+          try {
+            await updateCommentRequest(comment, comment.body, args.threadId);
+            commentLinked = true;
+          } catch (error) {
+            if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT" || attempt > 0) {
+              throw error;
+            }
+          }
+        }
+        if (!commentLinked) throw new Error("评论会话关联没有完成。");
+        setCommentsRevision((current) => current + 1);
+      }
+
+      let latestTasks = await listTasks(args.projectId);
+      let task = latestTasks.find((candidate) => candidate.id === args.taskId);
+      if (!task) throw new Error("没有找到需要关联会话的议题。");
+      if (normalizeCodexThreadId(task.threadId) !== args.threadId) {
+        try {
+          task = await linkTaskThreadRequest(task, args.threadId, args.runtime);
+          latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT") throw error;
+          latestTasks = await listTasks(args.projectId);
+          task = latestTasks.find((candidate) => candidate.id === args.taskId);
+          if (!task) throw new Error("没有找到需要关联会话的议题。");
+          if (normalizeCodexThreadId(task.threadId) !== args.threadId) {
+            task = await linkTaskThreadRequest(task, args.threadId, args.runtime);
+            latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
+          }
+        }
+      }
+      if (selectedProjectIdRef.current === args.projectId) {
+        setTasks(sortTasks(latestTasks));
+      }
+      pendingThreadRequestsRef.current.delete(args.requestId);
+      writePendingThreadRequests(pendingThreadRequestsRef.current);
+      setOpeningThreadTaskId(null);
+      if (args.sendAck && embedded && window.parent !== window) {
+        window.parent.postMessage({
+          type: "taskboard:thread-link-ack",
+          payload: { requestId: args.requestId, taskId: args.taskId, commentId: args.commentId, threadId: args.threadId },
+        }, "*");
+      }
+    } catch (error) {
+      setActionError(`会话已创建，但关联尚未完成：${errorMessage(error)} 将自动重试。`);
+    } finally {
+      finalizingThreadRequestsRef.current.delete(args.requestId);
+    }
+  }
+
+  function openTaskInThread(task: Task, followUp?: string, comment?: Comment, runtime: TaskRuntime = "codex") {
+    const taskProject = projects.find((project) => project.id === task.projectId) ?? null;
+    const workspacePath = resolveTaskWorkspacePath(task);
+    if (!taskProject || !workspacePath) {
+      setActionError("该任务所属项目尚未映射本地目录，无法创建正确归属的会话。");
+      return;
+    }
+    const instruction = taskThreadInstruction(task, followUp);
+
+    if (runtime === "claude") {
+      if (!claudeRuntimeSupported) {
+        setActionError("当前环境不支持 Claude Code 运行时（仅 macOS Terminal.app）。");
+        return;
+      }
+      if (openingThreadTaskId) return;
+      const requestId = crypto.randomUUID();
+      pendingThreadRequestsRef.current.set(requestId, {
+        taskId: task.id,
+        projectId: task.projectId,
+        commentId: comment?.id,
+        action: "create",
+        createdAt: Date.now(),
+      });
+      writePendingThreadRequests(pendingThreadRequestsRef.current);
+      setOpeningThreadTaskId(task.id);
+      setActionError(null);
+      void (async () => {
+        try {
+          const result = await createClaudeSession({
+            requestId,
+            taskId: task.id,
+            workspacePath,
+            instruction,
+            commentId: comment?.id,
+          });
+          await finalizeThreadLink({
+            requestId,
+            taskId: task.id,
+            projectId: task.projectId,
+            commentId: comment?.id,
+            threadId: result.threadId,
+            runtime: "claude",
+            sendAck: false,
+          });
+        } catch (error) {
+          pendingThreadRequestsRef.current.delete(requestId);
+          writePendingThreadRequests(pendingThreadRequestsRef.current);
+          setOpeningThreadTaskId(null);
+          setActionError(errorMessage(error) || "无法启动 Claude 会话。");
+        }
+      })();
+      return;
+    }
+
     if (!manageTaskboardSkillPath) {
       setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
       return;
     }
-    const worktreePath = task.developmentContext?.type === "worktree"
-      ? task.developmentContext.path
-      : null;
-    const workspacePath = worktreePath
-      ?? selectedDeviceWorkspacePath
-      ?? developmentScan.workspacePath
-      ?? hostContext?.workspacePath;
-    const instruction = taskThreadInstruction(task, followUp);
     const prompt = `[$manage-taskboard](${manageTaskboardSkillPath}) ${instruction}`;
 
     if (!embedded || window.parent === window) {
@@ -2064,11 +2679,13 @@ export function App() {
     }
     if (openingThreadTaskId) return;
     const requestId = crypto.randomUUID();
-    const codexProject = hostContext?.projects?.find((project) => project.id === selectedProject?.id);
+    const codexProject = hostContext?.projects?.find((project) => project.id === task.projectId)
+      ?? hostContext?.projects?.find((project) => deviceWorkspacePaths[project.id] === workspacePath);
     pendingThreadRequestsRef.current.set(requestId, {
       taskId: task.id,
       projectId: task.projectId,
       commentId: comment?.id,
+      action: "create",
       createdAt: Date.now(),
     });
     writePendingThreadRequests(pendingThreadRequestsRef.current);
@@ -2085,18 +2702,34 @@ export function App() {
         skillName: "manage-taskboard",
         skillDisplayName: "Manage Taskboard",
         skillPath: manageTaskboardSkillPath,
-        codexProjectId: codexProject?.id ?? (selectedProject?.id === "local" ? hostContext?.projectId : selectedProject?.id),
-        projectName: selectedProject?.name,
+        codexProjectId: codexProject?.id ?? taskProject.id,
+        projectName: taskProject.name,
         workspacePath,
-        workspaceLabel: worktreePath ? workspaceName(worktreePath) : undefined,
+        workspaceLabel: workspaceName(workspacePath),
       },
     }, "*");
   }
 
-  function followUpTaskInThread(task: Task, threadId: string, followUp: string) {
+  function followUpTaskInThread(task: Task, threadId: string, followUp: string, runtime: TaskRuntime = task.runtime) {
     const normalizedThreadId = normalizeCodexThreadId(threadId);
     if (!normalizedThreadId) {
       setActionError("该议题关联的是旧版临时会话 ID，无法继续跟进。");
+      return;
+    }
+    if (runtime === "claude") {
+      const workspacePath = resolveTaskWorkspacePath(task);
+      if (!workspacePath) {
+        setActionError("该任务所属项目尚未映射本地目录，无法打开 Claude 会话。");
+        return;
+      }
+      setActionError(null);
+      void resumeClaudeSession({
+        threadId: normalizedThreadId,
+        workspacePath,
+        followUp: taskThreadInstruction(task, followUp),
+      }).catch((error) => {
+        setActionError(errorMessage(error));
+      });
       return;
     }
     if (!manageTaskboardSkillPath) {
@@ -2104,15 +2737,25 @@ export function App() {
       return;
     }
     if (!embedded || window.parent === window) {
-      openThread(normalizedThreadId);
+      openThread(normalizedThreadId, task);
       return;
     }
     if (openingThreadTaskId) return;
+    const requestId = crypto.randomUUID();
+    pendingThreadRequestsRef.current.set(requestId, {
+      taskId: task.id,
+      projectId: task.projectId,
+      action: "follow-up",
+      threadId: normalizedThreadId,
+      createdAt: Date.now(),
+    });
+    writePendingThreadRequests(pendingThreadRequestsRef.current);
     setOpeningThreadTaskId(task.id);
     setActionError(null);
     window.parent.postMessage({
       type: "taskboard:follow-up-thread",
       payload: {
+        requestId,
         taskId: task.id,
         threadId: normalizedThreadId,
         identifier: task.identifier,
@@ -2133,10 +2776,28 @@ export function App() {
     window.localStorage.setItem(LAST_PROJECT_KEY, projectId);
     setSearch("");
     setFilters(EMPTY_TASK_FILTERS);
+    setFavoriteTasksOnly(false);
     setActionError(null);
     undoStackRef.current = [];
     setUndoNotice(null);
     const url = buildIssueUrl(window.location.href, projectId, null);
+    url.searchParams.delete(GLOBAL_VIEW_QUERY_PARAM);
+    window.history.replaceState(null, "", url);
+  }
+
+  function openGlobalBoard(view: "issues" | "drafts" = "issues") {
+    closeContextMenu();
+    setProjectMenuOpen(false);
+    setDetailTaskIdentifier(null);
+    setSelectedProjectId(GLOBAL_PROJECT_ID);
+    setBoardView(view);
+    window.localStorage.removeItem(LAST_PROJECT_KEY);
+    setSearch("");
+    setFilters(EMPTY_TASK_FILTERS);
+    setFavoriteTasksOnly(false);
+    setActionError(null);
+    const url = buildIssueUrl(window.location.href, null, null);
+    url.searchParams.set(GLOBAL_VIEW_QUERY_PARAM, GLOBAL_VIEW_QUERY_VALUE);
     window.history.replaceState(null, "", url);
   }
 
@@ -2148,10 +2809,12 @@ export function App() {
     window.localStorage.removeItem(LAST_PROJECT_KEY);
     setSearch("");
     setFilters(EMPTY_TASK_FILTERS);
+    setFavoriteTasksOnly(false);
     setActionError(null);
     undoStackRef.current = [];
     setUndoNotice(null);
     const url = buildIssueUrl(window.location.href, null, null);
+    url.searchParams.delete(GLOBAL_VIEW_QUERY_PARAM);
     window.history.replaceState(null, "", url);
     void loadProjectList();
   }
@@ -2166,6 +2829,18 @@ export function App() {
       return next;
     });
     setAnnouncement(`${projectName}${shouldFavorite ? "已收藏。" : "已取消收藏。"}`);
+  }
+
+  function toggleFavoriteTask(task: Task) {
+    const shouldFavorite = !favoriteTaskIds.has(task.id);
+    setFavoriteTaskIds((current) => {
+      const next = new Set(current);
+      if (shouldFavorite) next.add(task.id);
+      else next.delete(task.id);
+      window.localStorage.setItem(FAVORITE_TASKS_KEY, JSON.stringify([...next]));
+      return next;
+    });
+    setAnnouncement(`${task.identifier}${shouldFavorite ? "已添加到收藏夹。" : "已取消收藏。"}`);
   }
 
   function toggleFavoriteProject() {
@@ -2429,7 +3104,9 @@ export function App() {
   }
 
   const contextName = workspaceName(hostContext?.workspacePath);
-  const headerProjectName = projectAliases[selectedProjectId] ?? selectedProject?.name ?? "任务面板";
+  const headerProjectName = isGlobalBoard
+    ? "全局任务"
+    : projectAliases[selectedProjectId] ?? selectedProject?.name ?? "任务面板";
   const appShellStyle = embedded
     ? { "--codex-titlebar-left-inset": `${hostContext?.titlebarLeftInset ?? 0}px` } as CSSProperties
     : undefined;
@@ -2440,12 +3117,14 @@ export function App() {
         <LocalRealtimeSync
           selectedProjectId={selectedProjectId}
           detailTaskId={detailTaskId}
+          onTaskChange={recordReviewTaskChange}
           refreshProjectList={refreshProjectList}
           refreshTasks={refreshTasks}
           refreshWorkflowOptions={refreshWorkflowOptions}
           setConnection={setConnection}
           setCommentsRevision={setCommentsRevision}
           setAttachmentsRevision={setAttachmentsRevision}
+          setKnowledgeRevision={setKnowledgeRevision}
         />
       )}
       {!embedded && (
@@ -2595,7 +3274,7 @@ export function App() {
                   <strong>项目</strong>
                 </>
               )}
-              {!detailTask && selectedProjectId && (
+              {!detailTask && selectedProject && (
                 <button
                   className={`favorite-button${favoriteProjectIds.has(selectedProjectId) ? " active" : ""}`}
                   type="button"
@@ -2607,14 +3286,14 @@ export function App() {
                   <LinearIcon className="favorite-icon" name="favorite" />
                 </button>
               )}
-              {!detailTask && selectedProjectId && embedded && contextName && <span className="codex-context">{contextName}</span>}
+              {!detailTask && selectedProject && embedded && contextName && <span className="codex-context">{contextName}</span>}
             </div>
           </div>
 
           <div ref={dragRegionRef} className="workspace-drag-region" aria-hidden="true" />
 
           <div className="header-actions">
-            {selectedProjectId && (
+            {selectedProject && (
               <ProjectAutomationMenu
                 automation={selectedProjectAutomation}
                 pending={automationPending}
@@ -2628,7 +3307,7 @@ export function App() {
               <button
                 className="icon-button header-create-button"
                 type="button"
-                onClick={() => setEditor({ task: null, status: "todo" })}
+                onClick={() => openNewIssue()}
                 aria-label="新建议题"
                 title="新建议题 (C)"
               >
@@ -2644,12 +3323,37 @@ export function App() {
         {selectedProjectId && !detailTask && <div className="board-toolbar">
           <div className="view-tabs" aria-label="看板视图">
             <button
-              className={`view-tab${boardView === "issues" ? " active" : ""}`}
+              className={`view-tab${boardView === "issues" && !favoriteTasksOnly ? " active" : ""}`}
               type="button"
-              aria-pressed={boardView === "issues"}
-              onClick={() => selectBoardView("issues")}
+              aria-pressed={boardView === "issues" && !favoriteTasksOnly}
+              onClick={() => {
+                setFavoriteTasksOnly(false);
+                selectBoardView("issues");
+              }}
             >
               议题看板
+            </button>
+            <button
+              className={`view-tab${boardView === "drafts" ? " active" : ""}`}
+              type="button"
+              aria-pressed={boardView === "drafts"}
+              onClick={() => selectBoardView("drafts")}
+            >
+              草稿箱{visibleIssueDrafts.length > 0 ? ` ${visibleIssueDrafts.length}` : ""}
+            </button>
+            <button
+              className={`view-tab favorite-view-tab${boardView === "issues" && favoriteTasksOnly ? " active" : ""}`}
+              type="button"
+              aria-label="收藏议题"
+              aria-pressed={boardView === "issues" && favoriteTasksOnly}
+              onClick={() => {
+                if (!isGlobalBoard) openGlobalBoard("issues");
+                setFavoriteTasksOnly(true);
+                selectBoardView("issues");
+              }}
+            >
+              <LinearIcon name="favorite" />
+              收藏{favoriteTaskCount > 0 ? ` ${favoriteTaskCount}` : ""}
             </button>
             {SHOW_WORKFLOW_BOARD_ENTRY && (
               <button
@@ -2663,6 +3367,34 @@ export function App() {
             )}
           </div>
           {boardView === "issues" && <div className="toolbar-tools">
+            {favoriteTasksOnly && (
+              <div className="favorite-view-mode-switch" role="group" aria-label="收藏展示格式">
+                <button
+                  type="button"
+                  aria-label="列表格式"
+                  aria-pressed={favoriteViewMode === "list"}
+                  onClick={() => {
+                    setFavoriteViewMode("list");
+                    window.localStorage.setItem(FAVORITE_VIEW_MODE_KEY, "list");
+                  }}
+                >
+                  <LinearIcon name="myIssues" />
+                  <span>列表</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label="看板格式"
+                  aria-pressed={favoriteViewMode === "board"}
+                  onClick={() => {
+                    setFavoriteViewMode("board");
+                    window.localStorage.setItem(FAVORITE_VIEW_MODE_KEY, "board");
+                  }}
+                >
+                  <LinearIcon name="dashboard" />
+                  <span>看板</span>
+                </button>
+              </div>
+            )}
             <label className={`search-field${search ? " has-value" : ""}`} title="搜索议题 (/)" >
               <LinearIcon className="search-icon" name="search" />
               <span className="sr-only">搜索议题</span>
@@ -2688,13 +3420,13 @@ export function App() {
               onStatusVisibilityChange={updateColumnVisibility}
               onApplyToAllProjectsChange={updateGlobalColumnVisibility}
             />
-            {(search || activeFilterCount > 0) && (
+            {(search || activeFilterCount > 0 || favoriteTasksOnly) && (
               <button
                 className="clear-filter"
                 type="button"
                 aria-label="清除筛选"
                 title="清除筛选"
-                onClick={() => { setSearch(""); setFilters(EMPTY_TASK_FILTERS); }}
+                onClick={() => { setSearch(""); setFilters(EMPTY_TASK_FILTERS); setFavoriteTasksOnly(false); }}
               >
                 <LinearIcon name="close" />
               </button>
@@ -2729,6 +3461,14 @@ export function App() {
                   <button
                     className="project-create-trigger"
                     type="button"
+                    onClick={() => openGlobalBoard("drafts")}
+                  >
+                    <LinearIcon name="createIssue" />
+                    草稿箱{issueDrafts.length > 0 ? ` ${issueDrafts.length}` : ""}
+                  </button>
+                  <button
+                    className="project-create-trigger"
+                    type="button"
                     aria-expanded={projectCreatorOpen}
                     onClick={() => {
                       setActionError(null);
@@ -2758,6 +3498,14 @@ export function App() {
                       }}
                     >收藏排序</button>
                   </div>
+                  <button
+                    className="project-create-trigger"
+                    type="button"
+                    onClick={() => openGlobalBoard("issues")}
+                  >
+                    <LinearIcon name="myIssues" />
+                    全局任务视角
+                  </button>
                 </div>
               </div>
               <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
@@ -2831,6 +3579,15 @@ export function App() {
               </div>
             )}
           </section>
+        ) : boardView === "drafts" ? (
+          <DraftBox
+            drafts={visibleIssueDrafts}
+            projectNames={projectNames}
+            scopeName={isGlobalBoard ? "所有项目" : headerProjectName}
+            onCreate={() => openNewIssue()}
+            onEdit={editIssueDraft}
+            onDelete={deleteIssueDraft}
+          />
         ) : detailTask && selectedProject ? (
           <TaskDetail
             key={detailTask.id}
@@ -2843,11 +3600,17 @@ export function App() {
             developmentScanLoading={developmentScanLoading}
             commentsRevision={commentsRevision}
             attachmentsRevision={attachmentsRevision}
+            projectOptions={projects.map((project) => ({
+              id: project.id,
+              name: projectNames[project.id] ?? project.name,
+            }))}
             onUpdate={(current, changes) => updateTaskProperties(current, changes)}
+            onTransferProject={transferTaskToProject}
             onOpenTask={openTaskDetail}
             onCreateSubIssue={(parent) => setEditor({
               task: null,
               status: "todo",
+              projectId: parent.projectId,
               parentTaskId: parent.id,
             })}
             onAddRelation={(current, type, relatedTaskId) => (
@@ -2860,9 +3623,13 @@ export function App() {
             currentCodexThreadId={hostContext?.threadId}
             codexThreads={projectCodexThreads}
             onLinkThread={linkTaskToThread}
+            onUnlinkThread={unlinkTaskFromThread}
             onOpenInThread={openTaskInThread}
             onFollowUpInThread={followUpTaskInThread}
+            claudeRuntimeSupported={claudeRuntimeSupported}
             openingThread={openingThreadTaskId === detailTask.id}
+            isFavorite={favoriteTaskIds.has(detailTask.id)}
+            onToggleFavorite={toggleFavoriteTask}
             onError={setActionError}
             onAnnounce={setAnnouncement}
           />
@@ -2889,6 +3656,13 @@ export function App() {
               </div>
             ))}
           </div>
+        ) : favoriteTasksOnly && favoriteViewMode === "list" ? (
+          <FavoriteTaskList
+            tasks={filteredTasks}
+            projectNames={projectNames}
+            onOpenTask={openTaskDetail}
+            onToggleFavorite={toggleFavoriteTask}
+          />
         ) : (
           <div className="board-scroll" aria-label="Issue board">
             <div className="board">
@@ -2900,7 +3674,7 @@ export function App() {
                   <button
                     className="button secondary"
                     type="button"
-                    onClick={() => { setSearch(""); setFilters(EMPTY_TASK_FILTERS); }}
+                    onClick={() => { setSearch(""); setFilters(EMPTY_TASK_FILTERS); setFavoriteTasksOnly(false); }}
                   >
                     清除筛选
                   </button>
@@ -2912,14 +3686,19 @@ export function App() {
                   status={status}
                   statusIndex={TASK_STATUSES.indexOf(status)}
                   tasks={tasksByStatus[status]}
+                  projectNames={isGlobalBoard ? projectNames : undefined}
                   isDropTarget={dropTarget === status}
+                  isColumnDragging={draggedColumnStatus === status}
+                  columnDropPosition={columnDropTarget?.status === status ? columnDropTarget.position : null}
                   draggedTaskId={draggedTaskId}
                   draggedTaskHeight={draggedTaskHeight}
                   movingTaskId={movingTaskId}
                   settlingTaskId={settlingTaskId}
                   contextMenuTaskId={contextMenu?.taskId ?? null}
-                  onCreate={(initialStatus) => setEditor({ task: null, status: initialStatus })}
+                  favoriteTaskIds={favoriteTaskIds}
+                  onCreate={(initialStatus) => openNewIssue(initialStatus)}
                   onEdit={openTaskDetail}
+                  onToggleFavorite={toggleFavoriteTask}
                   onContextMenu={(task, position) => setContextMenu({ taskId: task.id, ...position })}
                   onMove={(task, destination) => void moveTask(task, destination)}
                   onDragStart={(task, height) => {
@@ -2934,6 +3713,22 @@ export function App() {
                   }}
                   onDragEnter={setDropTarget}
                   onDrop={finishTaskDrop}
+                  onColumnDragStart={(draggedStatus) => {
+                    setDraggedColumnStatus(draggedStatus);
+                    setColumnDropTarget(null);
+                  }}
+                  onColumnDragOver={(targetStatus, position) => {
+                    if (draggedColumnStatus && draggedColumnStatus !== targetStatus) {
+                      setColumnDropTarget({ status: targetStatus, position });
+                    }
+                  }}
+                  onColumnDrop={(sourceStatus, targetStatus, position) => {
+                    moveColumn(sourceStatus, targetStatus, position);
+                  }}
+                  onColumnDragEnd={() => {
+                    setDraggedColumnStatus(null);
+                    setColumnDropTarget(null);
+                  }}
                   onOpenThread={openThread}
                   onHide={(hiddenStatus) => updateColumnVisibility(hiddenStatus, false)}
                 />
@@ -2957,15 +3752,22 @@ export function App() {
 
       {editor && (
         <TaskEditor
-          key={editor.task?.id ?? `new-${editor.status}-${editor.parentTaskId ?? "root"}`}
+          key={editor.task?.id ?? editor.draft?.id ?? `new-${editor.status}-${editor.parentTaskId ?? "root"}`}
           task={editor.task}
+          initialDraft={editor.draft?.content}
           initialStatus={editor.status}
+          projectId={editor.projectId}
+          projectOptions={isGlobalBoard
+            ? projects.map((project) => ({ id: project.id, name: projectNames[project.id] ?? project.name }))
+            : []}
           labels={availableLabels}
           workflows={workflowOptions}
           currentUser={currentUser}
           developmentScan={developmentScan}
           developmentScanLoading={developmentScanLoading}
+          onProjectChange={(projectId) => setEditor((current) => current ? { ...current, projectId } : current)}
           onCancel={() => setEditor(null)}
+          onSaveDraft={editor.task ? undefined : saveIssueDraft}
           onSave={saveEditor}
         />
       )}
@@ -2997,7 +3799,7 @@ export function App() {
 
       <AiChat
         available={localAiChatAvailable}
-        projectId={selectedProjectId || null}
+        projectId={selectedProject?.id ?? null}
         issueId={detailTaskId}
       />
 

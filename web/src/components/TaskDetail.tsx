@@ -31,8 +31,10 @@ import type {
   Recurrence,
   Task,
   TaskDraft,
+  TaskProjectTransferResult,
   TaskPriority,
   TaskRelationSummary,
+  TaskRuntime,
   TaskStatus,
   WorkflowOption,
 } from "../types";
@@ -85,7 +87,9 @@ interface TaskDetailProps {
   developmentScanLoading: boolean;
   commentsRevision: number;
   attachmentsRevision: number;
+  projectOptions: Array<{ id: string; name: string }>;
   onUpdate: (task: Task, changes: Partial<TaskDraft>) => Promise<Task>;
+  onTransferProject: (task: Task, projectId: string) => Promise<TaskProjectTransferResult>;
   onOpenTask: (task: TaskRelationSummary) => void;
   onCreateSubIssue: (task: Task) => void;
   onAddRelation: (
@@ -102,9 +106,13 @@ interface TaskDetailProps {
   currentCodexThreadId?: string;
   codexThreads: CodexThreadSummary[];
   onLinkThread: (task: Task, threadId: string) => Promise<Task>;
-  onOpenInThread: (task: Task, followUp?: string, comment?: Comment) => void;
-  onFollowUpInThread: (task: Task, threadId: string, followUp: string) => void;
+  onUnlinkThread: (task: Task, threadId: string) => Promise<Task>;
+  onOpenInThread: (task: Task, followUp?: string, comment?: Comment, runtime?: TaskRuntime) => void;
+  onFollowUpInThread: (task: Task, threadId: string, followUp: string, runtime?: TaskRuntime) => void;
+  claudeRuntimeSupported: boolean;
   openingThread: boolean;
+  isFavorite: boolean;
+  onToggleFavorite: (task: Task) => void;
   onError: (message: string | null) => void;
   onAnnounce: (message: string) => void;
 }
@@ -157,6 +165,10 @@ function contextLabel(context: DevelopmentContext): string {
   return `${context.branch ?? "detached"} · ${folder}`;
 }
 
+function normalizeOrderedListMarkers(value: string): string {
+  return value.replace(/^(\s*\d+[.)])(?=\S)/gm, "$1 ");
+}
+
 function DescriptionDocument({ value }: { value: string }) {
   return (
     <div className="issue-description-document">
@@ -166,7 +178,7 @@ function DescriptionDocument({ value }: { value: string }) {
           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
         }}
       >
-        {value}
+        {normalizeOrderedListMarkers(value)}
       </ReactMarkdown>
     </div>
   );
@@ -346,7 +358,9 @@ export function TaskDetail({
   developmentScanLoading,
   commentsRevision,
   attachmentsRevision,
+  projectOptions,
   onUpdate,
+  onTransferProject,
   onOpenTask,
   onCreateSubIssue,
   onAddRelation,
@@ -355,9 +369,13 @@ export function TaskDetail({
   currentCodexThreadId,
   codexThreads,
   onLinkThread,
+  onUnlinkThread,
   onOpenInThread,
   onFollowUpInThread,
+  claudeRuntimeSupported,
   openingThread,
+  isFavorite,
+  onToggleFavorite,
   onError,
   onAnnounce,
 }: TaskDetailProps) {
@@ -367,8 +385,11 @@ export function TaskDetail({
   const [editingDescription, setEditingDescription] = useState(false);
   const [labelMenuOpen, setLabelMenuOpen] = useState(false);
   const [savingProperty, setSavingProperty] = useState<string | null>(null);
+  const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
+  const [migratingProject, setMigratingProject] = useState(false);
   const [linkingThreadId, setLinkingThreadId] = useState<string | null>(null);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
+  const [unlinkingThreadId, setUnlinkingThreadId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(true);
   const [attachmentsError, setAttachmentsError] = useState<string | null>(null);
@@ -378,6 +399,8 @@ export function TaskDetail({
   const [comments, setComments] = useState<Comment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(true);
   const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [activityOrder, setActivityOrder] = useState<"desc" | "asc">("desc");
+  const [commentSearch, setCommentSearch] = useState("");
   const [commentSegments, setCommentSegments] = useState<InlineMediaSegment[]>(
     () => createInlineMediaSegments(
       window.localStorage.getItem(`taskboard.comment-draft.${task.id}`) ?? "",
@@ -420,6 +443,19 @@ export function TaskDetail({
         projectId: currentTask.projectId,
       })),
   ];
+  const projectPropertyOptions = projectOptions.map((project) => ({
+    value: project.id,
+    label: project.name,
+    icon: <LinearIcon name="project" />,
+  }));
+  const pendingProject = projectOptions.find((project) => project.id === pendingProjectId) ?? null;
+  const currentRelations = [
+    ...(currentTask.relations.parent ? [currentTask.relations.parent] : []),
+    ...currentTask.relations.subIssues,
+    ...currentTask.relations.blockedBy,
+    ...currentTask.relations.blocks,
+    ...currentTask.relations.related,
+  ];
   const draft = serializeInlineMedia(commentSegments);
   const commentFollowUpText = inlineMediaText(commentSegments).trim();
   const commentInlineImages = inlineMediaImages(commentSegments);
@@ -428,11 +464,36 @@ export function TaskDetail({
     || pendingCommentFiles.length > 0
     || commentInlineImages.length > 0,
   );
+  const normalizedCommentSearch = commentSearch.trim().toLocaleLowerCase();
+  const filteredComments = normalizedCommentSearch
+    ? comments.filter((comment) => comment.body.toLocaleLowerCase().includes(normalizedCommentSearch))
+    : comments;
+  const orderedComments = activityOrder === "desc" ? [...filteredComments].reverse() : filteredComments;
+  const createdActivity = (
+    <div className={`activity-entry activity-created is-${currentTask.creatorType}`}>
+      <ActorAvatar
+        className="comment-avatar"
+        actor={{
+          type: currentTask.creatorType,
+          id: currentTask.creatorId,
+          name: currentTask.creatorName,
+          avatarUrl: currentTask.creatorAvatarUrl,
+        }}
+      />
+      <p>
+        <strong>{currentTask.creatorName}</strong>
+        <span className="actor-id">@{currentTask.creatorId}</span>
+        创建了此议题
+        <time title={exactTime(currentTask.createdAt)}>{relativeTime(currentTask.createdAt)}</time>
+      </p>
+    </div>
+  );
 
   useEffect(() => {
     setCurrentTask(task);
     setThreadMenuOpen(false);
     setCommentThreadMenuId(null);
+    setCommentSearch("");
     if (document.activeElement !== titleRef.current) setTitle(task.title);
     if (document.activeElement !== descriptionRef.current) setDescription(task.description);
   }, [task]);
@@ -592,6 +653,24 @@ export function TaskDetail({
     }
   }
 
+  async function confirmProjectTransfer() {
+    if (!pendingProjectId || migratingProject) return;
+    setMigratingProject(true);
+    onError(null);
+    try {
+      const result = await onTransferProject(currentTask, pendingProjectId);
+      setCurrentTask(result.task);
+      setTitle(result.task.title);
+      setDescription(result.task.description);
+      setPendingProjectId(null);
+      onAnnounce(`${result.previousIdentifier} 已迁移为 ${result.task.identifier}。`);
+    } catch (error) {
+      onError(messageFor(error));
+    } finally {
+      setMigratingProject(false);
+    }
+  }
+
   async function applyRelationMutation(
     mutation: () => Promise<RelationMutationResult>,
   ): Promise<RelationMutationResult> {
@@ -726,12 +805,13 @@ export function TaskDetail({
     }
   }
 
-  function openPublishedCommentInNewThread(comment: Comment) {
+  function openPublishedCommentInNewThread(comment: Comment, runtime: TaskRuntime = "codex") {
     setCommentThreadMenuId(null);
     onOpenInThread(
       currentTask,
       comment.body.trim() || "请查看这条评论及附件。",
       comment,
+      runtime,
     );
   }
 
@@ -743,12 +823,23 @@ export function TaskDetail({
     try {
       const updated = await updateComment(comment, comment.body, threadId);
       setComments((current) => current.map((item) => item.id === updated.id ? updated : item));
-      onAnnounce("评论已关联会话，正在打开。");
-      onFollowUpInThread(
-        currentTask,
-        threadId,
-        updated.body.trim() || "请查看这条评论及附件。",
-      );
+      onAnnounce("评论已关联会话。需要处理时，请点击“在关联会话处理”。");
+    } catch (error) {
+      setCommentsError(messageFor(error));
+    } finally {
+      setCommentThreadActionId(null);
+    }
+  }
+
+  async function dissociatePublishedCommentFromThread(comment: Comment) {
+    if (commentThreadActionId || !comment.threadId) return;
+    setCommentThreadMenuId(null);
+    setCommentThreadActionId(comment.id);
+    setCommentsError(null);
+    try {
+      const updated = await updateComment(comment, comment.body, null);
+      setComments((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onAnnounce("已解除评论与会话的关联。");
     } catch (error) {
       setCommentsError(messageFor(error));
     } finally {
@@ -843,6 +934,26 @@ export function TaskDetail({
       setCommentsError(messageFor(error));
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function unlinkThread(threadId: string) {
+    if (unlinkingThreadId) return;
+    setUnlinkingThreadId(threadId);
+    onError(null);
+    try {
+      const updated = await onUnlinkThread(currentTask, threadId);
+      setCurrentTask(updated);
+      setComments((current) => current.map((comment) => (
+        comment.threadId === threadId
+          ? { ...comment, threadId: null, version: comment.version + 1, updatedAt: updated.updatedAt }
+          : comment
+      )));
+      onAnnounce("已解除议题与会话的关联。");
+    } catch (error) {
+      onError(messageFor(error));
+    } finally {
+      setUnlinkingThreadId(null);
     }
   }
 
@@ -965,6 +1076,73 @@ export function TaskDetail({
   const visibleTaskAttachments = attachments.filter(
     (attachment) => !description.includes(attachmentContentUrl(attachment)),
   );
+  const commentComposer = (
+    <form
+      className={`comment-composer${activityOrder === "desc" ? " is-before-stream" : ""}`}
+      onSubmit={(event) => { event.preventDefault(); void submitComment(); }}
+    >
+      <div className="composer-author">
+        <ActorAvatar
+          className="comment-avatar"
+          actor={currentUser}
+        />
+        <strong>{currentUser.name}</strong>
+        <span className="actor-id">@{currentUser.id}</span>
+      </div>
+      <InlineMediaComposer
+        ref={composerRef}
+        className="comment-inline-media"
+        segments={commentSegments}
+        placeholder="留下评论…"
+        ariaLabel="留下评论"
+        onChange={setCommentSegments}
+        onError={setCommentsError}
+        onKeyDown={handleSubmitShortcut}
+      />
+      <PendingAttachments
+        files={pendingCommentFiles}
+        disabled={submitting}
+        uploadLabel="发布后上传"
+        ariaLabel="待上传评论附件"
+        className="comment-composer-files"
+        onRemove={(index) => setPendingCommentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+      />
+      <footer className="composer-footer">
+        <div className="composer-footer-leading">
+          <button
+            className="comment-attach-button"
+            type="button"
+            disabled={submitting}
+            aria-label="添加评论附件"
+            title="添加附件"
+            onClick={() => commentAttachmentInputRef.current?.click()}
+          >
+            <LinearIcon name="attachment" />
+          </button>
+          <span>草稿会自动保存</span>
+          <input
+            ref={commentAttachmentInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              if (event.currentTarget.files) stageCommentFiles(event.currentTarget.files);
+            }}
+          />
+        </div>
+        <div className="composer-submit-actions">
+          <kbd>⌘ Enter</kbd>
+          <button
+            className="button primary"
+            type="submit"
+            disabled={!canSubmitComment || submitting}
+          >
+            {submitting ? "发表中…" : "发表评论"}
+          </button>
+        </div>
+      </footer>
+    </form>
+  );
 
   return (
     <section className="issue-detail" aria-label={`${task.identifier} 议题详情`}>
@@ -973,20 +1151,32 @@ export function TaskDetail({
           <div className="issue-detail-main">
             <article className="issue-editor" aria-label="议题内容">
               <div className="issue-editor-content">
-                <textarea
-                  ref={titleRef}
-                  className="issue-title-input"
-                  rows={1}
-                  value={title}
-                  aria-label="议题标题"
-                  disabled={savingProperty === "title"}
-                  onChange={(event) => {
-                    setTitle(event.target.value.replace(/\n/g, ""));
-                    resizeTextarea(event.currentTarget);
-                  }}
-                  onKeyDown={handleTitleKeyDown}
-                  onBlur={() => void saveTitle()}
-                />
+                <div className="issue-title-row">
+                  <textarea
+                    ref={titleRef}
+                    className="issue-title-input"
+                    rows={1}
+                    value={title}
+                    aria-label="议题标题"
+                    disabled={savingProperty === "title"}
+                    onChange={(event) => {
+                      setTitle(event.target.value.replace(/\n/g, ""));
+                      resizeTextarea(event.currentTarget);
+                    }}
+                    onKeyDown={handleTitleKeyDown}
+                    onBlur={() => void saveTitle()}
+                  />
+                  <button
+                    className={`issue-favorite-button${isFavorite ? " active" : ""}`}
+                    type="button"
+                    aria-label={isFavorite ? `取消收藏 ${currentTask.identifier}` : `收藏 ${currentTask.identifier}`}
+                    aria-pressed={isFavorite}
+                    title={isFavorite ? "取消收藏" : "添加到收藏夹"}
+                    onClick={() => onToggleFavorite(currentTask)}
+                  >
+                    <LinearIcon name="favorite" />
+                  </button>
+                </div>
                 <IssueParentLink
                   task={currentTask}
                   tasks={tasks}
@@ -1042,22 +1232,45 @@ export function TaskDetail({
                 {linkedThreadIds.length > 0 && (
                   <div className="issue-conversation-list" aria-label="处理此议题的对话">
                     {currentTask.threadId && (
-                      <ConversationLink
-                        threadId={currentTask.threadId}
-                        onOpen={onOpenThread}
-                        label="当前会话"
-                      />
+                      <div className="comment-conversation-link issue-conversation-item">
+                        <ConversationLink
+                          threadId={currentTask.threadId}
+                          onOpen={onOpenThread}
+                          label="当前会话"
+                        />
+                        <button
+                          className="comment-conversation-unlink"
+                          type="button"
+                          aria-label={`解除会话 ${currentTask.threadId} 与议题的关联`}
+                          title="解除关联"
+                          disabled={Boolean(unlinkingThreadId)}
+                          onClick={() => void unlinkThread(currentTask.threadId!)}
+                        >
+                          <LinearIcon name="close" />
+                        </button>
+                      </div>
                     )}
                     {historicalThreadIds.length > 0 && (
                       <details className="issue-conversation-history">
                         <summary>历史相关会话（{historicalThreadIds.length}）</summary>
                         <div>
                           {historicalThreadIds.map((threadId) => (
-                            <ConversationLink
-                              key={threadId}
-                              threadId={threadId}
-                              onOpen={onOpenThread}
-                            />
+                            <div className="comment-conversation-link issue-conversation-item" key={threadId}>
+                              <ConversationLink
+                                threadId={threadId}
+                                onOpen={onOpenThread}
+                              />
+                              <button
+                                className="comment-conversation-unlink"
+                                type="button"
+                                aria-label={`解除会话 ${threadId} 与议题的关联`}
+                                title="解除关联"
+                                disabled={Boolean(unlinkingThreadId)}
+                                onClick={() => void unlinkThread(threadId)}
+                              >
+                                <LinearIcon name="close" />
+                              </button>
+                            </div>
                           ))}
                         </div>
                       </details>
@@ -1157,31 +1370,56 @@ export function TaskDetail({
             <section className="activity-section" aria-labelledby="activity-heading">
               <header className="activity-heading">
                 <h2 id="activity-heading">活动</h2>
-                <span>{comments.length}</span>
+                <span>{normalizedCommentSearch ? `${filteredComments.length}/${comments.length}` : comments.length}</span>
+                <div className="activity-order" role="group" aria-label="活动排序">
+                  <button
+                    type="button"
+                    aria-pressed={activityOrder === "desc"}
+                    onClick={() => setActivityOrder("desc")}
+                  >
+                    最新优先
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={activityOrder === "asc"}
+                    onClick={() => setActivityOrder("asc")}
+                  >
+                    最早优先
+                  </button>
+                </div>
               </header>
 
+              <div className={`comment-search${normalizedCommentSearch ? " has-value" : ""}`}>
+                <LinearIcon name="search" />
+                <input
+                  type="search"
+                  value={commentSearch}
+                  placeholder="搜索当前议题的评论内容"
+                  aria-label="搜索当前议题的评论内容"
+                  onChange={(event) => setCommentSearch(event.currentTarget.value)}
+                />
+                {commentSearch && (
+                  <button
+                    type="button"
+                    aria-label="清空评论搜索"
+                    title="清空搜索"
+                    onClick={() => setCommentSearch("")}
+                  >
+                    <LinearIcon name="close" />
+                  </button>
+                )}
+              </div>
+
+              {activityOrder === "desc" && commentComposer}
+
               <div className="activity-stream">
-                <div className={`activity-entry activity-created is-${currentTask.creatorType}`}>
-                  <ActorAvatar
-                    className="comment-avatar"
-                    actor={{
-                      type: currentTask.creatorType,
-                      id: currentTask.creatorId,
-                      name: currentTask.creatorName,
-                      avatarUrl: currentTask.creatorAvatarUrl,
-                    }}
-                  />
-                  <p>
-                    <strong>{currentTask.creatorName}</strong>
-                    <span className="actor-id">@{currentTask.creatorId}</span>
-                    创建了此议题
-                    <time title={exactTime(currentTask.createdAt)}>{relativeTime(currentTask.createdAt)}</time>
-                  </p>
-                </div>
+                {!normalizedCommentSearch && activityOrder === "asc" && createdActivity}
 
                 {commentsLoading ? (
                   <div className="comments-loading" aria-label="正在加载评论" aria-busy="true"><i /><i /></div>
-                ) : comments.map((comment) => (
+                ) : normalizedCommentSearch && orderedComments.length === 0 ? (
+                  <p className="comment-search-empty">没有找到包含“{commentSearch.trim()}”的评论</p>
+                ) : orderedComments.map((comment) => (
                   <article
                     className={`comment-entry is-${comment.authorType}`}
                     key={comment.id}
@@ -1301,9 +1539,34 @@ export function TaskDetail({
                       {comment.threadId && (
                         <div className="comment-conversation-link">
                           <ConversationLink threadId={comment.threadId} onOpen={onOpenThread} />
+                          <button
+                            className="comment-conversation-unlink"
+                            type="button"
+                            aria-label="解除评论与会话的关联"
+                            title="解除关联"
+                            disabled={Boolean(commentThreadActionId)}
+                            onClick={() => void dissociatePublishedCommentFromThread(comment)}
+                          >
+                            <LinearIcon name="close" />
+                          </button>
                         </div>
                       )}
                       <div className="comment-conversation-actions">
+                        {comment.threadId && (
+                          <button
+                            className="button secondary comment-follow-up-thread-button"
+                            type="button"
+                            disabled={openingThread || Boolean(commentThreadActionId)}
+                            onClick={() => onFollowUpInThread(
+                              currentTask,
+                              comment.threadId as string,
+                              comment.body.trim() || "请查看这条评论及附件。",
+                            )}
+                          >
+                            <LinearIcon name="conversation" />
+                            {openingThread ? "正在发送…" : "在关联会话处理"}
+                          </button>
+                        )}
                         <button
                           className="button secondary comment-new-thread-button"
                           type="button"
@@ -1311,7 +1574,17 @@ export function TaskDetail({
                           onClick={() => openPublishedCommentInNewThread(comment)}
                         >
                           <LinearIcon name="plus" />
-                          {openingThread ? "正在打开…" : "新建会话处理"}
+                          {openingThread ? "正在打开…" : "新建 Codex 会话"}
+                        </button>
+                        <button
+                          className="button secondary comment-new-thread-claude"
+                          type="button"
+                          disabled={openingThread || Boolean(commentThreadActionId) || !claudeRuntimeSupported}
+                          title={claudeRuntimeSupported ? "用 Claude Code 新建会话" : "仅 macOS Terminal.app 支持 Claude"}
+                          onClick={() => openPublishedCommentInNewThread(comment, "claude")}
+                        >
+                          <LinearIcon name="plus" />
+                          {openingThread ? "正在打开…" : "新建 Claude 会话"}
                         </button>
                         <div
                           className="comment-thread-picker"
@@ -1340,6 +1613,21 @@ export function TaskDetail({
                               onKeyDown={handleCommentThreadMenuKeyDown}
                             >
                               <span className="comment-thread-menu-heading">选择后将关联并打开会话</span>
+                              {comment.threadId && (
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected="false"
+                                  className="comment-thread-unlink-option"
+                                  onClick={() => void dissociatePublishedCommentFromThread(comment)}
+                                >
+                                  <span className="detail-thread-option-icon"><LinearIcon name="trash" /></span>
+                                  <span className="comment-thread-option-copy">
+                                    <strong>解除关联</strong>
+                                    <small>保留评论和 Codex 会话</small>
+                                  </span>
+                                </button>
+                              )}
                               {commentThreadOptions.map((thread) => (
                                 <button
                                   type="button"
@@ -1363,72 +1651,13 @@ export function TaskDetail({
                     </div>
                   </article>
                 ))}
+
+                {!normalizedCommentSearch && activityOrder === "desc" && createdActivity}
               </div>
 
               {commentsError && <div className="comments-error" role="alert">{commentsError}</div>}
 
-              <form className="comment-composer" onSubmit={(event) => { event.preventDefault(); void submitComment(); }}>
-                <div className="composer-author">
-                  <ActorAvatar
-                    className="comment-avatar"
-                    actor={currentUser}
-                  />
-                  <strong>{currentUser.name}</strong>
-                  <span className="actor-id">@{currentUser.id}</span>
-                </div>
-                <InlineMediaComposer
-                  ref={composerRef}
-                  className="comment-inline-media"
-                  segments={commentSegments}
-                  placeholder="留下评论…"
-                  ariaLabel="留下评论"
-                  onChange={setCommentSegments}
-                  onError={setCommentsError}
-                  onKeyDown={handleSubmitShortcut}
-                />
-                <PendingAttachments
-                  files={pendingCommentFiles}
-                  disabled={submitting}
-                  uploadLabel="发布后上传"
-                  ariaLabel="待上传评论附件"
-                  className="comment-composer-files"
-                  onRemove={(index) => setPendingCommentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-                />
-                <footer className="composer-footer">
-                  <div className="composer-footer-leading">
-                    <button
-                      className="comment-attach-button"
-                      type="button"
-                      disabled={submitting}
-                      aria-label="添加评论附件"
-                      title="添加附件"
-                      onClick={() => commentAttachmentInputRef.current?.click()}
-                    >
-                      <LinearIcon name="attachment" />
-                    </button>
-                    <span>草稿会自动保存</span>
-                    <input
-                      ref={commentAttachmentInputRef}
-                      type="file"
-                      multiple
-                      hidden
-                      onChange={(event) => {
-                        if (event.currentTarget.files) stageCommentFiles(event.currentTarget.files);
-                      }}
-                    />
-                  </div>
-                  <div className="composer-submit-actions">
-                    <kbd>⌘ Enter</kbd>
-                    <button
-                      className="button primary"
-                      type="submit"
-                      disabled={!canSubmitComment || submitting}
-                    >
-                      {submitting ? "发表中…" : "发表评论"}
-                    </button>
-                  </div>
-                </footer>
-              </form>
+              {activityOrder === "asc" && commentComposer}
             </section>
           </div>
 
@@ -1498,6 +1727,17 @@ export function TaskDetail({
                   </div>
                 )}
               </div>
+              {currentTask.threadId && (
+                <button
+                  className="detail-open-thread-action"
+                  type="button"
+                  disabled={openingThread}
+                  onClick={() => onFollowUpInThread(currentTask, currentTask.threadId as string, "")}
+                >
+                  <LinearIcon name="conversation" />
+                  <span>{openingThread ? "正在发送…" : "在当前会话处理"}</span>
+                </button>
+              )}
               <button
                 className="detail-open-thread-action"
                 type="button"
@@ -1505,10 +1745,30 @@ export function TaskDetail({
                 onClick={() => onOpenInThread(currentTask)}
               >
                 <LinearIcon name="conversation" />
-                <span>{openingThread ? "正在打开…" : "新建会话处理"}</span>
+                <span>{openingThread ? "正在打开…" : "新建 Codex 会话"}</span>
+              </button>
+              <button
+                className="detail-open-thread-action detail-open-thread-claude"
+                type="button"
+                disabled={openingThread || !claudeRuntimeSupported}
+                title={claudeRuntimeSupported ? "用 Claude Code 新建会话" : "仅 macOS Terminal.app 支持 Claude"}
+                onClick={() => onOpenInThread(currentTask, undefined, undefined, "claude")}
+              >
+                <span>{openingThread ? "正在打开…" : "新建 Claude 会话"}</span>
               </button>
             </div>
             <h2>属性</h2>
+            <div className="detail-property-row">
+              <span className="detail-property-icon" aria-hidden="true"><LinearIcon name="project" /></span>
+              <span className="detail-property-label">项目</span>
+              <PropertyPicker
+                ariaLabel="项目"
+                value={currentTask.projectId}
+                options={projectPropertyOptions}
+                disabled={migratingProject || projectPropertyOptions.length < 2}
+                onChange={setPendingProjectId}
+              />
+            </div>
             <div className="detail-property-row">
               <span className={`detail-property-icon status-icon-${STATUS_DETAILS[currentTask.status].tone}`}><LinearStatusIcon status={currentTask.status} /></span>
               <span className="detail-property-label">状态</span>
@@ -1667,6 +1927,45 @@ export function TaskDetail({
             <div>
               <button className="button secondary" type="button" disabled={deletingAttachment} onClick={() => setPendingAttachmentDelete(null)}>取消</button>
               <button className="button danger" type="button" disabled={deletingAttachment} onClick={() => void confirmAttachmentDelete()}>{deletingAttachment ? "删除中…" : "删除附件"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingProject && (
+        <div className="delete-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !migratingProject) setPendingProjectId(null);
+        }}>
+          <div
+            className="delete-dialog project-transfer-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="transfer-project-title"
+          >
+            <h2 id="transfer-project-title">迁移到“{pendingProject.name}”？</h2>
+            <p>
+              {currentTask.identifier} 将获得目标项目的新编号。描述、评论、附件、状态、负责人、
+              会话关联和开发上下文都会保留。
+            </p>
+            {currentRelations.length > 0 && (
+              <div className="project-transfer-warning" role="note">
+                <strong>将解除 {currentRelations.length} 条无法跨项目保留的议题关系：</strong>
+                <span>{currentRelations.map((relation) => relation.identifier).join("、")}</span>
+              </div>
+            )}
+            <div>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={migratingProject}
+                onClick={() => setPendingProjectId(null)}
+              >取消</button>
+              <button
+                className="button primary"
+                type="button"
+                disabled={migratingProject}
+                onClick={() => void confirmProjectTransfer()}
+              >{migratingProject ? "迁移中…" : "确认迁移"}</button>
             </div>
           </div>
         </div>
