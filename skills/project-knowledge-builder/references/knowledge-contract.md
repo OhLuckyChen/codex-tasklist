@@ -26,7 +26,7 @@ Promotion requires all of the following:
 
 - `docs/knowledge/index.md`: one-sentence project summary, category navigation, latest confirmed update time. Health is computed by Taskboard and must not be hard-coded.
 - `docs/knowledge/project-overview.md`: goals, users, core capabilities, technology stack, and how to run or verify the project.
-- `docs/knowledge/architecture.md`: components, ownership boundaries, data/control flow, local/cloud or external relationships.
+- `docs/knowledge/architecture.md`: components, ownership boundaries, data/control flow, and local or external relationships.
 - `docs/knowledge/code-map.md`: main entry points, module responsibilities, and where to start common changes.
 - `docs/knowledge/key-flows.md`: the small number of end-to-end flows that are central to the product.
 - `docs/knowledge/engineering-notes.md`: build, operation, constraints, recurring failure modes, and verified lessons.

@@ -5,12 +5,15 @@ script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 project_root="$(dirname -- "$script_dir")"
 launcher_app="$project_root/macos/Codex Taskboard.app"
 launcher_url="file://${launcher_app// /%20}/"
-launch_agent_label="com.lincya.codex-taskboard.supervisor"
+launcher_bundle_id="io.github.ohluckychen.codex-taskboard.launcher"
+launch_agent_label="io.github.ohluckychen.codex-taskboard.supervisor"
 launch_agent_template="$project_root/macos/${launch_agent_label}.plist"
 launch_agent="$HOME/Library/LaunchAgents/${launch_agent_label}.plist"
 dock_backup="$project_root/.data/com.apple.dock.before-codex-taskboard.plist"
 dock_work="$(/usr/bin/mktemp /tmp/codex-taskboard-dock.XXXXXX)"
 user_id="$(/usr/bin/id -u)"
+node_path_file="$project_root/.data/node-path"
+codex_path_file="$project_root/.data/codex-path"
 
 if [[ ! -d "$launcher_app" ]]; then
   /bin/echo "Launcher app not found: $launcher_app" >&2
@@ -18,6 +21,26 @@ if [[ ! -d "$launcher_app" ]]; then
 fi
 
 /bin/mkdir -p "$project_root/.data" "$HOME/Library/LaunchAgents"
+
+node_binary="${CODEX_TASKBOARD_NODE:-$(command -v node 2>/dev/null || true)}"
+if [[ -z "$node_binary" || ! -x "$node_binary" ]]; then
+  /bin/echo "Node.js executable not found. Install Node >= 22.5 or set CODEX_TASKBOARD_NODE=/absolute/path/to/node." >&2
+  exit 1
+fi
+"$node_binary" -e '
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 22 || (major === 22 && minor < 5)) process.exit(1);
+' || {
+  /bin/echo "Node.js >= 22.5 is required; found $("$node_binary" -v)." >&2
+  exit 1
+}
+/bin/echo "$node_binary" > "$node_path_file"
+
+codex_binary="${CODEX_EXECUTABLE:-$(command -v codex 2>/dev/null || true)}"
+if [[ -n "$codex_binary" && -x "$codex_binary" ]]; then
+  /bin/echo "$codex_binary" > "$codex_path_file"
+fi
+
 /bin/chmod +x \
   "$project_root/scripts/codex-taskboard-launcher.sh" \
   "$project_root/scripts/codex-taskboard-supervisor.sh" \
@@ -46,7 +69,7 @@ index=0
 while /usr/libexec/PlistBuddy -c "Print :persistent-apps:${index}" "$dock_work" >/dev/null 2>&1; do
   bundle_id="$(/usr/libexec/PlistBuddy -c "Print :persistent-apps:${index}:tile-data:bundle-identifier" "$dock_work" 2>/dev/null || true)"
   file_url="$(/usr/libexec/PlistBuddy -c "Print :persistent-apps:${index}:tile-data:file-data:_CFURLString" "$dock_work" 2>/dev/null || true)"
-  if [[ "$bundle_id" == "com.openai.codex" || "$file_url" == "$launcher_url" ]]; then
+  if [[ "$bundle_id" == "com.openai.codex" || "$bundle_id" == "$launcher_bundle_id" || "$file_url" == "$launcher_url" ]]; then
     dock_indices_to_remove+=("$index")
   fi
   (( index += 1 ))
@@ -66,7 +89,7 @@ done
 /usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-type string file-tile" "$dock_work"
 /usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data dict" "$dock_work"
 /usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data:file-label string Codex Taskboard" "$dock_work"
-/usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data:bundle-identifier string com.lincya.codex-taskboard.launcher" "$dock_work"
+/usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data:bundle-identifier string $launcher_bundle_id" "$dock_work"
 /usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data:file-data dict" "$dock_work"
 /usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data:file-data:_CFURLString string $launcher_url" "$dock_work"
 /usr/libexec/PlistBuddy -c "Add :persistent-apps:${app_count}:tile-data:file-data:_CFURLStringType integer 15" "$dock_work"

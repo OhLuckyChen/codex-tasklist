@@ -1,76 +1,79 @@
-# Codex Taskboard（Codex 任务面板）
+# Codex Taskboard
 
-Codex Taskboard 是一个本地优先的项目与议题看板，可独立运行在浏览器中，也可嵌入 Codex 桌面端侧边栏。Web 界面、`taskctl` CLI 和随项目提供的 `manage-taskboard` Skill 共用同一套 HTTP API，让人和 Codex Agent 在同一份任务数据上协作。
+Codex Taskboard 是一个本地优先的项目任务面板。它可以作为普通 Web 应用独立运行，也可以嵌入 Codex 桌面端，让人、Codex、Claude Code 和 Oh My Pi 围绕同一批项目议题协作。
+
+这个仓库当前不包含云端协作后端：任务数据默认写入本机 SQLite，附件和日志保存在本机 `.data/`，实时刷新通过本地 HTTP API 和 Server-Sent Events 完成。
 
 ## 界面预览
 
-### Codex 内嵌看板
-
 ![Codex 侧边栏中的任务面板](injection-proof.png)
 
-### 新建议题
-
 ![新建议题编辑器](linear-editor-proof.png)
-
-### 议题详情
 
 ![议题详情与评论](task-detail-embedded-proof.png)
 
 ## 核心功能
 
-- **项目管理**：新增本地项目并同步到 Codex；支持设备本地别名、收藏、拖动排序、归档与恢复，不修改实际目录名称。
-- **议题看板**：按积压、待办、进行中、审核中、已阻塞、完成、已取消等状态管理议题；支持拖动排序、列顺序调整、隐藏列和空列保留。
-- **搜索与筛选**：可按标题、编号、状态、优先级、标签、负责人、项目和关联会话筛选；支持跨项目总览。
-- **议题详情**：支持 Markdown 描述、评论、附件、优先级、标签、负责人、截止日期、重复规则、开发分支或 worktree，以及父子、阻塞和相关关系。
-- **收藏与草稿**：收藏常用议题，以列表或看板查看；新建议题可先保存到草稿箱。
-- **Codex / Claude 协作**：从议题或评论创建、关联并打开 Codex 会话；本地环境可从议题启动 Claude Code 会话。议题保留当前会话和历史会话关联。
-- **Agent 工作流**：`manage-taskboard` Skill 让 Agent 按认领、实现、验证、送审的流程处理议题；所有写操作都记录对应 Codex 会话。
-- **流程与自动化**：项目可配置工作流，并通过 Codex 自动化定时认领待办议题。
-- **项目知识与 AI 对话**：在已映射的本地项目中分析工程、形成待确认的知识提案，并围绕当前项目或议题发起本地 AI 对话。
-- **实时协作**：本地服务通过 Server-Sent Events 刷新所有已打开的看板；也可部署到 Cloudflare，通过 D1、R2 和 Basic Authentication 共享数据。
+| 能力 | 说明 |
+| --- | --- |
+| 项目看板 | 多项目管理、跨项目总览、收藏项目、项目别名、归档与恢复。 |
+| 议题管理 | backlog、todo、in_progress、in_review、blocked、done、canceled、archived 状态流转；支持优先级、标签、负责人、截止日期、重复规则、草稿箱和收藏。 |
+| 评论与附件 | 议题详情支持 Markdown 描述、评论、附件下载、评论编辑删除和版本冲突保护。 |
+| 关系建模 | 支持父子、阻塞、被阻塞和相关议题关系。 |
+| 开发上下文 | 每个议题可记录 Git 分支、worktree 路径和项目本地目录映射。 |
+| 实时刷新 | 多个浏览器窗口或 Codex 内嵌页面通过本地 SSE 同步刷新。 |
+| taskctl CLI | 用命令行创建项目、移动议题、添加评论、下载附件、读取当前上下文。 |
+| manage-taskboard Skill | Codex Agent 可按议题读取上下文、认领任务、提交评论、送审和关联当前会话。 |
+| 项目知识 | 基于本地项目目录生成待确认知识提案，审核后写入 `docs/knowledge/`。 |
+| AI 对话 | 在已映射项目中围绕项目、议题、评论和知识页发起本地 AI 对话。 |
 
-## 工作原理
+## Agent 与会话
+
+| Runtime | 支持内容 |
+| --- | --- |
+| Codex | 从议题新建 Codex 会话；从评论新建会话；向当前会话 follow-up；关联或取消关联当前会话；查看当前会话与历史会话；点击会话 ID 跳回对应 Codex task。 |
+| Claude Code | 从议题或评论启动 Claude Code 会话；记录 Claude 会话 ID；点击已关联会话可通过本机终端恢复。 |
+| Oh My Pi | 从议题或评论启动 Oh My Pi 会话；记录 OMP 会话 ID；点击已关联会话可通过本机终端恢复。 |
+
+会话关联分两层保存：议题的当前会话用于“继续当前任务”，历史会话用于追踪曾经处理过这个议题的 Codex、Claude Code 或 Oh My Pi 上下文。评论也可以独立关联会话，适合从某条评论直接分派一个新会话。
+
+## 工作方式
 
 ```text
-React 看板 / taskctl / manage-taskboard Skill
-                    │
-                    ▼
-              HTTP API + SSE
-                    │
-          ┌─────────┴─────────┐
-          ▼                   ▼
-   本地 SQLite          Cloudflare D1 / R2
-          │
-          ▼
-  Codex 注入器与会话桥接
+Web UI / Codex 内嵌页 / taskctl / manage-taskboard Skill
+                  |
+                  v
+          本地 Node.js HTTP API + SSE
+                  |
+                  v
+      SQLite + .data/attachments + 项目目录映射
+                  |
+                  v
+     Codex / Claude Code / Oh My Pi 本机集成
 ```
 
-本地模式下，数据默认写入 `.data/taskboard.sqlite`。浏览器和 Codex 内嵌页使用同一套 React 界面；`taskctl` 通过同一 API 读写项目、议题、关系和评论。注入器只负责在 Codex 中增加任务面板入口和建立原生会话桥接，不修改、替换或重新签名 Codex 应用文件。
+注入器只通过回环地址连接 Codex 的 CDP 端口，在 Codex 页面中增加 Taskboard 入口和会话跳转能力。它不会修改、替换或重新签名官方 Codex 应用。
 
-## 项目知识
+## 安装要求
 
-进入项目后的“项目知识”视图分为已发布、待确认和健康状态三部分：
-
-- 已发布知识保存在项目仓库的 `docs/knowledge/`，按项目概览、架构、代码地图、关键流程、工程说明等主题维护；已经落地并验证的技术方案放在 `docs/knowledge/designs/`。
-- 未完结、尚待确认的内容不会混入 Markdown 正文，而是作为 Taskboard 知识提案保存在 SQLite 或 D1 中。提案会保留来源快照、目标文件和行级差异，可编辑、驳回或确认发布。
-- 首次分析项目、手动整理整项议题、单条或多条评论、议题进入审核或完成、项目问答转存、过期修订和阶段复盘都会生成提案，不会自动发布正式知识。
-- 打开知识页或点击“检查更新”时，会对文件来源的 Git blob、议题与评论版本做确定性检查。发现过期后由用户生成修订提案，审核后合并回原主题页。
-- `changelog.md` 只记录已经发生的项目变化，兼任项目变更日志；讨论过程和未确认方案只保留在提案来源中。
-
-项目文件读取、工程分析和发布需要本地 companion 与项目目录映射。云端可同步和审核提案，但不会直接访问协作者设备上的代码目录。
-
-## 环境要求
-
-- Node.js 22.5 或更高版本
-- npm
-- macOS（仅 Codex 桌面端注入和 Dock 启动器需要；独立 Web 看板可在其他支持 Node.js 的系统运行）
+| 项目 | 是否必需 | 说明 |
+| --- | --- | --- |
+| Node.js >= 22.5 | 必需 | 服务端、CLI、构建和测试都依赖 Node。 |
+| npm | 必需 | 使用 `npm ci` 安装锁定依赖。 |
+| macOS | 可选 | 只有 Codex 桌面注入、Dock 启动器、Claude/OMP 终端恢复需要 macOS。 |
+| Codex 桌面端 | 可选 | 需要内嵌看板、点击跳回 Codex task、Codex 会话桥接时使用。 |
+| `codex` CLI | 可选 | 用于从议题创建或 follow-up Codex 会话。 |
+| `claude` CLI | 可选 | 用于 Claude Code 会话启动和恢复。 |
+| `omp` CLI | 可选 | 用于 Oh My Pi 会话启动和恢复。 |
 
 ## 快速开始
 
 ```bash
-npm install
-npm run build
-npm start
+git clone https://github.com/OhLuckyChen/codex-tasklist.git
+cd codex-tasklist
+npm ci
+npm run build:web
+CODEX_TASKBOARD_HOST=127.0.0.1 npm start
 ```
 
 打开 <http://127.0.0.1:47823>。
@@ -81,108 +84,99 @@ npm start
 npm run dev
 ```
 
-Vite 开发服务器运行在 <http://127.0.0.1:5173>，并将 API 请求代理到本地服务。
+Vite 页面默认在 <http://127.0.0.1:5173>，API 会代理到本地 Taskboard 服务。
 
 ## 嵌入 Codex
 
-### 推荐方式：安装持久 Dock 启动器
+推荐方式是安装 macOS Dock 启动器：
 
 ```bash
 ./scripts/install-macos-launcher.sh
 ```
 
-安装器会保留官方 Codex 应用，仅将 Dock 入口替换为 **Codex Taskboard**。该入口以只监听 `127.0.0.1:9229` 的 CDP 启动 Codex，后台监督程序负责恢复任务面板；Codex 已运行时再次点击该入口，也可手动恢复面板。
+安装器会做这些事：
 
-首次安装后如果 Codex 已经打开，请退出一次，再从新的 Dock 入口启动。原 Dock 配置会备份到 `.data/com.apple.dock.before-codex-taskboard.plist`。
+- 检查并记录当前可用的 Node.js 路径到 `.data/node-path`。
+- 如果能找到 `codex` CLI，会记录到 `.data/codex-path`。
+- 安装 LaunchAgent，后台监听 Codex 的本地 CDP 端口并恢复 Taskboard。
+- 备份 Dock 配置到 `.data/com.apple.dock.before-codex-taskboard.plist`。
+- 将 Dock 中的 Codex 入口替换为 Codex Taskboard 启动器。
 
-### 保留当前窗口，另开一个 Taskboard 窗口
+如果 Codex 已经打开，首次安装后请退出一次，再从新的 Dock 图标启动。
 
-```bash
-open -n -a /Applications/ChatGPT.app --args \
-  --remote-debugging-address=127.0.0.1 \
-  --remote-debugging-port=9231 \
-  --remote-allow-origins=http://127.0.0.1:9231 \
-  --disable-features=LocalNetworkAccessChecks
-```
-
-新窗口出现后，在另一个终端执行：
-
-```bash
-CODEX_TASKBOARD_HOST=127.0.0.1 \
-npm run codex:inject -- --port 9231 --open
-```
-
-注入器需要保持运行。若 `9231` 已被占用，请在两个命令中改用同一个空闲端口。
-
-`LocalNetworkAccessChecks` 仅对这个专用 Codex 进程关闭，因为 `app://` 页面需要嵌入回环地址上的任务面板。任务面板服务仍绑定 `127.0.0.1`，不会因此向局域网开放。
-
-### 其他启动方式
-
-重启 Codex 并由独立启动器管理：
-
-```bash
-CODEX_TASKBOARD_HOST=127.0.0.1 npm run codex
-```
-
-向一个已经启用 CDP 的 Codex 实例注入：
+也可以手动注入一个已经启用 CDP 的 Codex 实例：
 
 ```bash
 npm run codex:inject -- --port 9229 --open
 ```
 
-Codex 26.715.52143 的 Renderer CSP 会阻止普通 HTTP iframe。启动器会在新文档导航前启用 CDP CSP bypass，并等待任务面板真正加载完成。CDP 不向其他本机进程提供认证，因此启用期间只运行可信代码。
+需要指定自定义可执行文件时使用环境变量：
 
-## 使用 `taskctl`
+```bash
+CODEX_TASKBOARD_NODE=/absolute/path/to/node \
+CODEX_EXECUTABLE=/absolute/path/to/codex \
+./scripts/install-macos-launcher.sh
+```
+
+## 使用 taskctl
 
 从仓库内运行：
 
 ```bash
 npm run taskctl -- project create \
   --id my-project \
-  --name "我的项目" \
+  --name "My Project" \
   --workspace-path /absolute/path/to/repository
 
 npm run taskctl -- issue create \
   --project my-project \
-  --title "实现下一个功能切片" \
+  --title "Implement the next slice" \
   --status todo \
   --priority high \
   --labels product,mvp
 ```
 
-也可执行 `npm link`，将 `taskctl` 安装到当前 shell 的命令搜索路径。完整命令说明见 [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md)。
+也可以执行 `npm link`，让 `taskctl` 出现在当前 shell 的命令搜索路径。完整命令见 [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md)。
 
-在 Codex 中使用 Skill：
+## 安装 Skill
+
+Codex 使用：
 
 ```bash
-ln -s /absolute/path/to/codex-taskboard/skills/manage-taskboard \
-  ~/.codex/skills/manage-taskboard
+mkdir -p ~/.codex/skills
+ln -s "$(pwd)/skills/manage-taskboard" ~/.codex/skills/manage-taskboard
 ```
 
-开启新会话后，可用 `$manage-taskboard ISSUE-ID` 让 Agent 处理指定议题。Skill 会读取最新议题和评论，以乐观版本认领任务，完成验证后送审；只有用户明确验收后才会标记完成。
+然后在 Codex 中用：
+
+```text
+$manage-taskboard ISSUE-ID
+```
+
+Skill 会读取最新议题、评论和版本号，用 `taskctl` 写回认领、评论、移动状态和会话关联。
 
 ## 配置
 
 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP 监听地址；设为 `127.0.0.1` 可禁用局域网访问 |
-| `CODEX_TASKBOARD_PORT` | `47823` | 本地服务端口 |
-| `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite 数据目录 |
-| `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | CLI 使用的 API 地址 |
+| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP 监听地址。独立本机使用建议设为 `127.0.0.1`。 |
+| `CODEX_TASKBOARD_PORT` | `47823` | HTTP 服务端口。 |
+| `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite、附件、日志和运行文件目录。 |
+| `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | `taskctl` 访问的 API 地址。 |
+| `CODEX_EXECUTABLE` | 自动探测 | Codex CLI 路径。 |
+| `CLAUDE_EXECUTABLE` | 自动探测 | Claude Code CLI 路径。 |
+| `OMP_EXECUTABLE` | 自动探测 | Oh My Pi CLI 路径。 |
+| `CODEX_TASKBOARD_NODE` | 自动探测 | macOS 启动器使用的 Node.js 路径。 |
 
-默认的局域网模式没有账户认证：可信局域网内能访问该地址的人都可以读写任务数据。不要将本地服务直接暴露到公网。
+默认监听 `0.0.0.0` 是为了允许局域网设备访问。这个本地服务没有公网账户认证，不要直接暴露到公网。
 
-## 云端协作
+## 数据边界
 
-项目支持部署到 Cloudflare Worker：
-
-- 静态资源与 API：Cloudflare Worker
-- 业务数据：D1
-- 附件：私有 R2 Bucket
-- 访问控制：HTTPS Basic Authentication
-- 设备本地能力：本地 companion 保留项目目录映射、Git/worktree、Skill 和 MCP 能力
-
-云模式不会回退或双写本地 SQLite。部署、密码轮换、目录映射和一次性数据迁移步骤见 [`docs/cloud-collaboration.md`](docs/cloud-collaboration.md)。
+- `.data/` 不提交到 Git，里面包含 SQLite、附件、日志、安装器记录的本机可执行文件路径和 Dock 备份。
+- 项目目录映射保存在 SQLite 的项目记录中，不依赖个人机器上的额外配置文件。
+- `~/.codex/skills` 和 `~/.claude/skills` 是用户级 Agent 集成目录，只在你选择安装 Skill 时使用。
+- `/Applications/ChatGPT.app` 是 macOS Codex 桌面集成的默认位置；只运行 Web 看板时不需要它。
+- 仓库不再包含 Cloudflare Worker、D1、R2、Wrangler 或云端协作迁移脚本。
 
 ## 验证
 
@@ -190,9 +184,9 @@ ln -s /absolute/path/to/codex-taskboard/skills/manage-taskboard \
 npm run check
 ```
 
-该命令依次执行 TypeScript 类型检查、Web 生产构建和服务端、CLI、注入器等测试。
+这个命令会执行 TypeScript 类型检查、Web 生产构建和 Node 测试。
 
-如需分别执行：
+也可以拆开执行：
 
 ```bash
 npm run typecheck
@@ -200,12 +194,15 @@ npm run build
 npm test
 ```
 
-## 数据与安全边界
+## 常见问题
 
-- `.data/` 中的 SQLite、备份、日志和运行截图不会提交到 Git。
-- 注入器只连接回环地址上的 Codex CDP，不修改官方应用包。
-- 项目目录映射是设备本地配置，云端协作者可以使用不同的本地检出路径。
-- 云端写入失败时不会静默回退到本地数据库，避免产生两份事实来源。
+| 问题 | 处理方式 |
+| --- | --- |
+| `npm ci` 报 Node 版本不满足 | 安装 Node.js 22.5 或更高版本。 |
+| Web 能打开但无法读取项目文件 | 在项目设置中映射本地仓库目录，或用 `taskctl project map PROJECT_ID --workspace-path /path/to/repo`。 |
+| Codex 内没有 Taskboard | 确认从 Codex Taskboard Dock 图标启动，或手动运行 `npm run codex:inject -- --port 9229 --open`。 |
+| 点击 Claude/OMP 会话没有反应 | 确认本机安装了对应 CLI，或设置 `CLAUDE_EXECUTABLE` / `OMP_EXECUTABLE`。 |
+| 局域网其他设备能访问 | 启动时设置 `CODEX_TASKBOARD_HOST=127.0.0.1`。 |
 
 ## 许可证
 

@@ -2,27 +2,28 @@
 id: project.code-map
 title: 代码地图
 kind: code-map
-updated_at: 2026-08-10
+updated_at: 2026-08-11
 sources:
   - type: file
     ref: server/app.mjs
-    revision: git-blob:486a789c064e548df3ed1ce42b38b5229a03086a
+    revision: git-blob:fa36da290404d66a14b87b7c97ca699313658f10
   - type: file
     ref: web/src/App.tsx
-    revision: git-blob:061efad14c473dcaea1dca2bf84aa8c814f2e6d7
+    revision: git-blob:501f063e8010530dd5adf06ded54c728e68e3aae
   - type: file
-    ref: web/src/api.ts
-    revision: git-blob:b25754e3f5adcfe9f5002496363d44042fb141b5
+    ref: web/src/components/TaskDetail.tsx
+    revision: git-blob:bda983d1f258e15862c251a4b50fdd265562df8f
 ---
 # 代码地图
 
 ## 服务端
 
 - `server/index.mjs`：本地服务启动入口与依赖装配。
-- `server/app.mjs`：HTTP 路由、输入边界、云端代理、本地能力和 SSE 事件。
+- `server/app.mjs`：HTTP 路由、输入边界、本地能力、会话启动和 SSE 事件。
 - `server/database.mjs`：SQLite schema、行映射、事务和业务数据读写。
 - `server/knowledge-service.mjs`：知识页面读取、来源健康检查、分析、问答和安全发布。
 - `server/ai-chat-process.mjs`：Codex 子进程参数、事件归一化和会话执行基础设施。
+- `server/claude-launcher.mjs` 与 `server/omp-launcher.mjs`：Claude Code 和 Oh My Pi 会话启动/恢复。
 
 ## Web
 
@@ -32,15 +33,10 @@ sources:
 - `web/src/api.ts` 与 `web/src/types.ts`：前后端请求契约和共享前端类型。
 - `web/src/styles.css`：所有看板与知识中心视觉样式。
 
-## 云端
-
-- `cloud/src/index.mjs`：Worker 路由与 D1/R2 业务实现。
-- `cloud/migrations/`：D1 结构迁移和全局修订触发器。
-- `test/helpers/cloud-worker-harness.mjs`：本地 Worker/D1/R2 集成测试环境。
-
 ## 修改起点
 
-- 改议题数据：先核对本地 `database.mjs`、本地路由、云端同名逻辑、前端类型与 API。
+- 改议题数据：先核对 `database.mjs`、`app.mjs` 路由、前端类型与 API。
 - 改项目视图：从 `App.tsx` 的 `BoardView`、工具栏和主内容分支开始。
-- 改知识行为：先看 `KnowledgeCenter.tsx` 与 `knowledge-service.mjs`，再检查 SQLite/D1 提案契约。
+- 改知识行为：先看 `KnowledgeCenter.tsx` 与 `knowledge-service.mjs`，再检查 SQLite 提案契约。
 - 改 Codex 嵌入：先读 `inject/` 与 `scripts/codex-injector*.mjs`，避免把宿主问题误判为 Web 问题。
+- 改 Claude/OMP：先读对应 launcher 和 `TaskDetail.tsx` 的 runtime 分支。

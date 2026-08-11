@@ -2,23 +2,27 @@
 id: project.key-flows
 title: 关键流程
 kind: flows
-updated_at: 2026-08-10
+updated_at: 2026-08-11
 sources:
   - type: file
     ref: web/src/App.tsx
-    revision: git-blob:061efad14c473dcaea1dca2bf84aa8c814f2e6d7
+    revision: git-blob:501f063e8010530dd5adf06ded54c728e68e3aae
   - type: file
     ref: web/src/components/TaskDetail.tsx
-    revision: git-blob:0413199aec02741413e9e17bf3f8511397e51c4c
+    revision: git-blob:bda983d1f258e15862c251a4b50fdd265562df8f
   - type: file
     ref: server/knowledge-service.mjs
-    revision: git-blob:6aa0285d7e67d98569b25709c1b9fc2851c7c0e6
+    revision: git-blob:274f9bb6fe8fdab499861d902a5d917a27519364
 ---
 # 关键流程
 
 ## 议题交付
 
 议题从 `todo` 进入 `in_progress` 后由 Agent 执行；完成实现与自检后进入 `in_review`。只有用户明确验收或要求完成，才进入 `done`。所有并发写入携带当前版本，冲突后重新读取并协调。
+
+## 会话关联
+
+议题可从 Codex、Claude Code 或 Oh My Pi 新建会话，也可关联当前会话或历史会话。评论可以独立新建或关联会话；评论会话会进入议题历史，但不会覆盖议题当前会话。点击已关联 Codex 会话会跳回对应 Codex task，Claude/OMP 会话通过本机 CLI 恢复。
 
 ## 知识沉淀
 
@@ -33,7 +37,3 @@ sources:
 ## 新鲜度与复盘
 
 打开项目知识或手动检查时，文件来源用当前 Git blob 校验，议题和评论来源用业务版本校验。过期、缺失或无法验证的页面只显示健康状态，不会自动改正文；用户发起修订后仍走同一提案审核链路。
-
-## 云端协作
-
-提案及其文件差异、来源快照和状态可在 D1 中共享。源码分析和发布必须由持有项目目录映射的本地 companion 完成。发布时根据提案分支或 worktree 上下文选择对应本地目录。

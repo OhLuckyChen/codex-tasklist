@@ -7,7 +7,13 @@ import { test } from "node:test";
 import { resolveCodexSessionByMarker } from "../scripts/codex-session-resolver.mjs";
 
 async function writeSession(root, name, threadId, messages) {
-  const directory = path.join(root, "2026", "08", "06");
+  const now = new Date();
+  const directory = path.join(
+    root,
+    String(now.getFullYear()),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  );
   await mkdir(directory, { recursive: true });
   const records = [
     { type: "session_meta", payload: { session_id: threadId } },

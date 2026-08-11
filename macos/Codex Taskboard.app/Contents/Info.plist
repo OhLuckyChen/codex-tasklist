@@ -9,7 +9,7 @@
   <key>CFBundleExecutable</key>
   <string>codex-taskboard</string>
   <key>CFBundleIdentifier</key>
-  <string>com.lincya.codex-taskboard.launcher</string>
+  <string>io.github.ohluckychen.codex-taskboard.launcher</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

@@ -5,7 +5,6 @@ import { createServer } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -18,12 +17,6 @@ import {
 import { normalizeCodexThreadId } from "../shared/codex-thread-id.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
-import { createCloudConfigStore } from "./cloud-config.mjs";
-import {
-  CloudProxyError,
-  createCloudProxy,
-  isLocalCompanionRoute,
-} from "./cloud-proxy.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createClaudeLauncher } from "./claude-launcher.mjs";
 import { createOmpLauncher } from "./omp-launcher.mjs";
@@ -102,52 +95,6 @@ function sendJson(response, status, value, headers = {}) {
 function sendEmpty(response, status, headers = {}) {
   response.writeHead(status, { "cache-control": "no-store", ...headers });
   response.end();
-}
-
-function toFetchRequest(request) {
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(request.headers)) {
-    if (Array.isArray(value)) {
-      for (const entry of value) headers.append(name, entry);
-    } else if (value !== undefined) {
-      headers.set(name, value);
-    }
-  }
-  const init = { method: request.method, headers };
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = Readable.toWeb(request);
-    init.duplex = "half";
-  }
-  return new Request(`http://127.0.0.1${request.url}`, init);
-}
-
-async function sendFetchResponse(response, upstream) {
-  response.statusCode = upstream.status;
-  response.statusMessage = upstream.statusText;
-  for (const [name, value] of upstream.headers) {
-    if (
-      name === "connection"
-      || name === "content-encoding"
-      || name === "content-length"
-      || name === "set-cookie"
-      || name === "transfer-encoding"
-    ) {
-      continue;
-    }
-    response.setHeader(name, value);
-  }
-  const cookies = upstream.headers.getSetCookie?.() ?? [];
-  if (cookies.length > 0) response.setHeader("set-cookie", cookies);
-  if (!upstream.body) {
-    response.end();
-    return;
-  }
-  await new Promise((resolve, reject) => {
-    const body = Readable.fromWeb(upstream.body);
-    body.once("error", reject);
-    response.once("finish", resolve);
-    body.pipe(response);
-  });
 }
 
 function normalizeHostname(hostname) {
@@ -1469,7 +1416,6 @@ export function resolveServerOptions(options = {}) {
     dataDirectory,
     databasePath: options.databasePath ?? path.join(dataDirectory, "taskboard.sqlite"),
     attachmentsDirectory: options.attachmentsDirectory ?? path.join(dataDirectory, "attachments"),
-    cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
     claudeExecutable: options.claudeExecutable ?? process.env.CLAUDE_EXECUTABLE ?? "claude",
@@ -1502,23 +1448,6 @@ export function createTaskboardServer(options = {}) {
   const resolved = resolveServerOptions(options);
   const database = new TaskboardDatabase(resolved.databasePath);
   const events = new EventHub();
-  const cloudConfig = options.cloudConfigStore ?? createCloudConfigStore({
-    configPath: resolved.cloudConfigPath,
-  });
-  const cloudProxy = createCloudProxy({
-    configStore: cloudConfig,
-    fetch: options.remoteFetch ?? globalThis.fetch,
-    resolveDevelopmentContext: async (projectId, context) => {
-      if (!context.branch) return null;
-      const config = await cloudConfig.read();
-      const workspacePath = config.projectMappings[projectId];
-      if (!workspacePath) return null;
-      const result = await scanDevelopmentContexts(workspacePath);
-      return result.contexts.find((candidate) => (
-        candidate.type === "worktree" && candidate.branch === context.branch
-      )) ?? null;
-    },
-  });
   const aiChat = new AiChatService({
     database,
     codexExecutable: resolved.codexExecutable,
@@ -1559,39 +1488,23 @@ export function createTaskboardServer(options = {}) {
   }
 
   async function readDeviceProjectWorkspaces() {
-    const config = await cloudConfig.read();
-    const workspaces = { ...config.projectMappings };
     const localProjects = database.listProjects();
     const codexProjects = await readCodexProjectWorkspaces(resolved.codexStatePath);
-    const discovered = [
-      ...localProjects
-        .filter((project) => project.workspacePath)
-        .map((project) => [project.id, project.workspacePath]),
-      ...Object.entries(codexProjects),
-    ];
-    for (const [projectId, workspacePath] of discovered) {
-      if (workspaces[projectId]) continue;
-      await cloudConfig.setProjectWorkspace(projectId, workspacePath);
-      workspaces[projectId] = workspacePath;
+    const workspaces = Object.fromEntries(localProjects
+      .filter((project) => project.workspacePath)
+      .map((project) => [project.id, project.workspacePath]));
+    for (const [projectId, workspacePath] of Object.entries(codexProjects)) {
+      if (!workspaces[projectId]) workspaces[projectId] = workspacePath;
     }
     return workspaces;
   }
 
   async function resolveKnowledgeWorkspace(projectId, requestedWorkspacePath) {
-    const config = await cloudConfig.read();
     const deviceWorkspaces = await readDeviceProjectWorkspaces();
-    let project;
-    if (config.remoteUrl) {
-      project = { id: projectId, workspacePath: deviceWorkspaces[projectId] ?? null };
-    } else {
-      const dbProject = database.getProject(projectId);
-      // Local mode keeps a project's creation-time workspace_path in the database, but
-      // projects mapped later only carry a device-local project mapping. Fall back to that
-      // mapping so knowledge still resolves for projects created without --workspace-path.
-      project = dbProject
-        ? { ...dbProject, workspacePath: deviceWorkspaces[projectId] ?? dbProject.workspacePath ?? null }
-        : null;
-    }
+    const dbProject = database.getProject(projectId);
+    const project = dbProject
+      ? { ...dbProject, workspacePath: deviceWorkspaces[projectId] ?? dbProject.workspacePath ?? null }
+      : null;
     if (!project) {
       throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
     }
@@ -1626,15 +1539,6 @@ export function createTaskboardServer(options = {}) {
       } else if (pathname.startsWith("/api/local/")) {
         assertLoopbackRequest(request);
       }
-      const isMachineCapabilityRoute = pathname === "/api/meta"
-        || pathname === "/api/device-workspaces"
-        || pathname === "/api/workflow-capabilities"
-        || /^\/api\/projects\/[^/]+\/development-contexts$/.test(pathname);
-      const capabilityCloudConfig = isMachineCapabilityRoute
-        ? await cloudConfig.read()
-        : null;
-      if (capabilityCloudConfig?.remoteUrl) assertLoopbackRequest(request);
-
       if (pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
         return sendJson(response, 200, { status: "ok" });
@@ -1645,48 +1549,6 @@ export function createTaskboardServer(options = {}) {
         assertNoQuery(url.searchParams, "POST /api/local/directory-picker");
         await assertEmptyRequestBody(request, "POST /api/local/directory-picker");
         return sendJson(response, 200, { workspacePath: await chooseLocalDirectory() });
-      }
-
-      if (pathname === "/api/local/cloud-session") {
-        if ([...url.searchParams.keys()].length > 0) {
-          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Cloud session routes do not accept query parameters");
-        }
-        if (request.method === "GET") {
-          const config = await cloudConfig.read();
-          return sendJson(response, 200, config.remoteUrl
-            ? {
-              mode: "cloud",
-              remoteUrl: config.remoteUrl,
-              actorName: config.actorName,
-              authenticated: true,
-            }
-            : { mode: "local", authenticated: false });
-        }
-        if (request.method === "PUT") {
-          const body = await readJson(request);
-          assertPlainObject(body);
-          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey"]));
-          try {
-            const config = await cloudConfig.configure({
-              remoteUrl: body.remoteUrl,
-              actorName: body.actorName,
-              sharedKey: body.sharedKey,
-            });
-            return sendJson(response, 200, {
-              mode: "cloud",
-              remoteUrl: config.remoteUrl,
-              actorName: config.actorName,
-              authenticated: true,
-            });
-          } catch (error) {
-            throw new ApiError(400, error.code ?? "INVALID_CLOUD_CONFIG", error.message);
-          }
-        }
-        if (request.method === "DELETE") {
-          await cloudConfig.clearCloud();
-          return sendJson(response, 200, { mode: "local", authenticated: false });
-        }
-        return methodNotAllowed(response, ["GET", "PUT", "DELETE"]);
       }
 
       const createKnowledgeRunRoute = pathname.match(
@@ -1813,7 +1675,8 @@ export function createTaskboardServer(options = {}) {
         if (!workspacePath || !path.isAbsolute(workspacePath)) {
           throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be absolute");
         }
-        await cloudConfig.setProjectWorkspace(projectId, workspacePath);
+        const project = database.setProjectWorkspace(projectId, workspacePath);
+        events.emit("project.updated", { project });
         return sendJson(response, 200, { projectId, workspacePath });
       }
 
@@ -1836,13 +1699,6 @@ export function createTaskboardServer(options = {}) {
             localAiChat: isLoopbackAddress(request.socket.remoteAddress),
             localKnowledge: isLoopbackAddress(request.socket.remoteAddress),
           },
-          ...(capabilityCloudConfig?.remoteUrl
-            ? {
-              mode: "cloud",
-              realtime: { transport: "poll", intervalMs: 2000 },
-              localCapabilities: { available: true },
-            }
-            : {}),
         });
       }
 
@@ -2219,20 +2075,6 @@ export function createTaskboardServer(options = {}) {
         );
       }
 
-      let currentCloudConfig = null;
-      if (pathname.startsWith("/api/")) {
-        currentCloudConfig = await cloudConfig.read();
-        if (currentCloudConfig.remoteUrl) {
-          assertLoopbackRequest(request);
-          if (!isLocalCompanionRoute(pathname)) {
-            return sendFetchResponse(
-              response,
-              await cloudProxy.forward(toFetchRequest(request)),
-            );
-          }
-        }
-      }
-
       if (pathname === "/api/projects") {
         if (request.method === "GET") {
           if ([...url.searchParams.keys()].length > 0) {
@@ -2365,12 +2207,7 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "INVALID_PATH", "Project id contains invalid encoding");
         }
         validateProjectId(projectId);
-        const project = currentCloudConfig.remoteUrl
-          ? {
-            id: projectId,
-            workspacePath: currentCloudConfig.projectMappings[projectId] ?? null,
-          }
-          : database.getProject(projectId);
+        const project = database.getProject(projectId);
         if (!project) throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
         const codexProjectId = stringField(url.searchParams.get("codexProjectId") ?? null, "codexProjectId", {
           nullable: true,
@@ -2793,12 +2630,6 @@ export function createTaskboardServer(options = {}) {
         return;
       }
       if (error instanceof ApiError) {
-        const payload = { error: { code: error.code, message: error.message } };
-        if (error.details !== undefined) payload.error.details = error.details;
-        sendJson(response, error.status, payload);
-        return;
-      }
-      if (error instanceof CloudProxyError) {
         const payload = { error: { code: error.code, message: error.message } };
         if (error.details !== undefined) payload.error.details = error.details;
         sendJson(response, error.status, payload);

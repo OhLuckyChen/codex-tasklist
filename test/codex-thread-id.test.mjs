@@ -30,16 +30,14 @@ test("temporary and encoded client thread ids are never accepted", () => {
 });
 
 test("new task conversations bind only a stable UUID absent from the creation snapshot", () => {
-  assert.match(injectionSource, /const knownThreadIds = new Set\(pendingTaskThreadLink\.knownThreadIds\)/);
-  assert.match(injectionSource, /!pendingTaskThreadLink\.knownThreadRows\.includes\(row\)/);
-  assert.match(injectionSource, /candidateThreadRow/);
-  assert.match(injectionSource, /data-app-action-sidebar-thread-id/);
-  assert.match(injectionSource, /candidateSeenCount >= 3/);
-  assert.match(injectionSource, /ambiguitySeenCount >= 3/);
-  assert.match(injectionSource, /检测到多个新会话，未自动关联/);
-  assert.match(injectionSource, /threadId: candidateThreadId/);
-  assert.match(injectionSource, /requestId: pendingTaskThreadLink\.requestId/);
-  assert.match(injectionSource, /commentId: pendingTaskThreadLink\.commentId \|\| undefined/);
+  assert.match(injectionSource, /requestHost\("resolve-task-thread"/);
+  assert.match(injectionSource, /marker: request\.marker/);
+  assert.match(injectionSource, /startedAt: request\.startedAt/);
+  assert.match(injectionSource, /const threadId = normalizeThreadId\(result\?\.threadId\)/);
+  assert.match(injectionSource, /result\?\.status === "resolved" && threadId/);
+  assert.match(injectionSource, /threadId,/);
+  assert.match(injectionSource, /requestId: request\.requestId/);
+  assert.match(injectionSource, /commentId: request\.commentId \|\| undefined/);
   assert.match(injectionSource, /THREAD_LINK_RECEIPT_STORAGE_KEY/);
   assert.match(injectionSource, /persistPendingThreadLinkReceipt/);
   assert.match(injectionSource, /deliverPendingThreadLinkReceipt/);
@@ -47,6 +45,8 @@ test("new task conversations bind only a stable UUID absent from the creation sn
   assert.match(injectionSource, /THREAD_LINK_RECEIPT_RETRY_MS/);
   assert.doesNotMatch(injectionSource, /taskContextVisible/);
   assert.doesNotMatch(injectionSource, /activePendingThreadId/);
+  assert.doesNotMatch(injectionSource, /knownThreadIds/);
+  assert.doesNotMatch(injectionSource, /candidateSeenCount/);
   assert.doesNotMatch(
     injectionSource,
     /if \(pendingTaskThreadLink && payload\.threadId\)/,
