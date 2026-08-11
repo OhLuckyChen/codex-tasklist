@@ -114,6 +114,12 @@ Issues are grouped by status, including todo, in progress, in review, done, and 
 
 ![Task-state board](docs/screenshots/task-state-board.png)
 
+### Favorites list
+
+The favorites view in global tasks collects important issues across projects into one list grouped by project. It is useful for review items, follow-ups, and priority work that should not disappear inside individual project boards.
+
+![Cross-project favorites list](docs/screenshots/favorites-list.png)
+
 ### Issue detail and runtime sessions
 
 The issue detail page centralizes description, screenshots, properties, relations, attachments, activity, and comments. The session panel can attach the current session, choose an existing session, continue in the current session, or start Codex, Claude Code, and OMP sessions.
