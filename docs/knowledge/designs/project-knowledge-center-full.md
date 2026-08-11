@@ -1,3 +1,13 @@
+---
+id: design.project-knowledge-center-full
+title: 项目持续知识中心完整方案
+kind: design
+updated_at: 2026-08-11
+sources:
+  - type: issue
+    ref: 3417FD193D6E-11
+    revision: 30
+---
 # 项目持续知识中心技术方案
 
 > 文档状态：待评审

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-11 — 设计方案与文档目录整理
+
+- 新增 `docs/knowledge/designs/taskboard-overall-design.md`，把当前任务面板的产品定位、真实操作路径、多运行时会话、项目知识闭环和目录边界整理为整体设计方案。
+- 根目录不再放置过程方案和历史 proof 截图；知识库方案归入 `docs/knowledge/designs/`，历史方案归入 `docs/knowledge/designs/legacy/`，历史截图归入 `docs/screenshots/proofs/`。
+- `docs/knowledge/index.md` 增加整体设计入口和目录使用约定，明确正式知识、历史方案、公开截图和内部 proof 截图的存放边界。
+
 ## 2026-08-11 — 独立本地分发整理
 
 - 删除 Cloudflare Worker、D1、R2、Wrangler、云端登录、云端代理和一次性迁移脚本；仓库分发形态回到本地 Node.js 服务、SQLite 和 SSE。

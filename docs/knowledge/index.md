@@ -6,7 +6,7 @@ updated_at: 2026-08-11
 sources:
   - type: file
     ref: README.md
-    revision: git-blob:530ecea0c57ee25828e0f5ac0321bfe5ce2e8fe9
+    revision: git-blob:3bb637a9cfde5b42250249a3f3dc1713eeeb6d2e
   - type: file
     ref: package.json
     revision: git-blob:1cd0a10a297e9ee3d27c4b6ad3e03575eeecc794
@@ -22,8 +22,16 @@ sources:
 - [代码地图](code-map.md)：主要入口、模块职责和修改起点。
 - [关键流程](key-flows.md)：议题协作、会话关联、知识沉淀和本地同步链路。
 - [工程说明](engineering-notes.md)：开发、验证、安全边界和常见注意事项。
+- [任务面板整体设计](designs/taskboard-overall-design.md)：当前代码与近期优化沉淀出的整体产品和工程方案。
 - [项目持续知识中心](designs/project-knowledge-center.md)：已实现知识中心的技术方案。
 
 ## 使用约定
 
 正式知识按主题维护，事实变化时更新原页面，不按日期堆叠副本。真实项目变化写入根目录 `changelog.md`；已落地技术方案进入 `designs/`。每页 `sources` 记录来源及其版本，健康检查会据此判断内容是否需要复核。
+
+## 目录整理
+
+- `docs/knowledge/designs/` 保存当前有效或需要评审的技术方案。
+- `docs/knowledge/designs/legacy/` 保存历史方案版本，只用于对比，不作为当前实现依据。
+- `docs/screenshots/` 保存 README 使用的公开截图。
+- `docs/screenshots/proofs/` 保存历史验证截图和内部 proof 截图，默认不在 README 中展示。
