@@ -331,7 +331,7 @@ test("host context captures all Codex projects even when the sidebar section is 
   assert.match(source, /let lastNativeThreadId = ""/);
   assert.match(source, /clickedThreadId.*lastNativeThreadId/s);
   assert.match(source, /activeThreadId \|\| lastNativeThreadId \|\| normalizeThreadId\(threadIdFromLocation\(\)\)/);
-  assert.match(source, /replace\(\/\^\(\?:local\|cloud\):\/i, ""\)/);
+  assert.match(source, /replace\(\/\^local:\/i, ""\)/);
   assert.match(source, /function findTasksSection\(\)/);
 });
 

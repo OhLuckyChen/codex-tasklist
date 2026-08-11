@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.lincya.codex-taskboard.supervisor</string>
+  <string>io.github.ohluckychen.codex-taskboard.supervisor</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>

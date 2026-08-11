@@ -102,7 +102,7 @@ Do not propose an empty category merely to fill the directory shape.
 
 ### 6. Create a persistent pending proposal
 
-Create a knowledge run against the local Taskboard companion:
+Create a knowledge run against the local Taskboard service:
 
 ```http
 POST http://127.0.0.1:47823/api/local/projects/<project-id>/knowledge-runs

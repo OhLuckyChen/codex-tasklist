@@ -1188,6 +1188,22 @@ test("device workspaces come from this machine's Codex project roots", async () 
   });
 });
 
+test("project mappings persist in SQLite and populate device workspaces", async () => {
+  const workspacePath = "/Users/alice/mapped-project";
+  const baseUrl = await startServer();
+
+  const mapResult = await request(baseUrl, "/api/local/project-mappings/local", {
+    method: "PUT",
+    body: JSON.stringify({ workspacePath }),
+  });
+  assert.equal(mapResult.response.status, 200);
+  assert.equal(mapResult.body.workspacePath, workspacePath);
+
+  const result = await request(baseUrl, "/api/device-workspaces");
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.workspaces.local, workspacePath);
+});
+
 test("accepts private LAN requests and rejects public Host and Origin headers", async () => {
   const baseUrl = await startServer(undefined, { host: "0.0.0.0" });
 

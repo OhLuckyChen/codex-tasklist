@@ -5,7 +5,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { normalizeCloudUrl } from "../server/cloud-config.mjs";
 import {
   DEFAULT_PROJECT_ID,
   TASK_STATUSES,
@@ -22,9 +21,6 @@ const COMMAND_OPTIONS = new Map([
   ["project list", new Set(["json"])],
   ["project create", new Set(["id", "name", "workspace-path", "json"])],
   ["project map", new Set(["workspace-path", "json"])],
-  ["cloud login", new Set(["url", "actor-name", "json"])],
-  ["cloud status", new Set(["json"])],
-  ["cloud logout", new Set(["json"])],
   ["issue list", new Set(["project", "status", "json"])],
   ["issue get", new Set(["json"])],
   [
@@ -180,18 +176,12 @@ async function execute(parsed, overrides) {
   const allowedOptions = COMMAND_OPTIONS.get(command);
   if (!allowedOptions) {
     throw usageError(
-      "Expected one of: project list/create/map, cloud login/status/logout, issue list/get/create/update/move/transfer/archive/restore/relation, comment list/add/update/delete, attachment download, context current",
+      "Expected one of: project list/create/map, issue list/get/create/update/move/transfer/archive/restore/relation, comment list/add/update/delete, attachment download, context current",
     );
   }
   validateOptions(parsed.options, allowedOptions);
 
-  const env = overrides.env ?? process.env;
-  const usesCompanionControl = command.startsWith("cloud ") || command === "project map";
-  const api = createApiClient(overrides, {
-    baseUrl: usesCompanionControl || env.CODEX_TASKBOARD_COMPANION_URL !== undefined
-      ? resolveCompanionUrl(env)
-      : undefined,
-  });
+  const api = createApiClient(overrides);
   switch (command) {
     case "project list":
       expectOperandCount(parsed, 0);
@@ -220,20 +210,6 @@ async function execute(parsed, overrides) {
           ),
         },
       );
-    case "cloud login":
-      expectOperandCount(parsed, 0);
-      return cloudLogin(
-        api,
-        requiredOption(parsed.options, "url"),
-        requiredOption(parsed.options, "actor-name"),
-        overrides,
-      );
-    case "cloud status":
-      expectOperandCount(parsed, 0);
-      return api.request("GET", "/api/local/cloud-session");
-    case "cloud logout":
-      expectOperandCount(parsed, 0);
-      return api.request("DELETE", "/api/local/cloud-session");
     case "issue list":
       expectOperandCount(parsed, 0);
       return listIssues(api, parsed.options);
@@ -408,75 +384,6 @@ async function downloadAttachment(api, attachmentId, options, overrides) {
     contentType: downloaded.contentType,
     size: downloaded.size,
   };
-}
-
-async function cloudLogin(api, rawUrl, actorName, overrides) {
-  let remoteUrl;
-  try {
-    remoteUrl = normalizeCloudUrl(rawUrl);
-  } catch (error) {
-    throw new TaskctlError(error instanceof Error ? error.message : String(error), {
-      code: error?.code ?? "INVALID_CLOUD_URL",
-      exitCode: 2,
-    });
-  }
-  const sharedKey = overrides.readSecret
-    ? await overrides.readSecret()
-    : await readSecretFromInput(
-      overrides.stdin ?? process.stdin,
-      overrides.stderr ?? process.stderr,
-    );
-  if (typeof sharedKey !== "string" || !sharedKey) {
-    throw usageError("Cloud shared key cannot be empty");
-  }
-  return api.request("PUT", "/api/local/cloud-session", {
-    remoteUrl,
-    actorName,
-    sharedKey,
-  });
-}
-
-async function readSecretFromInput(input, output) {
-  if (!input.isTTY) {
-    let value = "";
-    for await (const chunk of input) value += chunk;
-    return value.replace(/\r?\n$/, "");
-  }
-
-  return new Promise((resolve, reject) => {
-    let value = "";
-    const wasRaw = input.isRaw;
-    const wasPaused = input.isPaused();
-    const finish = (error) => {
-      input.off("data", onData);
-      input.setRawMode(wasRaw);
-      if (wasPaused) input.pause();
-      output.write("\n");
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onData = (chunk) => {
-      for (const character of String(chunk)) {
-        if (character === "\r" || character === "\n") return finish();
-        if (character === "\u0003") {
-          return finish(new TaskctlError("Cloud login canceled", {
-            code: "CANCELED",
-            exitCode: 2,
-          }));
-        }
-        if (character === "\u007f" || character === "\b") {
-          value = value.slice(0, -1);
-        } else {
-          value += character;
-        }
-      }
-    };
-    output.write("Shared key: ");
-    input.setRawMode(true);
-    input.setEncoding("utf8");
-    input.resume();
-    input.on("data", onData);
-  });
 }
 
 async function listIssues(api, options) {
@@ -789,33 +696,6 @@ function normalizeBaseUrl(rawUrl) {
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
-}
-
-function resolveCompanionUrl(env) {
-  const rawUrl = env.CODEX_TASKBOARD_COMPANION_URL
-    ?? env.CODEX_TASKBOARD_URL
-    ?? DEFAULT_API_URL;
-  let url;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    throw usageError("Local companion URL must be a valid URL");
-  }
-  const isLoopback = url.hostname === "localhost"
-    || url.hostname === "127.0.0.1"
-    || url.hostname === "[::1]";
-  if (
-    !isLoopback
-    || (url.protocol !== "http:" && url.protocol !== "https:")
-    || url.username
-    || url.password
-    || (url.pathname !== "/" && url.pathname !== "")
-    || url.search
-    || url.hash
-  ) {
-    throw usageError("Local companion URL must be a loopback HTTP or HTTPS origin");
-  }
-  return url.origin;
 }
 
 async function readResponse(response) {

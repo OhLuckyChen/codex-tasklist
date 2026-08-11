@@ -486,10 +486,10 @@ export function KnowledgeCenter({
 
       {!loading && section === "published" && !localReady && (
         <div className="knowledge-empty-state">
-          <h2>{available ? "请先映射项目目录" : "已发布知识需要本地 companion"}</h2>
+          <h2>{available ? "请先映射项目目录" : "已发布知识需要本地 Taskboard 服务"}</h2>
           <p>{available
             ? "项目知识只读取当前项目已映射的目录，不会尝试其他工作区。"
-            : "当前仍可审核云端待确认提案；读取和发布项目文件时请通过本地 Taskboard 或 Codex 内嵌入口打开。"}</p>
+            : "读取和发布项目文件时，请通过本地 Taskboard 或 Codex 内嵌入口打开。"}</p>
         </div>
       )}
 
@@ -541,7 +541,7 @@ export function KnowledgeCenter({
           </main>
           <aside className="knowledge-question-panel">
             <h3>询问项目</h3>
-            <textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：评论是如何写入并同步到云端的？" />
+            <textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：评论是如何写入并关联会话的？" />
             <button type="button" disabled={Boolean(busy) || !question.trim()} onClick={() => void askQuestion()}>
               {busy === "ask" ? "回答中…" : "提问"}
             </button>
@@ -639,7 +639,7 @@ export function KnowledgeCenter({
       {!loading && section === "health" && !localReady && (
         <div className="knowledge-empty-state">
           <h2>健康检查需要本地项目目录</h2>
-          <p>待确认提案仍可审核；来源与代码新鲜度检查会在本地 companion 中执行。</p>
+          <p>待确认提案仍可审核；来源与代码新鲜度检查会在本地 Taskboard 服务中执行。</p>
         </div>
       )}
 

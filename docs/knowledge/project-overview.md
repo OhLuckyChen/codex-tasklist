@@ -2,32 +2,32 @@
 id: project.overview
 title: 项目概览
 kind: overview
-updated_at: 2026-08-10
+updated_at: 2026-08-11
 sources:
   - type: file
     ref: README.md
-    revision: git-blob:f797af23bd94b42bd673782e36cc7c0e65b32748
+    revision: git-blob:530ecea0c57ee25828e0f5ac0321bfe5ce2e8fe9
   - type: file
     ref: package.json
-    revision: git-blob:30dd4173c74cd24b4903959f635320078216fa7b
+    revision: git-blob:1cd0a10a297e9ee3d27c4b6ad3e03575eeecc794
 ---
 # 项目概览
 
-e-taskboard 是本地优先的项目与议题看板，可独立在浏览器中运行，也可嵌入 Codex 桌面端。React 界面、`taskctl` CLI 和 `manage-taskboard` Skill 通过同一套 HTTP API 协作。
+e-taskboard 是本地优先的项目与议题看板，可独立在浏览器中运行，也可嵌入 Codex 桌面端。React 界面、`taskctl` CLI 和 `manage-taskboard` Skill 通过同一套本地 HTTP API 协作。
 
 ## 核心用户与能力
 
 - 人类用户维护项目、议题、评论、附件、关系、工作流和知识提案。
-- Codex 或 Claude Agent 读取最新议题与评论，认领任务、执行、验证并送审。
-- 项目支持本地目录、Git 分支和 worktree 上下文；云端协作者可各自映射不同的本地检出路径。
+- Codex、Claude Code 和 Oh My Pi 可从议题或评论创建、恢复和关联会话。
+- Codex Agent 通过 Skill 读取最新议题与评论，认领任务、执行、验证并送审。
+- 项目支持本地目录、Git 分支和 worktree 上下文。
 - 项目知识将确认事实保存在 `docs/knowledge/`，待确认内容保存在 Taskboard 提案队列。
 
 ## 技术栈
 
 - Web：React、TypeScript、Vite。
-- 本地服务：Node.js HTTP 服务、Node SQLite。
-- 云端协作：Cloudflare Worker、D1 和 R2。
-- 实时更新：本地使用 Server-Sent Events，云端使用全局修订号轮询。
+- 本地服务：Node.js HTTP 服务、SQLite、Server-Sent Events。
+- Agent 集成：Codex 注入器、`taskctl`、Codex/Claude/OMP 本机 CLI 启动器。
 
 ## 常用命令
 

@@ -15,18 +15,6 @@ Use `--workspace-path` to associate a project with a local repository. `context 
 
 Set `CODEX_TASKBOARD_URL` to override the default local API origin, `http://127.0.0.1:47823`.
 
-For a shared cloud board, keep `taskctl` pointed at the loopback companion and configure the upstream HTTPS origin through it:
-
-```bash
-taskctl cloud login --url HTTPS_ORIGIN --actor-name NAME [--json]
-taskctl cloud status [--json]
-taskctl project list [--json]
-taskctl project map PROJECT_ID --workspace-path /absolute/local/path [--json]
-taskctl cloud logout [--json]
-```
-
-`cloud login` reads the shared password from a private `Shared key:` prompt. The actor name is the display attribution sent through Basic Authentication. The companion stores its configuration with mode `0600`; project mappings stay on the current device and can differ between collaborators. In cloud mode, failed upstream writes fail rather than falling back to or double-writing the local SQLite database.
-
 Every issue or comment write must be attributed to a Codex conversation. In Codex, `taskctl` reads the current conversation from `CODEX_THREAD_ID`. Outside Codex, pass `--thread-id ID` explicitly. An explicit option takes precedence over the environment. Read commands do not require a conversation id.
 
 Every successful command writes one JSON object with `schemaVersion` to stdout. The current schema version is `2`. Errors write one JSON object to stderr. Exit codes are `0` for success, `2` for invalid input, `3` when the service is unavailable, `4` for API or response errors, and `5` for conflicts.

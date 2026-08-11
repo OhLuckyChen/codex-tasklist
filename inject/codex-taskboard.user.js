@@ -99,7 +99,7 @@
       return "";
     }
     normalized = normalized
-      .replace(/^(?:local|cloud):/i, "")
+      .replace(/^local:/i, "")
       .replace(/^urn:uuid:/i, "")
       .toLowerCase();
     return CODEX_THREAD_ID_PATTERN.test(normalized) ? normalized : "";

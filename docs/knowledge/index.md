@@ -2,14 +2,14 @@
 id: project.index
 title: e-taskboard 项目知识
 kind: index
-updated_at: 2026-08-10
+updated_at: 2026-08-11
 sources:
   - type: file
     ref: README.md
-    revision: git-blob:f797af23bd94b42bd673782e36cc7c0e65b32748
+    revision: git-blob:530ecea0c57ee25828e0f5ac0321bfe5ce2e8fe9
   - type: file
-    ref: web/src/components/KnowledgeCenter.tsx
-    revision: git-blob:cc2f6e54dae25e4201c0dd16f3a89be4a5d93ceb
+    ref: package.json
+    revision: git-blob:1cd0a10a297e9ee3d27c4b6ad3e03575eeecc794
 ---
 # e-taskboard 项目知识
 
@@ -18,9 +18,9 @@ sources:
 ## 导航
 
 - [项目概览](project-overview.md)：目标、用户、主要能力与运行方式。
-- [系统架构](architecture.md)：本地服务、Web、云端与 Codex 宿主之间的边界。
+- [系统架构](architecture.md)：本地服务、Web、Agent runtime 与 Codex 宿主之间的边界。
 - [代码地图](code-map.md)：主要入口、模块职责和修改起点。
-- [关键流程](key-flows.md)：议题协作、知识沉淀和云端同步链路。
+- [关键流程](key-flows.md)：议题协作、会话关联、知识沉淀和本地同步链路。
 - [工程说明](engineering-notes.md)：开发、验证、安全边界和常见注意事项。
 - [项目持续知识中心](designs/project-knowledge-center.md)：已实现知识中心的技术方案。
 

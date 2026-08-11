@@ -2,37 +2,37 @@
 id: project.architecture
 title: 系统架构
 kind: architecture
-updated_at: 2026-08-10
+updated_at: 2026-08-11
 sources:
   - type: file
     ref: server/app.mjs
-    revision: git-blob:486a789c064e548df3ed1ce42b38b5229a03086a
+    revision: git-blob:fa36da290404d66a14b87b7c97ca699313658f10
   - type: file
     ref: server/database.mjs
-    revision: git-blob:74f2a9a8f566a306a068ae7c014b9223a7e86461
+    revision: git-blob:f408488ec84cddf2cd0f9818b2d13401433a8207
   - type: file
-    ref: cloud/src/index.mjs
-    revision: git-blob:a64ec39efc97bff4c374b3ca0e4af6751b61200d
+    ref: README.md
+    revision: git-blob:530ecea0c57ee25828e0f5ac0321bfe5ce2e8fe9
 ---
 # 系统架构
 
 ## 组成
 
 1. React Web 负责项目首页、议题看板、详情、工作流、知识中心和本地 AI 对话。
-2. 本地 companion 提供 HTTP API、SQLite 持久化、SSE、项目目录解析、Git/worktree 扫描和设备本地能力。
+2. 本地 Taskboard 服务提供 HTTP API、SQLite 持久化、SSE、项目目录解析、Git/worktree 扫描和设备本地能力。
 3. Codex 注入器把同一 Web 应用嵌入桌面端，并桥接宿主项目、会话和运行时状态。
-4. Cloudflare Worker 提供可共享的业务 API；D1 保存结构化数据，R2 保存附件。
+4. Claude Code 与 Oh My Pi 集成通过本机 CLI 和终端恢复会话。
 
 ## 数据边界
 
-- 项目、议题、评论、关系、工作流与知识提案属于业务数据，可保存在本地 SQLite 或云端 D1。
-- 附件在本地文件目录或云端 R2 中保存，数据库只存元数据。
-- 项目目录映射、源码读取、Git/worktree、工程分析和知识文件发布属于设备能力，只通过本地 companion 执行。
-- 云模式的普通业务请求由 companion 转发到云端；失败时不会回退或双写本地数据库。
+- 项目、议题、评论、关系、工作流、会话关联和知识提案保存在本机 SQLite。
+- 附件保存在 `.data/attachments`，数据库只保存元数据。
+- 项目目录映射保存在项目记录中；源码读取、Git/worktree、工程分析和知识文件发布只在已映射的本地目录内执行。
+- `.data/`、用户级 Skill 目录和本机 CLI 路径是安装后的本机状态，不提交到仓库。
 
 ## 并发与更新
 
-议题、评论、工作流和知识提案使用递增 `version` 做乐观并发控制。本地业务变更通过 SSE 通知其他页面；D1 表触发器递增全局修订号，云端页面轮询后刷新相关数据。
+议题、评论、工作流和知识提案使用递增 `version` 做乐观并发控制。本地业务变更通过 SSE 通知其他已打开页面刷新。
 
 ## 安全边界
 

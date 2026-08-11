@@ -44,14 +44,6 @@ export interface TaskboardMetadata {
   claudeRuntime?: boolean;
   ompRuntime?: boolean;
   capabilities?: TaskboardCapabilities;
-  mode?: "local" | "cloud";
-  realtime?: {
-    transport: "poll";
-    intervalMs: number;
-  };
-  localCapabilities?: {
-    available: boolean;
-  };
 }
 
 export interface TaskboardCapabilities {

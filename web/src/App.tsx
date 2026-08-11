@@ -34,7 +34,6 @@ import {
   getKnowledgeRun,
   resumeClaudeSession,
   resumeOmpSession,
-  getTaskboardRevision,
   getWorkflowWorkspace,
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
@@ -112,10 +111,6 @@ import {
   readLegacyWorkflowWorkspace,
   workflowOptionsFromWorkspace,
 } from "./workflowStore";
-// The poller stays in ESM JavaScript so its lifecycle can be tested directly with node:test.
-// @ts-expect-error The module's option contract is enforced by its focused node tests.
-import { createRevisionPoller, getRevisionPollingInterval } from "./revisionPolling.mjs";
-
 type ConnectionState = "connecting" | "live" | "reconnecting";
 type Theme = "light" | "dark";
 type BoardView = "issues" | "drafts" | "knowledge" | "workflow";
@@ -857,7 +852,6 @@ export function App() {
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
 
-  const revisionPollingInterval = getRevisionPollingInterval(taskboardMetadata);
   const pendingAutomationRequestsRef = useRef(new Map<string, PendingAutomationRequest>());
   const pendingProjectActivationsRef = useRef(new Map<string, PendingProjectActivation>());
   const pendingKnowledgeThreadsRef = useRef(new Map<string, PendingKnowledgeThread>());
@@ -1810,14 +1804,10 @@ export function App() {
       ]);
       setTaskboardMetadata((current) => (
         current
-        && current.mode === metadata.mode
-        && current.realtime?.transport === metadata.realtime?.transport
-        && current.realtime?.intervalMs === metadata.realtime?.intervalMs
         && current.manageTaskboardSkillPath === metadata.manageTaskboardSkillPath
         && current.projectKnowledgeSkillPath === metadata.projectKnowledgeSkillPath
-        && current.localCapabilities?.available === metadata.localCapabilities?.available
-          ? current
-          : metadata
+        ? current
+        : metadata
       ));
       setManageTaskboardSkillPath(metadata.manageTaskboardSkillPath ?? "");
       setProjectKnowledgeSkillPath(metadata.projectKnowledgeSkillPath ?? "");
@@ -1958,49 +1948,6 @@ export function App() {
     isGlobalBoard,
     selectedProjectId,
     selectedDeviceWorkspacePath,
-  ]);
-
-  useEffect(() => {
-    if (revisionPollingInterval === null) return;
-    const controller = new AbortController();
-    setConnection("connecting");
-    const poller = createRevisionPoller({
-      intervalMs: revisionPollingInterval,
-      fetchRevision: async (since: number) => {
-        try {
-          const result = await getTaskboardRevision(since, controller.signal);
-          setConnection("live");
-          return result;
-        } catch (error) {
-          if (!controller.signal.aborted) setConnection("reconnecting");
-          throw error;
-        }
-      },
-      onInvalidate: () => {
-        void refreshReviewTaskSnapshots(true);
-        void refreshProjectList();
-        const projectId = selectedProjectIdRef.current;
-        if (projectId) {
-          void refreshTasks(projectId, { quiet: true });
-          if (projectId !== GLOBAL_PROJECT_ID) void refreshWorkflowOptions(projectId).catch(() => {});
-        }
-        setWorkflowRevision((current) => current + 1);
-        setKnowledgeRevision((current) => current + 1);
-        setCommentsRevision((current) => current + 1);
-        setAttachmentsRevision((current) => current + 1);
-      },
-    });
-    poller.start();
-    return () => {
-      controller.abort();
-      poller.stop();
-    };
-  }, [
-    revisionPollingInterval,
-    refreshReviewTaskSnapshots,
-    refreshProjectList,
-    refreshTasks,
-    refreshWorkflowOptions,
   ]);
 
   function pushUndo(message: string, undo: () => Promise<void>, showNotice = true) {
@@ -2343,7 +2290,7 @@ export function App() {
     trigger = "manual",
   ): Promise<boolean> {
     if (!localKnowledgeAvailable) {
-      throw new Error("当前入口无法访问本地项目文件，请通过本地 companion 打开。");
+      throw new Error("当前入口无法访问本地项目文件，请启动本地 Taskboard 服务后重试。");
     }
     const workspacePath = knowledgeWorkspaceForTask(task);
     if (!workspacePath) throw new Error("请先为项目映射本地目录。");
@@ -3397,7 +3344,7 @@ export function App() {
 
   return (
     <div className={`app-shell${embedded ? " embedded" : ""}`} style={appShellStyle}>
-      {taskboardMetadata && taskboardMetadata.mode !== "cloud" && (
+      {taskboardMetadata && (
         <LocalRealtimeSync
           selectedProjectId={selectedProjectId}
           detailTaskId={detailTaskId}
