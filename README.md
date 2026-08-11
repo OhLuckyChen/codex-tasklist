@@ -45,6 +45,8 @@ Codex Taskboard changes that pattern: people should not have to remember tasks i
 
 Each issue is a continuously updated work item: it stores status, priority, labels, assignee, branch, worktree, local project mapping, comments, attachments, knowledge proposals, and current plus historical runtime sessions. You can start a new Codex / Claude Code / Oh My Pi session from an issue or a specific comment, or attach the current session back to the issue. After an agent finishes a step, it writes the result, evidence, blockers, and next status back to the board. The human only needs to inspect task state, comments, and pending work on the board instead of tracking every conversation by memory.
 
+More importantly, issues, comments, and linked sessions turn a task from scattered chat history into a traceable, durable, reusable work record. Why a change was made, who handled it, which comment triggered rework, which session produced evidence, and how the final status changed can all be inspected from the same issue.
+
 ## Core features
 
 ### Taskboard
@@ -74,6 +76,7 @@ Session links are stored at three useful levels:
 
 - Issue descriptions and comments support Markdown.
 - Comments can hold review feedback, agent findings, verification notes, and follow-up instructions.
+- Comments, issues, and linked sessions form the task context, connecting requirements, execution, rework, verification, and conclusions into a traceable record.
 - Attachments can be uploaded, downloaded, and deleted.
 - Activity history records status changes and important operations for later inspection.
 
