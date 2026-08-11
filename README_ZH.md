@@ -100,37 +100,37 @@ Taskboard 可以把 Issue 讨论、评论、实现证据整理成项目知识提
 
 ## 界面预览
 
-下面的截图来自真实本地界面；任务标题、评论、人名等敏感内容已做像素化处理，没有重绘或伪造 UI。
+下面的截图来自真实使用界面；敏感内容由使用者手工打码，未重绘或伪造产品数据。
+
+### 项目选择与 Codex 内嵌入口
+
+在 Codex 侧边栏直接进入任务面板，选择已保存项目、收藏项目或其他本地项目。每个项目可绑定本地路径，后续 Issue、评论和 Agent 会话都会围绕该项目沉淀。
+
+![Codex 内嵌的项目选择页](docs/screenshots/project-selection.png)
 
 ### 任务状态看板
 
-在 Codex 内嵌面板里查看同一个本地 Taskboard。任务按状态分列，Issue 卡片保留优先级、标签和创建信息，适合快速判断哪些任务正在推进、哪些需要评审。
+Issue 按状态分列展示，支持待办、进行中、审核中、完成，以及右侧隐藏列。卡片里可以看到 Issue 编号、标题、摘要、收藏、评论和会话入口，适合按任务状态推进工作。
 
-![真实任务状态看板，敏感任务内容已打码](docs/screenshots/task-state-board.png)
+![任务状态看板](docs/screenshots/task-state-board.png)
 
-### 独立 Web 看板
+### Issue 详情与多运行时会话
 
-Taskboard 也可以作为普通 Web 应用运行。没有 Codex 桌面端时，项目、Issue、评论、附件、项目知识和 CLI 自动化仍然可用。
+Issue 详情页集中承载描述、截图、属性、关系、附件、活动和评论。右侧会话区可以关联当前会话、选择已有会话、在当前会话处理，或新建 Codex、Claude Code、OMP 会话。
 
-![独立 Web 看板，敏感任务内容已打码](docs/screenshots/standalone-board.png)
+![Issue 详情与会话操作](docs/screenshots/issue-detail-sessions.png)
 
-### 新建 Issue
+### 评论与 Agent 交接
 
-新建任务时可以直接填写标题、描述、状态、优先级、标签，并关联 Codex task ID。这样任务一开始就带着执行上下文。
+评论区可以记录人工评审、Agent 结论和实现证据。Codex Agent 的输出会回写到 Issue 下，后续仍可从同一个 Issue 或评论继续派发 Codex、Claude Code 或 OMP 会话。
 
-![新建 Issue 弹窗，背景敏感内容已打码](docs/screenshots/create-issue.png)
+![Issue 评论与 Agent 交接](docs/screenshots/issue-comments-agent.png)
 
-### Issue 详情
+### 跳转回 Codex 会话
 
-Issue 详情页集中展示描述、活动、评论、属性、状态、优先级、标签和项目上下文。Agent 执行后的结论、证据和后续要求也会回写到这里。
+Taskboard 记录的 Codex 会话可以跳回对应任务页。这样 Issue 的状态、评论和实现过程能形成闭环：从看板派发任务，在 Codex 中执行，再把结果写回看板。
 
-![Issue 详情页，敏感内容已打码](docs/screenshots/task-detail.png)
-
-### Codex 内的 Issue 详情
-
-嵌入 Codex 后，任务状态和当前执行上下文可以放在同一个工作窗口里，方便从 Issue 或评论继续创建后续会话。
-
-![Codex 内嵌 Issue 详情，敏感内容已打码](docs/screenshots/embedded-issue-detail.png)
+![从 Taskboard 跳转回 Codex 会话](docs/screenshots/codex-session.png)
 
 ## 工作方式
 
