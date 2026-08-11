@@ -13,8 +13,8 @@ export const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"] as co
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export type ActorType = "user" | "agent";
-export type AssigneeTarget = "current-user" | "codex-agent" | "claude-agent";
-export type TaskRuntime = "codex" | "claude";
+export type AssigneeTarget = "current-user" | "codex-agent" | "claude-agent" | "omp-agent";
+export type TaskRuntime = "codex" | "claude" | "omp";
 export type IssueRelationType = "parent" | "blocks" | "blocked_by" | "related";
 
 export interface ActorIdentity {
@@ -40,7 +40,9 @@ export interface DevelopmentScan {
 
 export interface TaskboardMetadata {
   manageTaskboardSkillPath?: string;
+  projectKnowledgeSkillPath?: string;
   claudeRuntime?: boolean;
+  ompRuntime?: boolean;
   capabilities?: TaskboardCapabilities;
   mode?: "local" | "cloud";
   realtime?: {

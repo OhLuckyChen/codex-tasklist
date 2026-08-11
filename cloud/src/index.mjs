@@ -1300,6 +1300,26 @@ async function listKnowledgeProposals(env, projectId, status) {
   )));
 }
 
+async function knowledgeSourceVersions(env, projectId) {
+  await requireProject(env, projectId);
+  const versions = {};
+  const tasks = await all(env.DB.prepare(`
+    SELECT id, identifier, version FROM tasks WHERE project_id = ?
+  `).bind(projectId));
+  for (const task of tasks) {
+    versions[`issue:${task.id}`] = task.version;
+    versions[`issue:${task.identifier}`] = task.version;
+  }
+  const comments = await all(env.DB.prepare(`
+    SELECT comments.id, comments.version
+    FROM comments
+    INNER JOIN tasks ON tasks.id = comments.task_id
+    WHERE tasks.project_id = ?
+  `).bind(projectId));
+  for (const comment of comments) versions[`comment:${comment.id}`] = comment.version;
+  return versions;
+}
+
 async function createKnowledgeProposal(env, projectId, input, actor) {
   await requireProject(env, projectId);
   const timestamp = now();
@@ -2594,6 +2614,18 @@ async function routeApi(request, env, actor, url) {
       });
     }
     methodNotAllowed(["GET", "POST"]);
+  }
+
+  const projectKnowledgeSourcesMatch = pathname.match(
+    /^\/api\/projects\/([^/]+)\/knowledge-source-versions$/,
+  );
+  if (projectKnowledgeSourcesMatch) {
+    requireNoQuery(url, "Project knowledge source versions");
+    if (request.method !== "GET") methodNotAllowed(["GET"]);
+    const projectId = validateProjectId(
+      decodePathPart(projectKnowledgeSourcesMatch[1], "Project id"),
+    );
+    return json(200, { versions: await knowledgeSourceVersions(env, projectId) });
   }
 
   const projectKnowledgeProposalsMatch = pathname.match(

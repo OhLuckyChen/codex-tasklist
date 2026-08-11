@@ -258,7 +258,7 @@ export class TaskboardDatabase {
         labels TEXT NOT NULL DEFAULT '[]',
         sort_order REAL NOT NULL,
         thread_id TEXT,
-        runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude')),
+        runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
         creator_type TEXT NOT NULL DEFAULT 'user',
         creator_id TEXT NOT NULL DEFAULT 'local-user',
         creator_name TEXT NOT NULL DEFAULT '本地用户',
@@ -513,6 +513,11 @@ export class TaskboardDatabase {
       }
     }
     this.#migrateArchivedStatus();
+    const runtimeCheckColumns = this.database.prepare("PRAGMA table_info(tasks)").all();
+    if (!runtimeCheckColumns.some((column) => column.name === "runtime")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'codex'");
+    }
+    this.#migrateRuntimeCheckConstraint();
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
         ON tasks(project_id, archived_at, status, sort_order, created_at)
@@ -768,6 +773,86 @@ export class TaskboardDatabase {
     const violation = this.database.prepare("PRAGMA foreign_key_check").get();
     if (violation) {
       throw new Error(`Archived status migration produced a foreign key violation in '${violation.table}'`);
+    }
+  }
+  #migrateRuntimeCheckConstraint() {
+    const tasksSql = this.database.prepare(`
+      SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'tasks'
+    `).get()?.sql ?? "";
+    // If the table SQL has no runtime CHECK constraint at all (column was
+    // added via ALTER TABLE), or it already includes 'omp', nothing to do.
+    if (!tasksSql.includes("CHECK (runtime IN")) return;
+    if (tasksSql.includes("'omp'")) return;
+
+    this.database.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE tasks_runtime_check_migration (
+          id TEXT PRIMARY KEY,
+          identifier TEXT NOT NULL UNIQUE,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK (status IN (
+            'backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled', 'archived'
+          )),
+          priority TEXT NOT NULL CHECK (priority IN ('none', 'urgent', 'high', 'medium', 'low')),
+          labels TEXT NOT NULL DEFAULT '[]',
+          sort_order REAL NOT NULL,
+          thread_id TEXT,
+          runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
+          creator_type TEXT NOT NULL DEFAULT 'user',
+          creator_id TEXT NOT NULL DEFAULT 'local-user',
+          creator_name TEXT NOT NULL DEFAULT '本地用户',
+          creator_avatar_url TEXT,
+          assignee_type TEXT NOT NULL DEFAULT 'user' CHECK (assignee_type IN ('user', 'agent')),
+          assignee_id TEXT NOT NULL DEFAULT 'local-user',
+          assignee_name TEXT NOT NULL DEFAULT '本地用户',
+          assignee_avatar_url TEXT,
+          workflow_id TEXT,
+          git_branch TEXT,
+          worktree_path TEXT,
+          worktree_branch TEXT,
+          due_date TEXT,
+          recurrence_interval INTEGER,
+          recurrence_unit TEXT,
+          archived_at TEXT,
+          version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO tasks_runtime_check_migration (
+          id, identifier, project_id, title, description, status, priority, labels,
+          sort_order, thread_id, runtime, creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        )
+        SELECT
+          id, identifier, project_id, title, description, status, priority, labels,
+          sort_order, thread_id, runtime, creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        FROM tasks;
+
+        DROP TABLE tasks;
+        ALTER TABLE tasks_runtime_check_migration RENAME TO tasks;
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
+    }
+
+    const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+    if (violation) {
+      throw new Error(`Runtime CHECK constraint migration produced a foreign key violation in '${violation.table}'`);
     }
   }
 
@@ -1136,6 +1221,29 @@ export class TaskboardDatabase {
         id DESC
     `).all(projectId, status ?? null, status ?? null);
     return rows.map((row) => knowledgeProposalFromRow(row, this.#knowledgeChanges(row.id)));
+  }
+
+  knowledgeSourceVersions(projectId) {
+    const project = this.getProject(projectId);
+    if (!project) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    const versions = {};
+    const tasks = this.database.prepare(`
+      SELECT id, identifier, version FROM tasks WHERE project_id = ?
+    `).all(projectId);
+    for (const task of tasks) {
+      versions[`issue:${task.id}`] = task.version;
+      versions[`issue:${task.identifier}`] = task.version;
+    }
+    const comments = this.database.prepare(`
+      SELECT comments.id, comments.version
+      FROM comments
+      INNER JOIN tasks ON tasks.id = comments.task_id
+      WHERE tasks.project_id = ?
+    `).all(projectId);
+    for (const comment of comments) versions[`comment:${comment.id}`] = comment.version;
+    return versions;
   }
 
   getKnowledgeProposal(id) {

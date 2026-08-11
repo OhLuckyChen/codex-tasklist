@@ -16,7 +16,6 @@ import { promisify } from "node:util";
 
 import { ApiError } from "./database.mjs";
 import {
-  buildCodexArgs,
   normalizeCodexEvent,
   spawnCodexTurn,
 } from "./ai-chat-process.mjs";
@@ -188,9 +187,28 @@ async function listMarkdownFiles(directory, root) {
   return files;
 }
 
-async function sourceRevision(workspaceRoot, relativePath) {
-  const target = await safeTarget(workspaceRoot, relativePath, { allowMissing: false }).catch(() => null);
-  if (!target) return null;
+function inaccessibleSource(error) {
+  return error?.code === "EACCES" || error?.code === "EPERM";
+}
+
+async function sourceRevision(workspaceRoot, relativePath, expectedRevision = "") {
+  let target;
+  try {
+    target = await safeTarget(workspaceRoot, relativePath, { allowMissing: false });
+  } catch (error) {
+    if (inaccessibleSource(error)) return undefined;
+    if (error?.code === "KNOWLEDGE_PAGE_NOT_FOUND" || error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (String(expectedRevision).startsWith("sha256:")) {
+    try {
+      return sha256(await readFile(target.candidate));
+    } catch (error) {
+      if (inaccessibleSource(error)) return undefined;
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+  }
   try {
     const { stdout } = await execFileAsync(
       "git",
@@ -200,7 +218,13 @@ async function sourceRevision(workspaceRoot, relativePath) {
     const hash = stdout.trim();
     if (hash) return `git-blob:${hash}`;
   } catch {}
-  return sha256(await readFile(target.candidate));
+  try {
+    return sha256(await readFile(target.candidate));
+  } catch (error) {
+    if (inaccessibleSource(error)) return undefined;
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 function pageKind(relativePath, attributes) {
@@ -217,12 +241,15 @@ async function inspectPage(workspaceRoot, relativePath, sourceVersions = {}) {
   const sourceStates = [];
   for (const source of parsed.sources) {
     if (source.type === "file" && source.ref) {
-      const actualRevision = await sourceRevision(workspaceRoot, source.ref);
-      const status = actualRevision === null
-        ? "missing"
-        : !source.revision
+      const resolvedRevision = await sourceRevision(workspaceRoot, source.ref, source.revision);
+      const actualRevision = resolvedRevision ?? null;
+      const status = resolvedRevision === undefined
+        ? "unverified"
+        : resolvedRevision === null
+          ? "missing"
+          : !source.revision
           ? "unverified"
-          : actualRevision === source.revision
+          : resolvedRevision === source.revision
             ? "fresh"
             : "stale";
       sourceStates.push({ ...source, actualRevision, status });
@@ -286,14 +313,22 @@ function parseStructuredMessage(message) {
 }
 
 async function runCodexJson({ executable, workspacePath, prompt, processEnv }) {
-  const thread = {
-    origin: { workspacePath },
-    sandbox: "read-only",
-    model: undefined,
-    reasoningEffort: undefined,
-    codexThreadId: null,
-  };
-  const args = buildCodexArgs(thread, []);
+  const args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--json",
+    "--color",
+    "never",
+    "-C",
+    workspacePath,
+    "-s",
+    "read-only",
+    "-c",
+    'approval_policy="never"',
+    "-",
+  ];
   let message = "";
   let terminal = null;
   let terminalError = "";
@@ -346,12 +381,34 @@ function analysisPrompt(sourceType, sourceSnapshot) {
     "Prefer updating an existing topic page. Create a new page only when no existing page can hold the topic.",
     "Technical designs belong under docs/knowledge/designs/. Decisions, detailed flows and guides use their matching directories.",
     "Allowed targets are docs/knowledge/**/*.md and changelog.md. Include changelog.md only for an actual project behavior change.",
-    "Every knowledge page must have YAML frontmatter with id, title, kind, updated_at and sources. Source refs are project-relative paths or issue/comment identifiers.",
+    "Every knowledge page must have YAML frontmatter with id, title, kind, updated_at and sources. Source refs are project-relative paths or issue/comment identifiers. For file sources, record the current revision as git-blob:<git hash-object value>; for issue/comment sources, use the supplied version. These revisions are the deterministic baseline for later incremental checks.",
     "Return JSON only with this shape:",
     '{"title":"...","summary":"...","changes":[{"targetPath":"docs/knowledge/...md","operation":"create|update|delete","afterContent":"full file content"}]}',
     "For delete operations omit afterContent. Never include unchanged files.",
     sourceSnapshot === undefined ? "" : `Source snapshot:\n${JSON.stringify(sourceSnapshot, null, 2)}`,
   ].filter(Boolean).join("\n\n");
+}
+
+function knowledgeRunInstruction({ sourceType, sourceSnapshot, workspacePath, callbackUrl, callbackToken }) {
+  const scanMode = sourceType === "project_scan"
+    ? "This is the initial analysis. Build a complete project understanding before proposing the initial knowledge structure; cover architecture, code map, core flows, engineering notes, durable designs and confirmed decisions."
+    : sourceType === "project_review"
+      ? "This is a full project review. Compare the complete current project with published knowledge and propose only missing, stale or contradicted durable knowledge."
+      : sourceType === "stale_refresh"
+        ? "This is an incremental analysis. Start from the changed or stale sources and affected knowledge pages listed in the source snapshot, trace their impact through the current project, and leave unrelated knowledge unchanged."
+        : "Use the source snapshot as the trigger, verify it against the current project, and propose only durable knowledge supported by evidence.";
+  return [
+    analysisPrompt(sourceType, sourceSnapshot),
+    `Expected project root: ${workspacePath}`,
+    "Before analyzing, run pwd and verify that its real path is exactly the expected project root. If it is not, stop and submit {\"error\":\"expected project root ... but got ...\"} to the callback instead of inventing a proposal.",
+    "Analyze the complete current project directly. You may inspect any project file needed, but do not edit, create, delete or format project files.",
+    scanMode,
+    "When the JSON proposal is ready, submit it to Taskboard with one local HTTP POST. The success request body is {\"analysis\": <the proposal JSON>}; if analysis cannot run, submit {\"error\":\"specific failure reason\"}.",
+    `Callback URL: ${callbackUrl}`,
+    `Header: X-Taskboard-Knowledge-Run-Token: ${callbackToken}`,
+    "Use curl with --data-binary @- so large JSON is sent through stdin rather than a command-line argument.",
+    "A successful callback returns {\"ok\":true}. Do not publish or write knowledge files yourself. After the callback succeeds, briefly tell the user that a pending proposal is available in Taskboard.",
+  ].join("\n\n");
 }
 
 function questionPrompt(question) {
@@ -448,13 +505,32 @@ export class KnowledgeService {
       sourceType: input.sourceType,
       sourceSnapshot: input.sourceSnapshot,
     });
+    return this.prepareProposal(workspaceRoot, input, analyzed);
+  }
+
+  async prepareProposal(workspacePath, input, analyzed) {
+    const workspaceRoot = await existingRealRoot(workspacePath);
+    if (!ALLOWED_SOURCE_TYPES.has(input?.sourceType)) {
+      throw new ApiError(400, "INVALID_SOURCE_TYPE", "Unknown knowledge proposal source type");
+    }
     if (!analyzed || typeof analyzed !== "object" || !Array.isArray(analyzed.changes)) {
       throw new ApiError(502, "KNOWLEDGE_ANALYSIS_INVALID", "Project analysis returned an invalid proposal");
+    }
+    const analysisSummary = String(analyzed.summary ?? "");
+    if (
+      /operation not permitted|permission denied/i.test(analysisSummary)
+      || /无法读取(?:指定)?工作空间|无权访问工作空间/.test(analysisSummary)
+    ) {
+      throw new ApiError(
+        403,
+        "KNOWLEDGE_WORKSPACE_PERMISSION_DENIED",
+        "The Taskboard background service cannot read the selected project directory",
+      );
     }
     if (analyzed.changes.length === 0) {
       return {
         title: String(analyzed.title || "No knowledge changes"),
-        summary: String(analyzed.summary || "No durable project knowledge was found."),
+        summary: analysisSummary || "No durable project knowledge was found.",
         sourceType: input.sourceType,
         sourceSnapshot: input.sourceSnapshot ?? {},
         developmentContext: input.developmentContext ?? null,
@@ -507,6 +583,13 @@ export class KnowledgeService {
       developmentContext: input.developmentContext ?? null,
       changes,
     };
+  }
+
+  knowledgeRunInstruction(input) {
+    if (!ALLOWED_SOURCE_TYPES.has(input?.sourceType)) {
+      throw new ApiError(400, "INVALID_SOURCE_TYPE", "Unknown knowledge proposal source type");
+    }
+    return knowledgeRunInstruction(input);
   }
 
   async ask(workspacePath, question) {

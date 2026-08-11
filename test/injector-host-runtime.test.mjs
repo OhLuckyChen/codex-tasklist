@@ -196,6 +196,40 @@ test("the host bridge accepts an explicit submit request for a prepared task com
   }]);
 });
 
+test("the host bridge accepts a read-only project knowledge composer request", async () => {
+  const responses = [];
+  const received = [];
+  const request = {
+    id: "knowledge-request-1",
+    action: "prefill-plain-composer",
+    instruction: "Analyze the complete current project without editing files.",
+    submit: true,
+  };
+  const result = await handleHostBindingPayload(
+    { payload: JSON.stringify(request), executionContextId: 29 },
+    {
+      parseAutomationRequest: () => null,
+      ensure: async () => assert.fail("ensure must not run"),
+      runAutomation: async () => assert.fail("automation must not run"),
+      resolveTaskThread: async () => assert.fail("resolution must not run"),
+      prefill: async (payload) => {
+        received.push(payload);
+        return { prefilled: true, submitted: true };
+      },
+      sendResponse: async (_executionContextId, response) => responses.push(response),
+    },
+  );
+
+  assert.deepEqual(result, { responded: true, accepted: true });
+  assert.deepEqual(received, [request]);
+  assert.deepEqual(responses, [{
+    id: request.id,
+    ok: true,
+    prefilled: true,
+    submitted: true,
+  }]);
+});
+
 test("attach replaces an old runtime with the current source and restores an open page", async () => {
   const calls = [];
   const result = await reconcileInjectionRuntime({

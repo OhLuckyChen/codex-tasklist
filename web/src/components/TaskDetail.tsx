@@ -89,6 +89,8 @@ interface TaskDetailProps {
   attachmentsRevision: number;
   projectOptions: Array<{ id: string; name: string }>;
   onUpdate: (task: Task, changes: Partial<TaskDraft>) => Promise<Task>;
+  knowledgeAvailable: boolean;
+  onCreateKnowledgeProposal: (task: Task, comments?: Comment[]) => Promise<boolean>;
   onTransferProject: (task: Task, projectId: string) => Promise<TaskProjectTransferResult>;
   onOpenTask: (task: TaskRelationSummary) => void;
   onCreateSubIssue: (task: Task) => void;
@@ -110,6 +112,7 @@ interface TaskDetailProps {
   onOpenInThread: (task: Task, followUp?: string, comment?: Comment, runtime?: TaskRuntime) => void;
   onFollowUpInThread: (task: Task, threadId: string, followUp: string, runtime?: TaskRuntime) => void;
   claudeRuntimeSupported: boolean;
+  ompRuntimeSupported: boolean;
   openingThread: boolean;
   isFavorite: boolean;
   onToggleFavorite: (task: Task) => void;
@@ -360,6 +363,8 @@ export function TaskDetail({
   attachmentsRevision,
   projectOptions,
   onUpdate,
+  knowledgeAvailable,
+  onCreateKnowledgeProposal,
   onTransferProject,
   onOpenTask,
   onCreateSubIssue,
@@ -373,6 +378,7 @@ export function TaskDetail({
   onOpenInThread,
   onFollowUpInThread,
   claudeRuntimeSupported,
+  ompRuntimeSupported,
   openingThread,
   isFavorite,
   onToggleFavorite,
@@ -416,6 +422,9 @@ export function TaskDetail({
   const [savingCommentId, setSavingCommentId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Comment | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [selectingKnowledgeComments, setSelectingKnowledgeComments] = useState(false);
+  const [selectedKnowledgeCommentIds, setSelectedKnowledgeCommentIds] = useState<Set<string>>(new Set());
+  const [knowledgeBusy, setKnowledgeBusy] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<InlineMediaComposerHandle>(null);
@@ -650,6 +659,27 @@ export function TaskDetail({
       return null;
     } finally {
       setSavingProperty(null);
+    }
+  }
+
+  async function createKnowledgeProposalFrom(commentsForKnowledge?: Comment[]) {
+    if (!knowledgeAvailable || knowledgeBusy) return;
+    setKnowledgeBusy(true);
+    setActiveMenuId(null);
+    onError(null);
+    try {
+      const created = await onCreateKnowledgeProposal(currentTask, commentsForKnowledge);
+      onAnnounce(created
+        ? "已生成待确认知识提案，正式知识尚未修改。"
+        : "整理完成，没有发现需要长期沉淀的新知识。");
+      if (commentsForKnowledge) {
+        setSelectingKnowledgeComments(false);
+        setSelectedKnowledgeCommentIds(new Set());
+      }
+    } catch (error) {
+      onError(messageFor(error));
+    } finally {
+      setKnowledgeBusy(false);
     }
   }
 
@@ -1176,6 +1206,16 @@ export function TaskDetail({
                   >
                     <LinearIcon name="favorite" />
                   </button>
+                  <button
+                    className="issue-knowledge-button"
+                    type="button"
+                    disabled={!knowledgeAvailable || knowledgeBusy}
+                    title={knowledgeAvailable ? "整理整项议题及评论" : "需要先映射本地项目目录"}
+                    onClick={() => void createKnowledgeProposalFrom()}
+                  >
+                    <LinearIcon name="write" />
+                    {knowledgeBusy ? "整理中…" : "整理为项目知识"}
+                  </button>
                 </div>
                 <IssueParentLink
                   task={currentTask}
@@ -1371,6 +1411,17 @@ export function TaskDetail({
               <header className="activity-heading">
                 <h2 id="activity-heading">活动</h2>
                 <span>{normalizedCommentSearch ? `${filteredComments.length}/${comments.length}` : comments.length}</span>
+                <button
+                  className={`comment-knowledge-select${selectingKnowledgeComments ? " active" : ""}`}
+                  type="button"
+                  disabled={!knowledgeAvailable || knowledgeBusy || comments.length === 0}
+                  onClick={() => {
+                    setSelectingKnowledgeComments((current) => !current);
+                    setSelectedKnowledgeCommentIds(new Set());
+                  }}
+                >
+                  {selectingKnowledgeComments ? "取消选择" : "选择评论整理"}
+                </button>
                 <div className="activity-order" role="group" aria-label="活动排序">
                   <button
                     type="button"
@@ -1388,6 +1439,32 @@ export function TaskDetail({
                   </button>
                 </div>
               </header>
+
+              {selectingKnowledgeComments && (
+                <div className="comment-knowledge-toolbar">
+                  <span>已选择 {selectedKnowledgeCommentIds.size} 条评论</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedKnowledgeCommentIds((current) => (
+                      current.size === filteredComments.length
+                        ? new Set()
+                        : new Set(filteredComments.map((comment) => comment.id))
+                    ))}
+                  >
+                    {selectedKnowledgeCommentIds.size === filteredComments.length ? "取消全选" : "全选当前结果"}
+                  </button>
+                  <button
+                    className="button primary"
+                    type="button"
+                    disabled={selectedKnowledgeCommentIds.size === 0 || knowledgeBusy}
+                    onClick={() => void createKnowledgeProposalFrom(
+                      comments.filter((comment) => selectedKnowledgeCommentIds.has(comment.id)),
+                    )}
+                  >
+                    {knowledgeBusy ? "整理中…" : "生成知识提案"}
+                  </button>
+                </div>
+              )}
 
               <div className={`comment-search${normalizedCommentSearch ? " has-value" : ""}`}>
                 <LinearIcon name="search" />
@@ -1442,6 +1519,21 @@ export function TaskDetail({
                         {comment.version > 1 && (
                           <span className="comment-edited" title={`编辑于 ${exactTime(comment.updatedAt)}`}>已编辑</span>
                         )}
+                        {selectingKnowledgeComments && (
+                          <label className="comment-knowledge-checkbox" title="选择这条评论">
+                            <input
+                              type="checkbox"
+                              checked={selectedKnowledgeCommentIds.has(comment.id)}
+                              onChange={(event) => setSelectedKnowledgeCommentIds((current) => {
+                                const next = new Set(current);
+                                if (event.currentTarget.checked) next.add(comment.id);
+                                else next.delete(comment.id);
+                                return next;
+                              })}
+                            />
+                            <span>选择</span>
+                          </label>
+                        )}
                         <div className="comment-actions" data-comment-menu-root={comment.id}>
                           <button
                             type="button"
@@ -1455,6 +1547,15 @@ export function TaskDetail({
                           </button>
                           {activeMenuId === comment.id && (
                             <div className="comment-action-menu" role="menu">
+                              <button
+                                type="button"
+                                role="menuitem"
+                                disabled={!knowledgeAvailable || knowledgeBusy}
+                                onClick={() => void createKnowledgeProposalFrom([comment])}
+                              >
+                                <LinearIcon name="write" />
+                                加入知识提案
+                              </button>
                               <button type="button" role="menuitem" onClick={() => beginEdit(comment)}>
                                 <LinearIcon name="write" />
                                 编辑评论
@@ -1585,6 +1686,16 @@ export function TaskDetail({
                         >
                           <LinearIcon name="plus" />
                           {openingThread ? "正在打开…" : "新建 Claude 会话"}
+                        </button>
+                        <button
+                          className="button secondary comment-new-thread-omp"
+                          type="button"
+                          disabled={openingThread || Boolean(commentThreadActionId) || !ompRuntimeSupported}
+                          title={ompRuntimeSupported ? "用 Oh My Pi 新建会话" : "仅 macOS Terminal.app 支持 OMP"}
+                          onClick={() => openPublishedCommentInNewThread(comment, "omp")}
+                        >
+                          <LinearIcon name="plus" />
+                          {openingThread ? "正在打开…" : "新建 OMP 会话"}
                         </button>
                         <div
                           className="comment-thread-picker"
@@ -1755,6 +1866,15 @@ export function TaskDetail({
                 onClick={() => onOpenInThread(currentTask, undefined, undefined, "claude")}
               >
                 <span>{openingThread ? "正在打开…" : "新建 Claude 会话"}</span>
+              </button>
+              <button
+                className="detail-open-thread-action detail-open-thread-omp"
+                type="button"
+                disabled={openingThread || !ompRuntimeSupported}
+                title={ompRuntimeSupported ? "用 Oh My Pi 新建会话" : "仅 macOS Terminal.app 支持 OMP"}
+                onClick={() => onOpenInThread(currentTask, undefined, undefined, "omp")}
+              >
+                <span>{openingThread ? "正在打开…" : "新建 OMP 会话"}</span>
               </button>
             </div>
             <h2>属性</h2>

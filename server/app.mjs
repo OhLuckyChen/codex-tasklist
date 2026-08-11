@@ -26,6 +26,7 @@ import {
 } from "./cloud-proxy.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createClaudeLauncher } from "./claude-launcher.mjs";
+import { createOmpLauncher } from "./omp-launcher.mjs";
 import { KnowledgeService, knowledgeInternals } from "./knowledge-service.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -60,9 +61,16 @@ const CLAUDE_AGENT_ACTOR = {
   name: "Claude Agent",
   avatarUrl: null,
 };
+const OMP_AGENT_ACTOR = {
+  type: "agent",
+  id: "omp-agent",
+  name: "OMP Agent",
+  avatarUrl: null,
+};
 const AGENT_RUNTIME_ACTORS = {
   "codex": CODEX_AGENT_ACTOR,
   "claude": CLAUDE_AGENT_ACTOR,
+  "omp": OMP_AGENT_ACTOR,
 };
 const CONTENT_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -531,6 +539,7 @@ function actorFromRequest(request) {
   if (request.headers["x-taskboard-client"] === "taskctl") {
     const runtime = requestHeader(request, "x-taskboard-agent-runtime");
     if (runtime === "claude") return CLAUDE_AGENT_ACTOR;
+    if (runtime === "omp") return OMP_AGENT_ACTOR;
     return CODEX_AGENT_ACTOR;
   }
 
@@ -575,8 +584,8 @@ function actorFromRequest(request) {
 
 function parseAssigneeTarget(value) {
   if (value === undefined) return undefined;
-  if (value !== "current-user" && value !== "codex-agent" && value !== "claude-agent") {
-    throw new ApiError(400, "INVALID_FIELD", "'assigneeTarget' must be current-user, codex-agent or claude-agent");
+  if (value !== "current-user" && value !== "codex-agent" && value !== "claude-agent" && value !== "omp-agent") {
+    throw new ApiError(400, "INVALID_FIELD", "'assigneeTarget' must be current-user, codex-agent, claude-agent or omp-agent");
   }
   return value;
 }
@@ -585,6 +594,7 @@ function resolveAssignee(target, actor) {
   if (target === undefined) return actor;
   if (target === "codex-agent") return CODEX_AGENT_ACTOR;
   if (target === "claude-agent") return CLAUDE_AGENT_ACTOR;
+  if (target === "omp-agent") return OMP_AGENT_ACTOR;
   if (actor.type !== "user") {
     throw new ApiError(400, "INVALID_FIELD", "'current-user' requires a user request identity");
   }
@@ -601,8 +611,8 @@ function parseWorkflowId(value) {
 
 function parseRuntime(value) {
   if (value === undefined) return undefined;
-  if (value !== "codex" && value !== "claude") {
-    throw new ApiError(400, "INVALID_FIELD", "'runtime' must be 'codex' or 'claude'");
+  if (value !== "codex" && value !== "claude" && value !== "omp") {
+    throw new ApiError(400, "INVALID_FIELD", "'runtime' must be 'codex', 'claude' or 'omp'");
   }
   return value;
 }
@@ -1463,6 +1473,7 @@ export function resolveServerOptions(options = {}) {
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
     claudeExecutable: options.claudeExecutable ?? process.env.CLAUDE_EXECUTABLE ?? "claude",
+    ompExecutable: options.ompExecutable ?? process.env.OMP_EXECUTABLE ?? "omp",
     codexExecutable: options.codexExecutable ?? process.env.CODEX_EXECUTABLE ?? "codex",
     codexStatePath: options.codexStatePath
       ?? path.join(codexHome, ".codex-global-state.json"),
@@ -1528,13 +1539,59 @@ export function createTaskboardServer(options = {}) {
   // overwrites a foreign entry); it does not touch model, settings, keybindings,
   // or any other Claude Code configuration.
   claudeLauncher.ensureClaudeSkill();
+  const ompLauncher = createOmpLauncher({
+    dataDirectory: resolved.dataDirectory,
+    ompExecutable: resolved.ompExecutable,
+  });
   const aiEventResponses = new Set();
+  const knowledgeRuns = new Map();
+
+  function knowledgeRun(runId, token) {
+    const run = knowledgeRuns.get(runId);
+    if (!run || run.expiresAt <= Date.now()) {
+      knowledgeRuns.delete(runId);
+      throw new ApiError(404, "KNOWLEDGE_RUN_NOT_FOUND", "Knowledge analysis run was not found");
+    }
+    if (typeof token !== "string" || token !== run.token) {
+      throw new ApiError(403, "KNOWLEDGE_RUN_TOKEN_INVALID", "Knowledge analysis run token is invalid");
+    }
+    return run;
+  }
+
+  async function readDeviceProjectWorkspaces() {
+    const config = await cloudConfig.read();
+    const workspaces = { ...config.projectMappings };
+    const localProjects = database.listProjects();
+    const codexProjects = await readCodexProjectWorkspaces(resolved.codexStatePath);
+    const discovered = [
+      ...localProjects
+        .filter((project) => project.workspacePath)
+        .map((project) => [project.id, project.workspacePath]),
+      ...Object.entries(codexProjects),
+    ];
+    for (const [projectId, workspacePath] of discovered) {
+      if (workspaces[projectId]) continue;
+      await cloudConfig.setProjectWorkspace(projectId, workspacePath);
+      workspaces[projectId] = workspacePath;
+    }
+    return workspaces;
+  }
 
   async function resolveKnowledgeWorkspace(projectId, requestedWorkspacePath) {
     const config = await cloudConfig.read();
-    const project = config.remoteUrl
-      ? { id: projectId, workspacePath: config.projectMappings[projectId] ?? null }
-      : database.getProject(projectId);
+    const deviceWorkspaces = await readDeviceProjectWorkspaces();
+    let project;
+    if (config.remoteUrl) {
+      project = { id: projectId, workspacePath: deviceWorkspaces[projectId] ?? null };
+    } else {
+      const dbProject = database.getProject(projectId);
+      // Local mode keeps a project's creation-time workspace_path in the database, but
+      // projects mapped later only carry a device-local project mapping. Fall back to that
+      // mapping so knowledge still resolves for projects created without --workspace-path.
+      project = dbProject
+        ? { ...dbProject, workspacePath: deviceWorkspaces[projectId] ?? dbProject.workspacePath ?? null }
+        : null;
+    }
     if (!project) {
       throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
     }
@@ -1632,6 +1689,110 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "PUT", "DELETE"]);
       }
 
+      const createKnowledgeRunRoute = pathname.match(
+        /^\/api\/local\/projects\/([^/]+)\/knowledge-runs$/,
+      );
+      if (createKnowledgeRunRoute) {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "Create project knowledge analysis run");
+        const projectId = validateProjectId(decodeRouteSegment(createKnowledgeRunRoute[1], "Project id"));
+        const body = await readJson(request, KNOWLEDGE_BODY_LIMIT, "Knowledge run request is too large");
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set([
+          "workspacePath", "sourceType", "sourceSnapshot", "developmentContext", "persist",
+        ]));
+        const workspacePath = await resolveKnowledgeWorkspace(
+          projectId,
+          stringField(body.workspacePath ?? null, "workspacePath", { nullable: true, maxLength: 4096 }),
+        );
+        const sourceType = stringField(body.sourceType, "sourceType", { required: true, maxLength: 64 });
+        const sourceSnapshot = parseKnowledgeSourceSnapshot(body.sourceSnapshot);
+        const developmentContext = parseKnowledgeContext(body.developmentContext);
+        const persist = body.persist === true;
+        const runId = randomUUID();
+        const token = `${randomUUID()}${randomUUID()}`;
+        const callbackUrl = `http://127.0.0.1:${request.socket.localPort}/api/local/knowledge-runs/${runId}/complete`;
+        const run = {
+          id: runId,
+          token,
+          projectId,
+          workspacePath,
+          sourceType,
+          sourceSnapshot,
+          developmentContext,
+          persist,
+          status: "waiting",
+          proposal: null,
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        };
+        knowledgeRuns.set(runId, run);
+        return sendJson(response, 201, {
+          run: {
+            id: runId,
+            token,
+            status: run.status,
+            instruction: knowledge.knowledgeRunInstruction({
+              sourceType,
+              sourceSnapshot,
+              workspacePath,
+              callbackUrl,
+              callbackToken: token,
+            }),
+          },
+        });
+      }
+
+      const knowledgeRunRoute = pathname.match(/^\/api\/local\/knowledge-runs\/([^/]+)(?:\/(complete))?$/);
+      if (knowledgeRunRoute) {
+        assertNoQuery(url.searchParams, "Project knowledge analysis run");
+        const runId = decodeRouteSegment(knowledgeRunRoute[1], "Knowledge run id");
+        const token = request.headers["x-taskboard-knowledge-run-token"];
+        const run = knowledgeRun(runId, Array.isArray(token) ? token[0] : token);
+        if (knowledgeRunRoute[2] === "complete") {
+          if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+          if (run.status === "completed") return sendJson(response, 200, { ok: true });
+          const body = await readJson(request, KNOWLEDGE_BODY_LIMIT, "Knowledge analysis result is too large");
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["analysis", "error"]));
+          if (body.error !== undefined) {
+            run.error = stringField(body.error, "error", { required: true, maxLength: 20_000 });
+            run.status = "failed";
+            return sendJson(response, 200, { ok: true });
+          }
+          assertPlainObject(body.analysis);
+          const proposal = await knowledge.prepareProposal(run.workspacePath, {
+            sourceType: run.sourceType,
+            sourceSnapshot: run.sourceSnapshot,
+            developmentContext: run.developmentContext,
+          }, body.analysis);
+          run.proposal = run.persist
+            ? database.createKnowledgeProposal({
+              projectId: run.projectId,
+              ...proposal,
+              id: run.id,
+              actor: CODEX_AGENT_ACTOR,
+            })
+            : { ...proposal, id: run.id };
+          run.status = "completed";
+          if (run.persist) {
+            events.emit("knowledge-proposal.created", {
+              projectId: run.projectId,
+              proposal: run.proposal,
+            });
+          }
+          return sendJson(response, 200, { ok: true });
+        }
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        return sendJson(response, 200, {
+          run: {
+            id: run.id,
+            status: run.status,
+            ...(run.proposal ? { proposal: run.proposal } : {}),
+            ...(run.error ? { error: run.error } : {}),
+          },
+        });
+      }
+
       const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
       if (projectMappingRoute) {
         if (request.method !== "PUT") return methodNotAllowed(response, ["PUT"]);
@@ -1663,7 +1824,14 @@ export function createTaskboardServer(options = {}) {
         }
         return sendJson(response, 200, {
           manageTaskboardSkillPath: resolved.skillPath,
+          projectKnowledgeSkillPath: path.join(
+            PROJECT_ROOT,
+            "skills",
+            "project-knowledge-builder",
+            "SKILL.md",
+          ),
           claudeRuntime: claudeLauncher.supportedPlatform,
+          ompRuntime: ompLauncher.supportedPlatform,
           capabilities: {
             localAiChat: isLoopbackAddress(request.socket.remoteAddress),
             localKnowledge: isLoopbackAddress(request.socket.remoteAddress),
@@ -1942,6 +2110,80 @@ export function createTaskboardServer(options = {}) {
         }
         return sendJson(response, 200, { running: claudeLauncher.isRunning(sessionId) });
       }
+      if (pathname === "/api/local/omp/session") {
+        assertNoQuery(url.searchParams, "/api/local/omp/session");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["taskId", "workspacePath", "instruction", "requestId", "commentId"]));
+        const taskId = stringField(body.taskId, "taskId", { required: true, maxLength: 128 });
+        const workspacePath = stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 });
+        if (!path.isAbsolute(workspacePath) || workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute local path");
+        }
+        const home = os.homedir();
+        const resolvedWorkspace = path.resolve(workspacePath);
+        if (resolvedWorkspace !== home && !resolvedWorkspace.startsWith(`${home}/`)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be inside the user home directory");
+        }
+        const instruction = stringField(body.instruction, "instruction", { required: true, maxLength: 20_000 });
+        const requestId = stringField(body.requestId, "requestId", { required: true, maxLength: 64 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'requestId' must be a valid UUID (used as the OMP session id)");
+        }
+        if (!ompLauncher.supportedPlatform) {
+          throw new ApiError(400, "UNSUPPORTED", "OMP runtime is only supported on macOS (Terminal.app).");
+        }
+        const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
+        try {
+          ompLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt });
+        } catch (error) {
+          throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch OMP session");
+        }
+        return sendJson(response, 201, { threadId: requestId, runtime: "omp" });
+      }
+
+      if (pathname === "/api/local/omp/resume") {
+        assertNoQuery(url.searchParams, "/api/local/omp/resume");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["threadId", "workspacePath", "followUp"]));
+        const threadId = stringField(body.threadId, "threadId", { required: true, maxLength: 128 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'threadId' must be a valid OMP session UUID");
+        }
+        const workspacePath = stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 });
+        if (!path.isAbsolute(workspacePath) || workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute local path");
+        }
+        const home = os.homedir();
+        const resolvedWorkspace = path.resolve(workspacePath);
+        if (resolvedWorkspace !== home && !resolvedWorkspace.startsWith(`${home}/`)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be inside the user home directory");
+        }
+        const followUp = body.followUp === undefined
+          ? undefined
+          : stringField(body.followUp, "followUp", { maxLength: 20_000 });
+        if (!ompLauncher.supportedPlatform) {
+          throw new ApiError(400, "UNSUPPORTED", "OMP runtime is only supported on macOS (Terminal.app).");
+        }
+        try {
+          ompLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp });
+        } catch (error) {
+          throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to resume OMP session");
+        }
+        return sendJson(response, 200, { ok: true });
+      }
+
+      if (pathname === "/api/local/omp/status") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const sessionId = stringField(url.searchParams.get("sessionId") ?? "", "sessionId", { required: true, maxLength: 64 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'sessionId' must be a valid OMP session UUID");
+        }
+        return sendJson(response, 200, { running: ompLauncher.isRunning(sessionId) });
+      }
 
       if (pathname === "/api/device-workspaces") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
@@ -1949,7 +2191,7 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/device-workspaces does not accept query parameters");
         }
         return sendJson(response, 200, {
-          workspaces: await readCodexProjectWorkspaces(resolved.codexStatePath),
+          workspaces: await readDeviceProjectWorkspaces(),
         });
       }
 
@@ -2004,6 +2246,16 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 201, { project });
         }
         return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const projectKnowledgeSourcesRoute = pathname.match(
+        /^\/api\/projects\/([^/]+)\/knowledge-source-versions$/,
+      );
+      if (projectKnowledgeSourcesRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectKnowledgeSourcesRoute[1], "Project id"));
+        assertNoQuery(url.searchParams, "Project knowledge source versions");
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        return sendJson(response, 200, { versions: database.knowledgeSourceVersions(projectId) });
       }
 
       const projectKnowledgeProposalsRoute = pathname.match(
@@ -2157,6 +2409,9 @@ export function createTaskboardServer(options = {}) {
           // taskboard routes its linked session to the right launcher.
           if (input.runtime === "codex" && actor.id === "claude-agent") {
             input.runtime = "claude";
+          }
+          if (input.runtime === "codex" && actor.id === "omp-agent") {
+            input.runtime = "omp";
           }
           const task = database.createTask({
             ...input,

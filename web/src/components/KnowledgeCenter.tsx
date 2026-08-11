@@ -3,12 +3,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import {
+  ApiError,
   askProjectKnowledge,
   checkKnowledge,
   createKnowledgeProposal,
   generateKnowledgeProposal,
-  getKnowledgeOverview,
   getKnowledgePage,
+  getKnowledgeSourceVersions,
   listKnowledgeProposals,
   publishKnowledgeProposal,
   searchKnowledge,
@@ -16,6 +17,7 @@ import {
 } from "../api";
 import type {
   DevelopmentScan,
+  GeneratedKnowledgeProposal,
   KnowledgeAnswer,
   KnowledgeDevelopmentContext,
   KnowledgeOverview,
@@ -46,11 +48,17 @@ const HEALTH_LABELS = {
 };
 
 function messageFor(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.code === "PROJECT_WORKSPACE_REQUIRED") return "请先在项目首页选择本地项目目录。";
+    if (error.code === "INVALID_WORKSPACE_CONTEXT") return "当前知识目录与项目目录不一致，请返回项目首页确认本地项目目录。";
+    if (error.code === "KNOWLEDGE_ANALYSIS_FAILED") return "项目分析失败，请重试；若持续失败，请检查 Codex 登录状态。";
+    if (error.code === "KNOWLEDGE_ANALYSIS_TIMEOUT") return "项目分析超时，请稍后重试。";
+    if (error.code === "KNOWLEDGE_ANALYSIS_INVALID") return "项目分析结果格式不正确，请重新初始化。";
+    if (error.code === "KNOWLEDGE_WORKSPACE_PERMISSION_DENIED") {
+      return "当前后台分析方式无法读取该项目目录，请通过 Codex 项目会话重新分析。";
+    }
+  }
   return error instanceof Error ? error.message : "操作失败，请重试。";
-}
-
-function contextKey(context: KnowledgeDevelopmentContext | null): string {
-  return context ? `${context.type}:${context.branch ?? ""}` : "default";
 }
 
 function lineDiff(before: string | null, after: string | null) {
@@ -110,6 +118,13 @@ export interface KnowledgeCenterProps {
   available: boolean;
   revision?: number;
   onProposalCountChange?: (count: number) => void;
+  onInitialize?: (workspacePath: string) => Promise<void>;
+  onGenerateProposal?: (input: {
+    workspacePath: string;
+    sourceType: KnowledgeSourceType;
+    sourceSnapshot: Record<string, unknown>;
+    developmentContext: KnowledgeDevelopmentContext | null;
+  }) => Promise<GeneratedKnowledgeProposal>;
 }
 
 export function KnowledgeCenter({
@@ -119,6 +134,8 @@ export function KnowledgeCenter({
   available,
   revision = 0,
   onProposalCountChange,
+  onInitialize,
+  onGenerateProposal,
 }: KnowledgeCenterProps) {
   const [section, setSection] = useState<KnowledgeSection>("published");
   const [overview, setOverview] = useState<KnowledgeOverview | null>(null);
@@ -168,13 +185,17 @@ export function KnowledgeCenter({
   const pendingCount = proposals.filter((proposal) => (
     proposal.status === "ready" || proposal.status === "generating" || proposal.status === "failed"
   )).length;
+  const localReady = available && Boolean(selectedWorkspace);
+  const selectedPageHealth = overview?.pages.find((candidate) => candidate.path === page?.path)?.health
+    ?? page?.health;
 
   async function loadOverview(preferredPath?: string) {
-    if (!available || !selectedWorkspace) {
+    if (!localReady) {
       setLoading(false);
       return;
     }
-    const next = await getKnowledgeOverview(project.id, selectedWorkspace);
+    const versions = await getKnowledgeSourceVersions(project.id);
+    const next = await checkKnowledge(project.id, selectedWorkspace, versions);
     setOverview(next);
     const nextPath = preferredPath
       ?? page?.path
@@ -192,9 +213,11 @@ export function KnowledgeCenter({
     setProposals(next);
     const count = next.filter((proposal) => proposal.status === "ready").length;
     onProposalCountChange?.(count);
-    if (selectedProposalId && !next.some((proposal) => proposal.id === selectedProposalId)) {
-      setSelectedProposalId(null);
-    }
+    setSelectedProposalId((current) => (
+      current && next.some((proposal) => proposal.id === current)
+        ? current
+        : next[0]?.id ?? null
+    ));
   }
 
   useEffect(() => {
@@ -203,11 +226,19 @@ export function KnowledgeCenter({
   }, [developmentScan.workspacePath, project.id, workspacePath]);
 
   useEffect(() => {
+    if (!localReady) setSection("pending");
+  }, [localReady, project.id]);
+
+  useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     void Promise.all([
-      available && selectedWorkspace ? getKnowledgeOverview(project.id, selectedWorkspace) : null,
+      localReady
+        ? getKnowledgeSourceVersions(project.id).then((versions) => (
+          checkKnowledge(project.id, selectedWorkspace, versions)
+        ))
+        : null,
       listKnowledgeProposals(project.id),
     ]).then(async ([nextOverview, nextProposals]) => {
       if (cancelled) return;
@@ -222,6 +253,11 @@ export function KnowledgeCenter({
         }
       }
       setProposals(nextProposals);
+      setSelectedProposalId((current) => (
+        current && nextProposals.some((proposal) => proposal.id === current)
+          ? current
+          : nextProposals[0]?.id ?? null
+      ));
       onProposalCountChange?.(nextProposals.filter((proposal) => proposal.status === "ready").length);
     }).catch((nextError) => {
       if (!cancelled) setError(messageFor(nextError));
@@ -229,7 +265,7 @@ export function KnowledgeCenter({
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [available, onProposalCountChange, project.id, revision, selectedWorkspace]);
+  }, [localReady, onProposalCountChange, project.id, revision, selectedWorkspace]);
 
   useEffect(() => {
     if (!selectedProposal) {
@@ -250,12 +286,15 @@ export function KnowledgeCenter({
     setError(null);
     setNotice(null);
     try {
-      const generated = await generateKnowledgeProposal(project.id, {
+      const proposalInput = {
         workspacePath: selectedWorkspace,
         sourceType,
         sourceSnapshot,
         developmentContext: selectedContext,
-      });
+      };
+      const generated = onGenerateProposal
+        ? await onGenerateProposal(proposalInput)
+        : await generateKnowledgeProposal(project.id, proposalInput);
       if (generated.changes.length === 0) {
         setNotice(generated.summary || "本次没有发现需要长期沉淀的知识。 ");
         return;
@@ -306,7 +345,8 @@ export function KnowledgeCenter({
     setBusy("check");
     setError(null);
     try {
-      const next = await checkKnowledge(project.id, selectedWorkspace);
+      const versions = await getKnowledgeSourceVersions(project.id);
+      const next = await checkKnowledge(project.id, selectedWorkspace, versions);
       setOverview(next);
       setSection("health");
       setNotice("知识来源检查已完成，未自动修改任何正文。");
@@ -337,6 +377,20 @@ export function KnowledgeCenter({
     return saved;
   }
 
+  async function saveDraft() {
+    if (!selectedProposal || busy) return;
+    setBusy("save");
+    setError(null);
+    try {
+      await persistEdits(selectedProposal);
+      setNotice("提案草稿已保存，正式知识尚未修改。");
+    } catch (nextError) {
+      setError(messageFor(nextError));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function publishProposal() {
     if (!selectedProposal || selectedProposal.status !== "ready" || busy) return;
     setBusy("publish");
@@ -348,8 +402,12 @@ export function KnowledgeCenter({
       const published = await updateKnowledgeProposal(saved, { status: "published" });
       setProposals((current) => current.map((candidate) => candidate.id === published.id ? published : candidate));
       setNotice("提案已发布，正式知识已更新。");
-      await loadOverview();
       setSection("published");
+      try {
+        await loadOverview();
+      } catch (refreshError) {
+        setError(`知识已成功发布，但页面刷新失败：${messageFor(refreshError)}`);
+      }
     } catch (nextError) {
       setError(messageFor(nextError));
     } finally {
@@ -369,24 +427,6 @@ export function KnowledgeCenter({
     } finally {
       setBusy(null);
     }
-  }
-
-  if (!available) {
-    return (
-      <section className="knowledge-empty-state">
-        <h2>项目知识需要本地 companion</h2>
-        <p>当前页面不能访问设备上的项目文件。请通过本地 Taskboard 或 Codex 内嵌入口打开。</p>
-      </section>
-    );
-  }
-
-  if (!selectedWorkspace) {
-    return (
-      <section className="knowledge-empty-state">
-        <h2>请先映射项目目录</h2>
-        <p>项目知识只读取当前项目已映射的目录，不会尝试其他工作区。</p>
-      </section>
-    );
   }
 
   return (
@@ -411,13 +451,22 @@ export function KnowledgeCenter({
               {contextOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
             </select>
           )}
-          <button type="button" disabled={Boolean(busy)} onClick={() => void createGeneratedProposal("project_scan", {
-            requestedAt: new Date().toISOString(),
-          })}>{busy === "project_scan" ? "分析中…" : overview?.initialized ? "重新分析" : "分析项目"}</button>
-          <button type="button" disabled={Boolean(busy)} onClick={() => void runHealthCheck()}>
+          <button type="button" disabled={Boolean(busy) || !localReady} onClick={() => {
+            if (!selectedWorkspace || busy) return;
+            if (!onInitialize) {
+              void createGeneratedProposal("project_scan", { requestedAt: new Date().toISOString() });
+              return;
+            }
+            setBusy("project_scan");
+            setError(null);
+            void onInitialize(selectedWorkspace)
+              .catch((nextError) => setError(messageFor(nextError)))
+              .finally(() => setBusy(null));
+          }}>{busy === "project_scan" ? "正在创建议题…" : overview?.initialized ? "重新分析" : "初始化知识库"}</button>
+          <button type="button" disabled={Boolean(busy) || !localReady} onClick={() => void runHealthCheck()}>
             {busy === "check" ? "检查中…" : "检查更新"}
           </button>
-          <button type="button" disabled={Boolean(busy)} onClick={() => void createGeneratedProposal("project_review", {
+          <button type="button" disabled={Boolean(busy) || !localReady} onClick={() => void createGeneratedProposal("project_review", {
             requestedAt: new Date().toISOString(),
           })}>阶段复盘</button>
         </div>
@@ -435,7 +484,16 @@ export function KnowledgeCenter({
       {notice && <div className="knowledge-message" role="status">{notice}</div>}
       {loading ? <div className="knowledge-loading">正在读取项目知识…</div> : null}
 
-      {!loading && section === "published" && (
+      {!loading && section === "published" && !localReady && (
+        <div className="knowledge-empty-state">
+          <h2>{available ? "请先映射项目目录" : "已发布知识需要本地 companion"}</h2>
+          <p>{available
+            ? "项目知识只读取当前项目已映射的目录，不会尝试其他工作区。"
+            : "当前仍可审核云端待确认提案；读取和发布项目文件时请通过本地 Taskboard 或 Codex 内嵌入口打开。"}</p>
+        </div>
+      )}
+
+      {!loading && section === "published" && localReady && (
         <div className="knowledge-published-layout">
           <aside className="knowledge-sidebar">
             <form onSubmit={(event) => { event.preventDefault(); void runSearch(); }}>
@@ -469,12 +527,12 @@ export function KnowledgeCenter({
             {!overview?.initialized ? (
               <div className="knowledge-empty-document">
                 <h3>项目知识尚未初始化</h3>
-                <p>点击“分析项目”会先生成待确认提案，确认发布前不会创建知识文件。</p>
+                <p>点击“初始化知识库”会先生成待确认提案，确认发布前不会创建知识文件。</p>
               </div>
             ) : page ? (
               <>
                 <div className="knowledge-document-meta">
-                  <span>{page.kind}</span><span>{HEALTH_LABELS[page.health]}</span>
+                  <span>{page.kind}</span><span>{HEALTH_LABELS[selectedPageHealth ?? page.health]}</span>
                   {page.updatedAt && <span>{page.updatedAt}</span>}
                 </div>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{page.content}</ReactMarkdown>
@@ -526,7 +584,9 @@ export function KnowledgeCenter({
                   <div><h3>{selectedProposal.title}</h3><p>{selectedProposal.summary}</p></div>
                   {selectedProposal.status === "ready" && (
                     <div>
-                      <button type="button" disabled={Boolean(busy)} onClick={() => void persistEdits(selectedProposal)}>保存草稿</button>
+                      <button type="button" disabled={Boolean(busy)} onClick={() => void saveDraft()}>
+                        {busy === "save" ? "保存中…" : "保存草稿"}
+                      </button>
                       <button type="button" disabled={Boolean(busy)} onClick={() => void rejectProposal()}>驳回</button>
                       <button className="primary" type="button" disabled={Boolean(busy)} onClick={() => void publishProposal()}>
                         {busy === "publish" ? "发布中…" : "确认发布"}
@@ -534,6 +594,10 @@ export function KnowledgeCenter({
                     </div>
                   )}
                 </header>
+                <details className="knowledge-proposal-source">
+                  <summary>来源快照 · {SOURCE_LABELS[selectedProposal.sourceType]}</summary>
+                  <pre>{JSON.stringify(selectedProposal.sourceSnapshot, null, 2)}</pre>
+                </details>
                 <div className="knowledge-change-tabs">
                   {editedChanges.map((change) => (
                     <button
@@ -572,7 +636,14 @@ export function KnowledgeCenter({
         </div>
       )}
 
-      {!loading && section === "health" && (
+      {!loading && section === "health" && !localReady && (
+        <div className="knowledge-empty-state">
+          <h2>健康检查需要本地项目目录</h2>
+          <p>待确认提案仍可审核；来源与代码新鲜度检查会在本地 companion 中执行。</p>
+        </div>
+      )}
+
+      {!loading && section === "health" && localReady && (
         <div className="knowledge-health-view">
           <div className="knowledge-health-summary">
             <span><strong>{overview?.health.fresh ?? 0}</strong>最新</span>

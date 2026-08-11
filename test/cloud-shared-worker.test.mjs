@@ -153,6 +153,69 @@ test("projects, tasks, comments, relations, and workflows preserve the current A
   assert.ok(listed.body.tasks.some((task) => task.id === child.body.task.id));
 });
 
+test("cloud knowledge proposals synchronize review data while source versions stay queryable", async () => {
+  const project = await createProject("knowledge-cloud");
+  assert.equal(project.response.status, 201);
+  const task = await createTask("knowledge-cloud", "Document the shared path");
+  const comment = await cloud.request(`/api/tasks/${task.body.task.id}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "Verified in the worker" },
+  });
+  const sources = await cloud.request("/api/projects/knowledge-cloud/knowledge-source-versions", {
+    actorName: bob,
+  });
+  assert.equal(sources.response.status, 200);
+  assert.equal(sources.body.versions[`issue:${task.body.task.identifier}`], 1);
+  assert.equal(sources.body.versions[`comment:${comment.body.comment.id}`], 1);
+
+  const created = await cloud.request("/api/projects/knowledge-cloud/knowledge-proposals", {
+    method: "POST",
+    actorName: alice,
+    json: {
+      title: "Shared knowledge proposal",
+      sourceType: "comments",
+      sourceSnapshot: { commentIds: [comment.body.comment.id] },
+      developmentContext: { type: "branch", branch: "main" },
+      summary: "Awaiting review",
+      changes: [{
+        id: "knowledge-cloud-change",
+        targetPath: "docs/knowledge/key-flows.md",
+        operation: "create",
+        baseDigest: null,
+        beforeContent: null,
+        afterContent: "# Shared flow\n",
+        sortOrder: 0,
+      }],
+    },
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.proposal.status, "ready");
+  assert.equal(created.body.proposal.creator.name, alice);
+
+  const listed = await cloud.request("/api/projects/knowledge-cloud/knowledge-proposals?status=ready", {
+    actorName: bob,
+  });
+  assert.equal(listed.body.proposals.length, 1);
+  assert.equal(listed.body.proposals[0].changes[0].afterContent, "# Shared flow\n");
+
+  const published = await cloud.request(`/api/knowledge-proposals/${created.body.proposal.id}`, {
+    method: "PATCH",
+    actorName: bob,
+    json: { version: created.body.proposal.version, status: "published" },
+  });
+  assert.equal(published.response.status, 200);
+  assert.equal(published.body.proposal.status, "published");
+  assert.equal(published.body.proposal.publisher.name, bob);
+
+  const stale = await cloud.request(`/api/knowledge-proposals/${created.body.proposal.id}`, {
+    method: "PATCH",
+    actorName: alice,
+    json: { version: created.body.proposal.version, summary: "stale write" },
+  });
+  assert.equal(stale.response.status, 409);
+});
+
 test("concurrent issue creation has unique identifiers and stale writes return 409", async () => {
   const created = await Promise.all(
     Array.from({ length: 25 }, (_, index) => createTask("alpha", `Concurrent ${index}`)),

@@ -948,6 +948,42 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
   throw new Error("Timed out while writing the issue instruction into the Codex composer");
 }
 
+async function prefillPlainComposerViaCdp(cdp, executionContextId, request) {
+  const { instruction } = request;
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const prepared = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const instruction = ${JSON.stringify(instruction)};
+        const editor = Array.from(document.querySelectorAll(
+          '[data-codex-composer="true"][contenteditable="true"]'
+        )).find((candidate) => candidate.getClientRects().length > 0);
+        if (!editor) return { ready: false };
+        if ((editor.textContent || "").includes(instruction)) return { ready: true, matches: true };
+        editor.focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        return { ready: true, matches: false };
+      })()`,
+      contextId: executionContextId,
+      returnByValue: true,
+    });
+    if (!prepared.result.value?.ready) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      continue;
+    }
+    if (!prepared.result.value.matches) {
+      await cdp.send("Input.insertText", { text: instruction });
+    }
+    if (request.submit) await submitTaskComposerViaCdp(cdp, executionContextId, instruction);
+    return { prefilled: true, submitted: request.submit === true };
+  }
+  throw new Error("Timed out while writing the knowledge instruction into the Codex composer");
+}
+
 async function submitTaskComposerViaCdp(cdp, executionContextId, instruction) {
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
@@ -1037,6 +1073,9 @@ async function installTaskboardHostBinding(cdp, supervisor) {
         })()
       ),
       prefill: async (request, executionContextId) => {
+        if (request.action === "prefill-plain-composer") {
+          return prefillPlainComposerViaCdp(cdp, executionContextId, request);
+        }
         const result = await prefillTaskComposerViaCdp(cdp, executionContextId, request);
         if (!request.submit) return result;
         return {

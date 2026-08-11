@@ -919,6 +919,50 @@
     return false;
   }
 
+  async function selectComposerProject(project) {
+    const composerDeadline = Date.now() + 8_000;
+    let picker = null;
+    while (!picker && Date.now() < composerDeadline) {
+      picker = Array.from(document.querySelectorAll("button")).find((button) => (
+        button.getClientRects().length > 0
+        && button.getAttribute("data-composer-navigation-target") === "workspace-project"
+      )) || null;
+      if (!picker) await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+    if (!picker) throw new Error("Codex 新会话没有项目选择器");
+
+    const currentLabel = normalizedLabel(picker.textContent || picker.getAttribute("aria-label"));
+    if (currentLabel.includes(normalizedLabel(project.name))) return;
+    picker.click();
+
+    const optionDeadline = Date.now() + 8_000;
+    let option = null;
+    while (!option && Date.now() < optionDeadline) {
+      option = Array.from(document.querySelectorAll('[role="option"]')).find((candidate) => (
+        candidate.getClientRects().length > 0
+        && (
+          candidate.getAttribute("data-value") === project.id
+          || normalizedLabel(candidate.textContent) === normalizedLabel(project.name)
+        )
+      )) || null;
+      if (!option) await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+    if (!option) throw new Error(`Codex 项目选择器中没有“${project.name}”`);
+    option.click();
+
+    const selectionDeadline = Date.now() + 5_000;
+    while (Date.now() < selectionDeadline) {
+      const selected = Array.from(document.querySelectorAll("button")).find((button) => (
+        button.getClientRects().length > 0
+        && button.getAttribute("data-composer-navigation-target") === "workspace-project"
+      ));
+      const label = normalizedLabel(selected?.textContent || selected?.getAttribute("aria-label"));
+      if (label.includes(normalizedLabel(project.name))) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+    throw new Error(`Codex 没有确认新会话的项目“${project.name}”`);
+  }
+
   async function activateProjectForThread(payload, workspacePath, bridge) {
     await ensureProjectRows();
     if (workspacePath) {
@@ -935,7 +979,18 @@
       row = requestedProjectRow(payload);
     }
     const project = projectFromRow(row);
-    if (!row || !project) throw new Error("Codex 未找到任务所属项目，已停止创建会话");
+    if (!row || !project) {
+      const requestedProjectId = typeof payload?.codexProjectId === "string"
+        ? payload.codexProjectId.trim()
+        : "";
+      const projectName = typeof payload?.projectName === "string"
+        ? payload.projectName.trim()
+        : "";
+      if (!requestedProjectId || !projectName) {
+        throw new Error("Codex 未找到任务所属项目，已停止创建会话");
+      }
+      return { id: requestedProjectId, name: projectName, selectInComposer: true };
+    }
 
     if (row.getAttribute("data-app-action-sidebar-project-collapsed") === "true") {
       row.click?.();
@@ -945,7 +1000,7 @@
     if (!selectProject) throw new Error("Codex 无法选择任务所属项目，已停止创建会话");
     selectProject.click?.();
 
-    if (await waitForActiveNativeProject(project.id)) return project;
+    if (await waitForActiveNativeProject(project.id)) return { ...project, selectInComposer: false };
     throw new Error(`Codex 未切换到项目“${project.name}”，已停止创建会话`);
   }
 
@@ -1046,6 +1101,23 @@
     const startedAt = Date.now();
     const marker = `[taskboard-request:${requestId}]`;
     const correlatedInstruction = `${instruction}\n\n${marker}`;
+    const usesRepositoryKnowledgeSkill = skillName === "project-knowledge-builder";
+    const manageTaskboardSkillPath = usesRepositoryKnowledgeSkill
+      ? skillPath.replace(
+        /skills\/project-knowledge-builder\/SKILL\.md$/,
+        "skills/manage-taskboard/SKILL.md",
+      )
+      : "";
+    const composerInstruction = usesRepositoryKnowledgeSkill
+      ? [
+        "这是普通任务提示词，不要打开或使用 Codex 的 Skill 选择菜单。",
+        `先完整读取同一 Git 仓库自带的 Taskboard 操作规范：${manageTaskboardSkillPath}`,
+        `再完整读取同一 Git 仓库自带的项目知识库构建规范：${skillPath}`,
+        "前者负责 Issue、评论和状态操作，后者负责知识质量、项目分析和待确认提案。不要改用用户本机安装的其他 Skill。",
+        "保持目标项目目录只读，只允许把分析结果回传为 Taskboard 待确认提案。",
+        correlatedInstruction,
+      ].join("\n\n")
+      : correlatedInstruction;
     persistPendingTaskThreadLink({
       requestId,
       taskId,
@@ -1069,16 +1141,25 @@
           focusComposerNonce: Date.now(),
         },
       });
-      if (!await waitForActiveNativeProject(activatedProject.id)) {
+      if (activatedProject.selectInComposer) {
+        await selectComposerProject(activatedProject);
+      } else if (!await waitForActiveNativeProject(activatedProject.id)) {
         throw new Error(`Codex 离开了项目“${activatedProject.name}”，已停止创建会话`);
       }
-      await requestHostTaskComposerPrefill({
-        instruction: correlatedInstruction,
-        skillDisplayName,
-        skillName,
-        skillPath,
-        submit: true,
-      });
+      if (usesRepositoryKnowledgeSkill) {
+        await requestHost("prefill-plain-composer", {
+          instruction: composerInstruction,
+          submit: true,
+        });
+      } else {
+        await requestHostTaskComposerPrefill({
+          instruction: composerInstruction,
+          skillDisplayName,
+          skillName,
+          skillPath,
+          submit: true,
+        });
+      }
       void resolvePendingTaskThreadLink();
       postToFrame({ type: "taskboard:thread-prepared", payload: { requestId, taskId } });
     } catch (error) {
@@ -1092,6 +1173,113 @@
           taskId,
           commentId: commentId || undefined,
           error: error instanceof Error ? error.message : "无法创建 Codex 对话",
+        },
+      });
+    } finally {
+      pendingThreadCreation = null;
+    }
+  }
+
+  async function createKnowledgeThread(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
+    const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
+    const workspacePath = typeof payload?.workspacePath === "string"
+      ? payload.workspacePath.trim()
+      : "";
+    if (!requestId || !instruction || !workspacePath) return;
+    if (pendingThreadCreation) {
+      postToFrame({
+        type: "taskboard:knowledge-thread-error",
+        payload: { requestId, error: "上一条 Codex 会话仍在创建中，请稍后重试。" },
+      });
+      return;
+    }
+    pendingThreadCreation = requestId;
+    let stage = "切换项目目录";
+    const setStage = (nextStage) => {
+      stage = nextStage;
+      window.__codexTaskboardKnowledgeStage = { requestId, stage, updatedAt: Date.now() };
+    };
+    setStage(stage);
+    try {
+      setStage("打开新会话");
+      closeTaskboard(false);
+      const newTaskButton = Array.from(document.querySelectorAll("button")).find((button) => (
+        button.getClientRects().length > 0
+        && ["新对话", "new task", "new chat"].includes(normalizedLabel(button.textContent))
+      ));
+      if (!newTaskButton) throw new Error("Codex 没有找到“新对话”入口");
+      newTaskButton.click();
+      const composerDeadline = Date.now() + 8_000;
+      let composerReady = false;
+      while (!composerReady && Date.now() < composerDeadline) {
+        composerReady = Array.from(document.querySelectorAll(
+          '[data-codex-composer="true"][contenteditable="true"]',
+        )).some((editor) => editor.getClientRects().length > 0);
+        if (!composerReady) await new Promise((resolve) => window.setTimeout(resolve, 80));
+      }
+      if (!composerReady) throw new Error("Codex 新会话输入框没有就绪");
+      setStage("选择星枢项目");
+      const projectPicker = Array.from(document.querySelectorAll("button")).find((button) => (
+        button.getClientRects().length > 0
+        && button.getAttribute("data-composer-navigation-target") === "workspace-project"
+      ));
+      if (!projectPicker) throw new Error("Codex 新会话没有项目选择器");
+      projectPicker.click();
+      const requestedProjectId = typeof payload?.codexProjectId === "string"
+        ? payload.codexProjectId.trim()
+        : "";
+      const expectedLabels = [payload?.projectName, payload?.workspaceLabel]
+        .filter((label) => typeof label === "string" && label.trim())
+        .map(normalizedLabel);
+      const optionDeadline = Date.now() + 8_000;
+      let projectOption = null;
+      while (!projectOption && Date.now() < optionDeadline) {
+        projectOption = Array.from(document.querySelectorAll('[role="option"]')).find((option) => (
+          option.getClientRects().length > 0
+          && (
+            (requestedProjectId && option.getAttribute("data-value") === requestedProjectId)
+            || expectedLabels.includes(normalizedLabel(option.textContent))
+          )
+        )) || null;
+        if (!projectOption) await new Promise((resolve) => window.setTimeout(resolve, 80));
+      }
+      if (!projectOption) {
+        throw new Error(`Codex 项目选择器中没有“${payload?.workspaceLabel || payload?.projectName}”`);
+      }
+      projectOption.click();
+      const selectionDeadline = Date.now() + 4_000;
+      let projectSelected = false;
+      while (!projectSelected && Date.now() < selectionDeadline) {
+        const currentPicker = Array.from(document.querySelectorAll("button")).find((button) => (
+          button.getClientRects().length > 0
+          && button.getAttribute("data-composer-navigation-target") === "workspace-project"
+        ));
+        const label = normalizedLabel(
+          currentPicker?.textContent || currentPicker?.getAttribute("aria-label"),
+        );
+        projectSelected = expectedLabels.some((expected) => label.includes(expected));
+        if (!projectSelected) await new Promise((resolve) => window.setTimeout(resolve, 80));
+      }
+      if (!projectSelected) throw new Error("Codex 没有确认新会话的项目选择");
+      setStage("发送分析指令");
+      await requestHost("prefill-plain-composer", { instruction, submit: true });
+      postToFrame({
+        type: "taskboard:knowledge-thread-prepared",
+        payload: {
+          requestId,
+          projectId: requestedProjectId,
+          projectName: payload?.projectName || payload?.workspaceLabel,
+        },
+      });
+      setStage("已创建");
+    } catch (error) {
+      setStage(`${stage}失败`);
+      postToFrame({
+        type: "taskboard:knowledge-thread-error",
+        payload: {
+          requestId,
+          error: `${stage}失败：${error instanceof Error ? error.message : "无法创建项目知识分析会话"}`,
         },
       });
     } finally {
@@ -1279,6 +1467,10 @@
     }
     if (message.type === "taskboard:create-thread") {
       void createThreadForTask(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:create-knowledge-thread") {
+      void createKnowledgeThread(message.payload);
       return;
     }
     if (message.type === "taskboard:thread-link-ack") {

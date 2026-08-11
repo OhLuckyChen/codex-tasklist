@@ -26,18 +26,24 @@ import {
   chooseLocalDirectory,
   createProject as createProjectRequest,
   createTask as createTaskRequest,
+  createKnowledgeRun,
   createKnowledgeProposal,
   createClaudeSession,
+  createOmpSession,
   generateKnowledgeProposal,
+  getKnowledgeRun,
   resumeClaudeSession,
+  resumeOmpSession,
   getTaskboardRevision,
   getWorkflowWorkspace,
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
+  listKnowledgeProposals,
   unlinkTaskThread as unlinkTaskThreadRequest,
   listComments,
   listDevelopmentContexts,
   listDeviceWorkspaces,
+  setDeviceWorkspace,
   listProjects,
   listTasks,
   moveTask as moveTaskRequest,
@@ -46,6 +52,7 @@ import {
   transferTaskProject as transferTaskProjectRequest,
   uploadAttachment,
   updateComment as updateCommentRequest,
+  updateKnowledgeProposal,
   updateTask as updateTaskRequest,
 } from "./api";
 import {
@@ -86,9 +93,12 @@ import {
   type CodexThreadSummary,
   type Comment,
   type DevelopmentScan,
+  type GeneratedKnowledgeProposal,
   type HostContext,
   type IssueDraft,
   type IssueRelationType,
+  type KnowledgeDevelopmentContext,
+  type KnowledgeSourceType,
   type Project,
   type Task,
   type TaskboardMetadata,
@@ -229,6 +239,12 @@ interface CodexProjectActivationResponse {
 
 interface PendingProjectActivation {
   resolve: (response: CodexProjectActivationResponse) => void;
+  reject: (error: Error) => void;
+  timeoutId: number;
+}
+
+interface PendingKnowledgeThread {
+  resolve: () => void;
   reject: (error: Error) => void;
   timeoutId: number;
 }
@@ -761,7 +777,9 @@ export function App() {
   const [developmentScan, setDevelopmentScan] = useState<DevelopmentScan>({ workspacePath: null, contexts: [] });
   const [developmentScanLoading, setDevelopmentScanLoading] = useState(false);
   const [manageTaskboardSkillPath, setManageTaskboardSkillPath] = useState("");
+  const [projectKnowledgeSkillPath, setProjectKnowledgeSkillPath] = useState("");
   const [claudeRuntimeSupported, setClaudeRuntimeSupported] = useState(false);
+  const [ompRuntimeSupported, setOmpRuntimeSupported] = useState(false);
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [localAiChatAvailable, setLocalAiChatAvailable] = useState(false);
   const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
@@ -842,6 +860,7 @@ export function App() {
   const revisionPollingInterval = getRevisionPollingInterval(taskboardMetadata);
   const pendingAutomationRequestsRef = useRef(new Map<string, PendingAutomationRequest>());
   const pendingProjectActivationsRef = useRef(new Map<string, PendingProjectActivation>());
+  const pendingKnowledgeThreadsRef = useRef(new Map<string, PendingKnowledgeThread>());
   const automationRequestInFlightRef = useRef(false);
   const projectAutomationsRef = useRef(projectAutomations);
 
@@ -947,6 +966,22 @@ export function App() {
     });
   }, []);
 
+  const saveDeviceWorkspacePath = useCallback(async (projectId: string, workspacePath: string) => {
+    const normalizedPath = workspacePath.trim();
+    if (!isAbsoluteWorkspacePath(normalizedPath)) {
+      setActionError("本地项目目录必须填写绝对路径。");
+      return;
+    }
+    setActionError(null);
+    try {
+      await setDeviceWorkspace(projectId, normalizedPath);
+      rememberDeviceWorkspacePath(projectId, normalizedPath);
+      setAnnouncement("本地项目目录已保存。");
+    } catch (error) {
+      setActionError(errorMessage(error));
+    }
+  }, [rememberDeviceWorkspacePath]);
+
   const isGlobalBoard = selectedProjectId === GLOBAL_PROJECT_ID;
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const projectNames = useMemo(
@@ -1004,6 +1039,125 @@ export function App() {
     manageTaskboardSkillPath,
     selectedProject,
   ]);
+  const runKnowledgeAnalysisInCodex = useCallback(async (input: {
+    workspacePath: string;
+    sourceType: KnowledgeSourceType;
+    sourceSnapshot: Record<string, unknown>;
+    developmentContext: KnowledgeDevelopmentContext | null;
+  }): Promise<GeneratedKnowledgeProposal> => {
+    if (!selectedProject) throw new Error("请先选择项目。");
+    if (!embedded || window.parent === window) {
+      throw new Error("项目知识初始化需要在 Codex App 内创建项目分析会话。");
+    }
+    const run = await createKnowledgeRun(selectedProject.id, input);
+    const requestId = crypto.randomUUID();
+    const prepared = new Promise<void>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingKnowledgeThreadsRef.current.delete(requestId);
+        reject(new Error("Codex 项目分析会话在 45 秒内没有完成创建，请检查项目切换或发送指令阶段。"));
+      }, 45_000);
+      pendingKnowledgeThreadsRef.current.set(requestId, { resolve, reject, timeoutId });
+    });
+    const codexProject = hostContext?.projects?.find(
+      (project) => project.id === selectedProject.id,
+    );
+    window.parent.postMessage({
+      type: "taskboard:create-knowledge-thread",
+      payload: {
+        requestId,
+        instruction: run.instruction,
+        codexProjectId: codexProject?.id ?? selectedProject.id,
+        projectName: selectedProject.name,
+        workspacePath: input.workspacePath,
+        workspaceLabel: workspaceName(input.workspacePath),
+      },
+    }, "*");
+    await prepared;
+    setAnnouncement("Codex 已开始分析完整项目；分析完成后会生成待确认提案。");
+
+    const deadline = Date.now() + 60 * 60 * 1_000;
+    while (Date.now() < deadline) {
+      const current = await getKnowledgeRun(run);
+      if (current.status === "completed") {
+        if (!current.proposal) throw new Error("项目分析已完成，但没有返回知识提案。");
+        return current.proposal;
+      }
+      if (current.status === "failed") {
+        throw new Error(current.error || "Codex 未能完成项目分析。");
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+    }
+    throw new Error("项目分析超过一小时仍未完成，请在 Codex 会话中查看执行状态。");
+  }, [embedded, hostContext?.projects, selectedProject, setAnnouncement]);
+
+  async function openKnowledgeInitializationIssue(workspacePath: string) {
+    if (!selectedProject) throw new Error("请先选择项目。");
+    if (!projectKnowledgeSkillPath) {
+      throw new Error("任务面板还没有读取到项目知识库 Skill，请刷新后重试。");
+    }
+    const projectName = projectNames[selectedProject.id] ?? selectedProject.name;
+    const title = "初始化项目知识库";
+    const existing = tasks.find((task) => (
+      task.projectId === selectedProject.id
+      && task.title === title
+      && task.labels.includes("项目知识库")
+      && !["done", "canceled", "archived"].includes(task.status)
+    ));
+    if (existing) {
+      setBoardView("issues");
+      openTaskDetail(existing);
+      setAnnouncement(`${existing.identifier} 已存在，已打开该初始化议题。`);
+      return;
+    }
+
+    const saved = await createTaskRequest(selectedProject.id, {
+      title,
+      description: [
+        "## 目标",
+        "",
+        `对“${projectName}”执行首次项目知识库构建，并在 Taskboard 生成可查看、可审核的待确认提案。`,
+        "",
+        "## 给 Codex 的执行提示词",
+        "",
+        "1. 不使用 Codex 的 Skill 选择菜单，直接执行本提示词。",
+        "2. 先读取当前 Git 仓库自带的 `skills/manage-taskboard/SKILL.md`，按其规范处理本 Issue、评论和状态。",
+        "3. 再读取同仓库的 `skills/project-knowledge-builder/SKILL.md` 及其知识契约，按其中标准分析和组织知识。",
+        "4. 只读分析完整项目代码、配置、测试、项目文档，以及本项目已有 Issue 与评论。",
+        "5. 严格区分已确认事实、已完成方案与未完成、待确认内容。",
+        "6. 将结果回传为待确认提案；用户发布前不得写入正式知识文件。",
+        "",
+        "## 项目上下文",
+        "",
+        `- Taskboard 项目 ID：\`${selectedProject.id}\``,
+        `- 项目目录：\`${workspacePath}\``,
+        "- 执行模式：`INIT`",
+        "",
+        "## 验收",
+        "",
+        "- 项目知识页覆盖项目概览、架构、代码地图、核心流程和工程说明；有证据时再增加设计、决策、专项流程或指南。",
+        "- 有价值的 Issue/评论内容被综合为可复用知识，而不是原样复制对话。",
+        "- 已完成、已确认内容与未完成、待确认内容严格分开。",
+        "- Taskboard 中出现一条可查看的“待确认”提案，正式项目文件保持未发布状态。",
+      ].join("\n"),
+      status: "todo",
+      priority: "none",
+      labels: ["项目知识库"],
+      assigneeTarget: "codex-agent",
+      workflowId: null,
+      developmentContext: null,
+      dueDate: null,
+      recurrence: null,
+    });
+    setTasks((current) => sortTasks([saved, ...current]));
+    setProjects((current) => current.map((project) => (
+      project.id === selectedProject.id
+        ? { ...project, issueCount: project.issueCount + 1 }
+        : project
+    )));
+    setBoardView("issues");
+    openTaskDetail(saved);
+    setAnnouncement(`${saved.identifier} 已创建；请在议题中点击“创建会话”开始分析。`);
+  }
   const detailTask = detailTaskIdentifier
     ? tasks.find((task) => task.identifier === detailTaskIdentifier) ?? null
     : null;
@@ -1453,6 +1607,24 @@ export function App() {
         return;
       }
 
+      if (
+        (message.type === "taskboard:knowledge-thread-prepared"
+          || message.type === "taskboard:knowledge-thread-error")
+        && message.payload
+      ) {
+        const payload = message.payload as { requestId?: unknown; error?: unknown };
+        if (typeof payload.requestId !== "string") return;
+        const pending = pendingKnowledgeThreadsRef.current.get(payload.requestId);
+        if (!pending) return;
+        window.clearTimeout(pending.timeoutId);
+        pendingKnowledgeThreadsRef.current.delete(payload.requestId);
+        if (message.type === "taskboard:knowledge-thread-prepared") pending.resolve();
+        else pending.reject(new Error(
+          typeof payload.error === "string" ? payload.error : "无法创建项目知识分析会话。",
+        ));
+        return;
+      }
+
       if (message.type === "taskboard:theme" && isTheme(message.theme)) {
         setTheme(message.theme);
         return;
@@ -1598,6 +1770,11 @@ export function App() {
         pending.reject(new Error("任务面板已关闭，项目同步已取消。"));
       }
       pendingProjectActivationsRef.current.clear();
+      for (const pending of pendingKnowledgeThreadsRef.current.values()) {
+        window.clearTimeout(pending.timeoutId);
+        pending.reject(new Error("任务面板已关闭，项目知识分析已取消。"));
+      }
+      pendingKnowledgeThreadsRef.current.clear();
     };
   }, [embedded]);
 
@@ -1637,16 +1814,19 @@ export function App() {
         && current.realtime?.transport === metadata.realtime?.transport
         && current.realtime?.intervalMs === metadata.realtime?.intervalMs
         && current.manageTaskboardSkillPath === metadata.manageTaskboardSkillPath
+        && current.projectKnowledgeSkillPath === metadata.projectKnowledgeSkillPath
         && current.localCapabilities?.available === metadata.localCapabilities?.available
           ? current
           : metadata
       ));
       setManageTaskboardSkillPath(metadata.manageTaskboardSkillPath ?? "");
+      setProjectKnowledgeSkillPath(metadata.projectKnowledgeSkillPath ?? "");
       setClaudeRuntimeSupported(metadata.claudeRuntime === true);
+      setOmpRuntimeSupported(metadata.ompRuntime === true);
       setLocalAiChatAvailable(metadata.capabilities?.localAiChat === true);
       setLocalKnowledgeAvailable(metadata.capabilities?.localKnowledge === true);
       setDeviceWorkspacePaths((current) => {
-        const next = { ...current, ...workspaces };
+        const next = workspaces;
         if (JSON.stringify(next) === JSON.stringify(current)) return current;
         window.localStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
         return next;
@@ -1761,7 +1941,6 @@ export function App() {
     )
       .then((scan) => {
         setDevelopmentScan(scan);
-        if (scan.workspacePath) rememberDeviceWorkspacePath(selectedProjectId, scan.workspacePath);
       })
       .catch((error) => {
         if ((error as Error).name !== "AbortError") {
@@ -1776,7 +1955,6 @@ export function App() {
     detailTask?.threadId,
     hostContext?.projectId,
     hostContext?.threadId,
-    rememberDeviceWorkspacePath,
     isGlobalBoard,
     selectedProjectId,
     selectedDeviceWorkspacePath,
@@ -2205,7 +2383,22 @@ export function App() {
       },
     });
     if (generated.changes.length === 0) return false;
-    await createKnowledgeProposal(task.projectId, generated);
+    const automatic = trigger === "in_review" || trigger === "completed";
+    const existing = automatic
+      ? (await listKnowledgeProposals(task.projectId, "ready")).find((proposal) => (
+        proposal.sourceType === "issue"
+        && (proposal.sourceSnapshot.issue as { id?: string } | undefined)?.id === task.id
+      ))
+      : undefined;
+    if (existing) {
+      await updateKnowledgeProposal(existing, {
+        title: generated.title,
+        summary: generated.summary,
+        changes: generated.changes,
+      });
+    } else {
+      await createKnowledgeProposal(task.projectId, generated);
+    }
     setKnowledgeRevision((current) => current + 1);
     return true;
   }
@@ -2502,6 +2695,17 @@ export function App() {
       });
       return;
     }
+    if (resolvedTask?.runtime === "omp") {
+      const workspacePath = resolveTaskWorkspacePath(resolvedTask);
+      if (!workspacePath) {
+        setActionError("该任务所属项目尚未映射本地目录，无法打开 Oh My Pi 会话。");
+        return;
+      }
+      void resumeOmpSession({ threadId: normalizedThreadId, workspacePath }).catch((error) => {
+        setActionError(errorMessage(error));
+      });
+      return;
+    }
     if (embedded && window.parent !== window) {
       window.parent.postMessage({
         type: "taskboard:open-thread",
@@ -2536,6 +2740,23 @@ export function App() {
     return normalizedFollowUp
       ? `${instruction}\n\n请重点跟进这条评论：\n${normalizedFollowUp}`
       : instruction;
+  }
+
+  function taskSkill(task: Task) {
+    const projectKnowledgeTask = task.labels.includes("项目知识库")
+      && task.description.includes("项目知识库构建");
+    if (projectKnowledgeTask) {
+      return {
+        name: "project-knowledge-builder",
+        displayName: "Project Knowledge Builder",
+        path: projectKnowledgeSkillPath,
+      };
+    }
+    return {
+      name: "manage-taskboard",
+      displayName: "Manage Taskboard",
+      path: manageTaskboardSkillPath,
+    };
   }
 
   async function finalizeThreadLink(args: {
@@ -2663,12 +2884,57 @@ export function App() {
       })();
       return;
     }
-
-    if (!manageTaskboardSkillPath) {
-      setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
+    if (runtime === "omp") {
+      if (!ompRuntimeSupported) {
+        setActionError("当前环境不支持 Oh My Pi 运行时（仅 macOS Terminal.app）。");
+        return;
+      }
+      if (openingThreadTaskId) return;
+      const requestId = crypto.randomUUID();
+      pendingThreadRequestsRef.current.set(requestId, {
+        taskId: task.id,
+        projectId: task.projectId,
+        commentId: comment?.id,
+        action: "create",
+        createdAt: Date.now(),
+      });
+      writePendingThreadRequests(pendingThreadRequestsRef.current);
+      setOpeningThreadTaskId(task.id);
+      setActionError(null);
+      void (async () => {
+        try {
+          const result = await createOmpSession({
+            requestId,
+            taskId: task.id,
+            workspacePath,
+            instruction,
+            commentId: comment?.id,
+          });
+          await finalizeThreadLink({
+            requestId,
+            taskId: task.id,
+            projectId: task.projectId,
+            commentId: comment?.id,
+            threadId: result.threadId,
+            runtime: "omp",
+            sendAck: false,
+          });
+        } catch (error) {
+          pendingThreadRequestsRef.current.delete(requestId);
+          writePendingThreadRequests(pendingThreadRequestsRef.current);
+          setOpeningThreadTaskId(null);
+          setActionError(errorMessage(error) || "无法启动 Oh My Pi 会话。");
+        }
+      })();
       return;
     }
-    const prompt = `[$manage-taskboard](${manageTaskboardSkillPath}) ${instruction}`;
+
+    const skill = taskSkill(task);
+    if (!skill.path) {
+      setActionError(`任务面板还没有读取到 ${skill.displayName} Skill 路径，请刷新后重试。`);
+      return;
+    }
+    const prompt = `[$${skill.name}](${skill.path}) ${instruction}`;
 
     if (!embedded || window.parent === window) {
       const query = new URLSearchParams();
@@ -2699,9 +2965,9 @@ export function App() {
         commentId: comment?.id,
         identifier: task.identifier,
         instruction,
-        skillName: "manage-taskboard",
-        skillDisplayName: "Manage Taskboard",
-        skillPath: manageTaskboardSkillPath,
+        skillName: skill.name,
+        skillDisplayName: skill.displayName,
+        skillPath: skill.path,
         codexProjectId: codexProject?.id ?? taskProject.id,
         projectName: taskProject.name,
         workspacePath,
@@ -2732,8 +2998,25 @@ export function App() {
       });
       return;
     }
-    if (!manageTaskboardSkillPath) {
-      setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
+    if (runtime === "omp") {
+      const workspacePath = resolveTaskWorkspacePath(task);
+      if (!workspacePath) {
+        setActionError("该任务所属项目尚未映射本地目录，无法打开 Oh My Pi 会话。");
+        return;
+      }
+      setActionError(null);
+      void resumeOmpSession({
+        threadId: normalizedThreadId,
+        workspacePath,
+        followUp: taskThreadInstruction(task, followUp),
+      }).catch((error) => {
+        setActionError(errorMessage(error));
+      });
+      return;
+    }
+    const skill = taskSkill(task);
+    if (!skill.path) {
+      setActionError(`任务面板还没有读取到 ${skill.displayName} Skill 路径，请刷新后重试。`);
       return;
     }
     if (!embedded || window.parent === window) {
@@ -2760,9 +3043,9 @@ export function App() {
         threadId: normalizedThreadId,
         identifier: task.identifier,
         instruction: taskThreadInstruction(task, followUp),
-        skillName: "manage-taskboard",
-        skillDisplayName: "Manage Taskboard",
-        skillPath: manageTaskboardSkillPath,
+        skillName: skill.name,
+        skillDisplayName: skill.displayName,
+        skillPath: skill.path,
       },
     }, "*");
   }
@@ -2921,6 +3204,7 @@ export function App() {
         name: draft.name,
         workspacePath: draft.workspacePath,
       });
+      await setDeviceWorkspace(project.id, draft.workspacePath);
       rememberDeviceWorkspacePath(project.id, draft.workspacePath);
       setProjects((current) => [
         ...current.filter((candidate) => candidate.id !== project.id),
@@ -3092,7 +3376,7 @@ export function App() {
               defaultValue={deviceWorkspacePaths[project.id] ?? ""}
               placeholder="设置此设备的项目目录"
               aria-label={`${project.name} 在此设备上的项目目录`}
-              onBlur={(event) => rememberDeviceWorkspacePath(project.id, event.currentTarget.value)}
+              onBlur={(event) => void saveDeviceWorkspacePath(project.id, event.currentTarget.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") event.currentTarget.blur();
               }}
@@ -3341,6 +3625,16 @@ export function App() {
             >
               草稿箱{visibleIssueDrafts.length > 0 ? ` ${visibleIssueDrafts.length}` : ""}
             </button>
+            {!isGlobalBoard && (
+              <button
+                className={`view-tab${boardView === "knowledge" ? " active" : ""}`}
+                type="button"
+                aria-pressed={boardView === "knowledge"}
+                onClick={() => selectBoardView("knowledge")}
+              >
+                项目知识{knowledgeProposalCount > 0 ? ` ${knowledgeProposalCount}` : ""}
+              </button>
+            )}
             <button
               className={`view-tab favorite-view-tab${boardView === "issues" && favoriteTasksOnly ? " active" : ""}`}
               type="button"
@@ -3588,6 +3882,17 @@ export function App() {
             onEdit={editIssueDraft}
             onDelete={deleteIssueDraft}
           />
+        ) : boardView === "knowledge" && selectedProject ? (
+          <KnowledgeCenter
+            project={selectedProject}
+            workspacePath={selectedDeviceWorkspacePath ?? developmentScan.workspacePath}
+            developmentScan={developmentScan}
+            available={localKnowledgeAvailable}
+            revision={knowledgeRevision}
+            onProposalCountChange={setKnowledgeProposalCount}
+            onInitialize={openKnowledgeInitializationIssue}
+            onGenerateProposal={runKnowledgeAnalysisInCodex}
+          />
         ) : detailTask && selectedProject ? (
           <TaskDetail
             key={detailTask.id}
@@ -3605,6 +3910,18 @@ export function App() {
               name: projectNames[project.id] ?? project.name,
             }))}
             onUpdate={(current, changes) => updateTaskProperties(current, changes)}
+            knowledgeAvailable={localKnowledgeAvailable && Boolean(knowledgeWorkspaceForTask(detailTask))}
+            onCreateKnowledgeProposal={async (current, selectedComments) => {
+              const created = await createTaskKnowledgeProposal(current, selectedComments, "manual");
+              if (created) {
+                setDetailTaskIdentifier(null);
+                const knowledgeUrl = buildIssueUrl(window.location.href, current.projectId, null);
+                knowledgeUrl.searchParams.delete(GLOBAL_VIEW_QUERY_PARAM);
+                window.history.replaceState(window.history.state, "", knowledgeUrl);
+                setBoardView("knowledge");
+              }
+              return created;
+            }}
             onTransferProject={transferTaskToProject}
             onOpenTask={openTaskDetail}
             onCreateSubIssue={(parent) => setEditor({
@@ -3627,6 +3944,7 @@ export function App() {
             onOpenInThread={openTaskInThread}
             onFollowUpInThread={followUpTaskInThread}
             claudeRuntimeSupported={claudeRuntimeSupported}
+            ompRuntimeSupported={ompRuntimeSupported}
             openingThread={openingThreadTaskId === detailTask.id}
             isFavorite={favoriteTaskIds.has(detailTask.id)}
             onToggleFavorite={toggleFavoriteTask}

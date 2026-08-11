@@ -7,6 +7,7 @@ const boardColumnSource = await readFile(new URL("../web/src/components/BoardCol
 const apiSource = await readFile(new URL("../web/src/api.ts", import.meta.url), "utf8");
 const styles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 const detailSource = await readFile(new URL("../web/src/components/TaskDetail.tsx", import.meta.url), "utf8");
+const knowledgeSource = await readFile(new URL("../web/src/components/KnowledgeCenter.tsx", import.meta.url), "utf8");
 const editorSource = await readFile(new URL("../web/src/components/TaskEditor.tsx", import.meta.url), "utf8");
 const labelPickerSource = await readFile(new URL("../web/src/components/LabelPicker.tsx", import.meta.url), "utf8");
 const contextMenuSource = await readFile(new URL("../web/src/components/TaskContextMenu.tsx", import.meta.url), "utf8");
@@ -25,6 +26,25 @@ test("published comments can explicitly remove an incorrect conversation associa
   assert.match(styles, /\.comment-conversation-link:focus-within \.comment-conversation-unlink/);
   assert.match(apiSource, /threadId\?: string \| null/);
   assert.match(apiSource, /threadId !== undefined/);
+});
+
+test("project knowledge keeps confirmed files separate from reviewable issue and comment proposals", () => {
+  assert.match(appSource, /type BoardView = "issues" \| "drafts" \| "knowledge"/);
+  assert.match(appSource, />\s*项目知识\{knowledgeProposalCount/);
+  assert.match(appSource, /queueAutomaticKnowledgeReview/);
+  assert.match(appSource, /moved\.status === "in_review" \|\| moved\.status === "done"/);
+  assert.match(detailSource, /整理为项目知识/);
+  assert.match(detailSource, /加入知识提案/);
+  assert.match(detailSource, /选择评论整理/);
+  assert.match(knowledgeSource, /已发布/);
+  assert.match(knowledgeSource, /待确认/);
+  assert.match(knowledgeSource, /健康状态/);
+  assert.match(knowledgeSource, /knowledge-line-diff/);
+  assert.match(knowledgeSource, /保存为知识提案/);
+  assert.match(apiSource, /\/knowledge-source-versions/);
+  assert.match(typesSource, /type KnowledgeProposalStatus = "generating" \| "ready" \| "published"/);
+  assert.match(styles, /\.knowledge-published-layout/);
+  assert.match(styles, /\.comment-knowledge-toolbar/);
 });
 
 function workflowStatuses() {

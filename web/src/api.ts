@@ -241,6 +241,13 @@ export async function listDeviceWorkspaces(signal?: AbortSignal): Promise<Record
   }
 }
 
+export async function setDeviceWorkspace(projectId: string, workspacePath: string): Promise<void> {
+  await request(`/api/local/project-mappings/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ workspacePath }),
+  });
+}
+
 export async function listWorkflowCapabilities(
   workspacePath?: string,
   signal?: AbortSignal,
@@ -388,6 +395,48 @@ export async function generateKnowledgeProposal(
   return data.proposal;
 }
 
+export interface KnowledgeRunHandle {
+  id: string;
+  token: string;
+  status: "waiting" | "completed" | "failed";
+  instruction: string;
+}
+
+export async function createKnowledgeRun(
+  projectId: string,
+  input: {
+    workspacePath?: string;
+    sourceType: KnowledgeSourceType;
+    sourceSnapshot?: Record<string, unknown>;
+    developmentContext?: KnowledgeDevelopmentContext | null;
+  },
+): Promise<KnowledgeRunHandle> {
+  const data = await request<{ run: KnowledgeRunHandle }>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge-runs`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return data.run;
+}
+
+export async function getKnowledgeRun(
+  run: Pick<KnowledgeRunHandle, "id" | "token">,
+): Promise<{
+  status: "waiting" | "completed" | "failed";
+  proposal?: GeneratedKnowledgeProposal;
+  error?: string;
+}> {
+  const data = await request<{
+    run: {
+      status: "waiting" | "completed" | "failed";
+      proposal?: GeneratedKnowledgeProposal;
+      error?: string;
+    };
+  }>(`/api/local/knowledge-runs/${encodeURIComponent(run.id)}`, {
+    headers: { "X-Taskboard-Knowledge-Run-Token": run.token },
+  });
+  return data.run;
+}
+
 export async function askProjectKnowledge(
   projectId: string,
   question: string,
@@ -415,6 +464,17 @@ export async function listKnowledgeProposals(
     { signal },
   );
   return data.proposals;
+}
+
+export async function getKnowledgeSourceVersions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<Record<string, string | number>> {
+  const data = await request<{ versions: Record<string, string | number> }>(
+    `/api/projects/${encodeURIComponent(projectId)}/knowledge-source-versions`,
+    { signal },
+  );
+  return data.versions;
 }
 
 export async function createKnowledgeProposal(
@@ -558,6 +618,35 @@ export async function resumeClaudeSession(input: {
 export async function getClaudeSessionStatus(sessionId: string): Promise<{ running: boolean }> {
   return request<{ running: boolean }>(
     `/api/local/claude/status?sessionId=${encodeURIComponent(sessionId)}`,
+  );
+}
+export async function createOmpSession(input: {
+  taskId: string;
+  workspacePath: string;
+  instruction: string;
+  requestId: string;
+  commentId?: string;
+}): Promise<{ threadId: string; runtime: "omp" }> {
+  return request<{ threadId: string; runtime: "omp" }>("/api/local/omp/session", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function resumeOmpSession(input: {
+  threadId: string;
+  workspacePath: string;
+  followUp?: string;
+}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/api/local/omp/resume", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getOmpSessionStatus(sessionId: string): Promise<{ running: boolean }> {
+  return request<{ running: boolean }>(
+    `/api/local/omp/status?sessionId=${encodeURIComponent(sessionId)}`,
   );
 }
 

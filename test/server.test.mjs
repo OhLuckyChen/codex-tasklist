@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 
 import { createTaskboardServer } from "../server/index.mjs";
+import { KnowledgeService } from "../server/knowledge-service.mjs";
 
 const runningApps = [];
 
@@ -77,7 +78,9 @@ test("health and the default local project are available", async () => {
   assert.equal(metadata.response.status, 200);
   assert.deepEqual(metadata.body, {
     manageTaskboardSkillPath: skillPath,
+    projectKnowledgeSkillPath: path.resolve("skills/project-knowledge-builder/SKILL.md"),
     claudeRuntime: true,
+    ompRuntime: true,
     capabilities: { localAiChat: true, localKnowledge: true },
   });
 
@@ -88,6 +91,150 @@ test("health and the default local project are available", async () => {
   assert.equal(result.body.projects[0].name, "Local");
   assert.equal(result.body.projects[0].workspacePath, null);
   assert.equal(result.body.projects[0].issueCount, 0);
+});
+
+test("project knowledge proposals preserve review state and publish only through the local workspace", async () => {
+  let workspacePath;
+  const knowledgeService = new KnowledgeService({
+    analyze: async () => ({
+      title: "Knowledge proposal",
+      summary: "A reviewed project fact",
+      changes: [{
+        targetPath: "docs/knowledge/index.md",
+        operation: "create",
+        afterContent: "---\nid: index\ntitle: Project knowledge\nkind: index\n---\n# Project knowledge\n",
+      }],
+    }),
+  });
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    return { knowledgeService };
+  });
+  const project = await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "knowledge", name: "Knowledge", workspacePath },
+  });
+  assert.equal(project.response.status, 201);
+  const task = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: {
+      projectId: "knowledge",
+      title: "Capture architecture",
+      description: "",
+      status: "in_review",
+      priority: "none",
+      labels: [],
+    },
+  });
+  const comment = await request(baseUrl, `/api/tasks/${task.body.task.id}/comments`, {
+    method: "POST",
+    body: { body: "The verified implementation detail" },
+  });
+  const versions = await request(baseUrl, "/api/projects/knowledge/knowledge-source-versions");
+  assert.equal(versions.body.versions[`issue:${task.body.task.identifier}`], 1);
+  assert.equal(versions.body.versions[`comment:${comment.body.comment.id}`], 1);
+
+  const generated = await request(baseUrl, "/api/local/projects/knowledge/knowledge/generate", {
+    method: "POST",
+    body: {
+      workspacePath,
+      sourceType: "issue",
+      sourceSnapshot: { issue: { id: task.body.task.id, version: 1 } },
+    },
+  });
+  assert.equal(generated.response.status, 200);
+  assert.equal(await access(path.join(workspacePath, "docs", "knowledge", "index.md")).then(() => true, () => false), false);
+
+  const stored = await request(baseUrl, "/api/projects/knowledge/knowledge-proposals", {
+    method: "POST",
+    body: generated.body.proposal,
+  });
+  assert.equal(stored.response.status, 201);
+  assert.equal(stored.body.proposal.status, "ready");
+  const listed = await request(baseUrl, "/api/projects/knowledge/knowledge-proposals?status=ready");
+  assert.equal(listed.body.proposals.length, 1);
+
+  const receipt = await request(baseUrl, "/api/local/projects/knowledge/knowledge/publish", {
+    method: "POST",
+    body: {
+      workspacePath,
+      proposal: {
+        id: stored.body.proposal.id,
+        version: stored.body.proposal.version,
+        changes: stored.body.proposal.changes,
+      },
+    },
+  });
+  assert.equal(receipt.response.status, 200);
+  assert.match(await readFile(path.join(workspacePath, "docs", "knowledge", "index.md"), "utf8"), /Project knowledge/);
+
+  const published = await request(baseUrl, `/api/knowledge-proposals/${stored.body.proposal.id}`, {
+    method: "PATCH",
+    body: { version: stored.body.proposal.version, status: "published" },
+  });
+  assert.equal(published.response.status, 200);
+  assert.equal(published.body.proposal.status, "published");
+});
+
+test("a persistent project knowledge run stores its callback as a ready proposal", async () => {
+  let workspacePath;
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    return {};
+  });
+  await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "knowledge-run", name: "Knowledge Run", workspacePath },
+  });
+
+  const created = await request(baseUrl, "/api/local/projects/knowledge-run/knowledge-runs", {
+    method: "POST",
+    body: {
+      workspacePath,
+      sourceType: "project_scan",
+      sourceSnapshot: { trigger: "knowledge-initialization-issue" },
+      developmentContext: null,
+      persist: true,
+    },
+  });
+  assert.equal(created.response.status, 201);
+  assert.match(created.body.run.instruction, /Do not publish or write knowledge files yourself/);
+
+  const completed = await request(
+    baseUrl,
+    `/api/local/knowledge-runs/${created.body.run.id}/complete`,
+    {
+      method: "POST",
+      headers: { "x-taskboard-knowledge-run-token": created.body.run.token },
+      body: {
+        analysis: {
+          title: "Initial project knowledge",
+          summary: "Durable project orientation",
+          changes: [{
+            targetPath: "docs/knowledge/index.md",
+            operation: "create",
+            afterContent: "---\nid: index\ntitle: Project knowledge\nkind: index\nupdated_at: 2026-08-10T00:00:00.000Z\nsources:\n  - type: file\n    ref: package.json\n---\n# Project knowledge\n",
+          }],
+        },
+      },
+    },
+  );
+  assert.equal(completed.response.status, 200);
+  assert.deepEqual(completed.body, { ok: true });
+
+  const proposals = await request(
+    baseUrl,
+    "/api/projects/knowledge-run/knowledge-proposals?status=ready",
+  );
+  assert.equal(proposals.body.proposals.length, 1);
+  assert.equal(proposals.body.proposals[0].id, created.body.run.id);
+  assert.equal(proposals.body.proposals[0].creator.id, "codex-agent");
+  assert.equal(
+    await access(path.join(workspacePath, "docs", "knowledge", "index.md")).then(() => true, () => false),
+    false,
+  );
 });
 
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {

@@ -2,7 +2,7 @@ const HOST_REQUEST_ERROR = "自动认领配置暂时无法应用，请刷新后�
 const AUTOMATION_SCHEMA_DIAGNOSTIC = "AUTOMATION_SCHEMA_MISMATCH";
 
 function parseHostRequest(payload, parseAutomationRequest) {
-  if (typeof payload !== "string" || payload.length > 16_384) {
+  if (typeof payload !== "string" || payload.length > 262_144) {
     return { id: null, request: null, error: HOST_REQUEST_ERROR };
   }
 
@@ -40,6 +40,15 @@ function parseHostRequest(payload, parseAutomationRequest) {
           error: HOST_REQUEST_ERROR,
           diagnosticCode: AUTOMATION_SCHEMA_DIAGNOSTIC,
         };
+  }
+  if (
+    request.action === "prefill-plain-composer"
+    && typeof request.instruction === "string"
+    && request.instruction.length > 0
+    && request.instruction.length <= 250_000
+    && (request.submit === undefined || typeof request.submit === "boolean")
+  ) {
+    return { id, request, error: null };
   }
   if (
     request.action === "prefill-task-composer"
