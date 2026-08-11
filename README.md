@@ -100,37 +100,37 @@ Taskboard can turn issue discussions, comments, and implementation evidence into
 
 ## Preview
 
-The screenshots below come from the real local UI. Task titles, comments, names, and other sensitive content are pixelated; the interface itself is not redrawn or fabricated.
+The screenshots below come from real usage. Sensitive content was manually redacted by the user; the UI and product data were not redrawn or fabricated.
+
+### Project selection and Codex entry point
+
+Open Taskboard directly from the Codex sidebar, then choose a saved, favorite, or local project. Each project can be mapped to a local path so issues, comments, and agent sessions stay tied to the same workspace.
+
+![Project selection embedded in Codex](docs/screenshots/project-selection.png)
 
 ### Task-state board
 
-View the same local Taskboard inside the Codex embedded panel. Issues are grouped by status, and cards keep priority, labels, and creation context visible for quick triage.
+Issues are grouped by status, including todo, in progress, in review, done, and hidden columns. Cards keep the issue ID, title, summary, favorite action, comments, and session entry points visible for status-driven work.
 
-![Real task-state board with sensitive issue content pixelated](docs/screenshots/task-state-board.png)
+![Task-state board](docs/screenshots/task-state-board.png)
 
-### Standalone web board
+### Issue detail and runtime sessions
 
-Taskboard also runs as a normal web app. Without the Codex desktop app, projects, issues, comments, attachments, project knowledge, and CLI automation still work.
+The issue detail page centralizes description, screenshots, properties, relations, attachments, activity, and comments. The session panel can attach the current session, choose an existing session, continue in the current session, or start Codex, Claude Code, and OMP sessions.
 
-![Standalone web board with sensitive issue content pixelated](docs/screenshots/standalone-board.png)
+![Issue detail with runtime session actions](docs/screenshots/issue-detail-sessions.png)
 
-### Create an issue
+### Comments and agent handoff
 
-When creating an issue, you can fill in the title, description, status, priority, labels, and optional Codex task ID so execution context is attached from the beginning.
+Comments can hold human review, agent findings, and implementation evidence. Codex Agent output is written back to the issue, and follow-up work can still be dispatched from the same issue or comment to Codex, Claude Code, or OMP.
 
-![Create issue dialog with sensitive background content pixelated](docs/screenshots/create-issue.png)
+![Issue comments and agent handoff](docs/screenshots/issue-comments-agent.png)
 
-### Issue detail
+### Jump back to the Codex session
 
-The issue detail page centralizes description, activity, comments, properties, status, priority, labels, and project context. Agent results, evidence, and follow-up instructions are written back here.
+Linked Codex sessions can jump back to the matching task page. This closes the loop: dispatch work from the board, execute in Codex, and write the result back to the issue.
 
-![Issue detail page with sensitive content pixelated](docs/screenshots/task-detail.png)
-
-### Issue detail inside Codex
-
-When embedded in Codex, task state and execution context stay in the same work window, making it easier to start follow-up sessions from an issue or comment.
-
-![Issue detail embedded in Codex with sensitive content pixelated](docs/screenshots/embedded-issue-detail.png)
+![Jump from Taskboard back to a Codex session](docs/screenshots/codex-session.png)
 
 ## How it works
 
