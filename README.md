@@ -5,7 +5,7 @@
 <h1 align="center">Codex Taskboard</h1>
 
 <p align="center">
-  <strong>A local taskboard that keeps Codex, Claude Code, and Oh My Pi work tied to issues.</strong>
+  <strong>Keep human attention on the taskboard while agents write back progress, status, and session context.</strong>
 </p>
 
 <p align="center">
@@ -28,7 +28,11 @@
 
 ## What problem does it solve?
 
-AI coding work often spreads across several tools. One requirement may start in Codex, a review comment may be delegated to Claude Code, and a verification step may be handled by Oh My Pi. The human still has to remember:
+The expensive part of AI coding is often not where a task runs. It is the hidden task list a person has to keep in their head: which session is doing what, which comment needs follow-up, which result has been verified, and which task should move into review. As more sessions appear, the human has to keep searching across windows, history, and agent output.
+
+That workflow makes task state depend on memory instead of the system.
+
+The human still has to remember:
 
 - which task is active;
 - which task is blocked;
@@ -37,9 +41,9 @@ AI coding work often spreads across several tools. One requirement may start in 
 - which historical sessions contain the decision or evidence;
 - which project still has work waiting for review or cleanup.
 
-Codex Taskboard keeps those tools centered on the issue instead of forcing people to chase conversations.
+Codex Taskboard changes that pattern: people should not have to remember tasks in their head and then hunt through separate conversations. They should watch the taskboard. Agents should work around issues, write comments, attach evidence, link sessions, and move status forward when a step is done.
 
-Each issue can store status, priority, labels, assignee, branch, worktree, local project mapping, comments, attachments, knowledge proposals, and current plus historical runtime sessions. You can start a new Codex / Claude Code / Oh My Pi session from an issue or from a specific comment, attach the current session back to the issue, and later jump back to the linked runtime context.
+Each issue is a continuously updated work item: it stores status, priority, labels, assignee, branch, worktree, local project mapping, comments, attachments, knowledge proposals, and current plus historical runtime sessions. You can start a new Codex / Claude Code / Oh My Pi session from an issue or a specific comment, or attach the current session back to the issue. After an agent finishes a step, it writes the result, evidence, blockers, and next status back to the board. The human only needs to inspect task state, comments, and pending work on the board instead of tracking every conversation by memory.
 
 ## Core features
 
