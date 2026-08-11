@@ -100,44 +100,37 @@ Taskboard 可以把 Issue 讨论、评论、实现证据整理成项目知识提
 
 ## 界面预览
 
-<table>
-  <tr>
-    <td width="50%">
-      <strong>项目管理</strong><br>
-      保存多个本地项目，支持项目分组、收藏、归档和全局任务视图。<br><br>
-      <img src="docs/screenshots/project-management.png" alt="项目管理">
-    </td>
-    <td width="50%">
-      <strong>任务状态看板</strong><br>
-      按状态组织积压、待办、进行中、评审、完成、阻塞、取消和归档任务。<br><br>
-      <img src="docs/screenshots/task-state-board.png" alt="任务状态看板">
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <strong>收藏视图</strong><br>
-      把跨项目的重要任务收拢到一个聚焦视图，避免评审项和后续跟进散落。<br><br>
-      <img src="docs/screenshots/favorites.png" alt="收藏视图">
-    </td>
-    <td width="50%">
-      <strong>Codex 内嵌</strong><br>
-      在 Codex 中直接从任务创建会话，让任务状态和执行上下文保持绑定。<br><br>
-      <img src="docs/screenshots/codex-new-session.png" alt="Codex 内嵌">
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <strong>评审评论与多运行时会话</strong><br>
-      评论里保留真实评审反馈，并从同一条评论继续创建 Codex、Claude Code 或 OMP 会话。<br><br>
-      <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="评审评论与会话">
-    </td>
-    <td width="50%">
-      <strong>项目知识中心</strong><br>
-      将任务过程中的判断、证据和实现说明沉淀为可审核的项目知识。<br><br>
-      <img src="docs/screenshots/knowledge-base.png" alt="项目知识中心">
-    </td>
-  </tr>
-</table>
+下面的截图来自真实本地界面；任务标题、评论、人名等敏感内容已做像素化处理，没有重绘或伪造 UI。
+
+### 任务状态看板
+
+在 Codex 内嵌面板里查看同一个本地 Taskboard。任务按状态分列，Issue 卡片保留优先级、标签和创建信息，适合快速判断哪些任务正在推进、哪些需要评审。
+
+![真实任务状态看板，敏感任务内容已打码](docs/screenshots/task-state-board.png)
+
+### 独立 Web 看板
+
+Taskboard 也可以作为普通 Web 应用运行。没有 Codex 桌面端时，项目、Issue、评论、附件、项目知识和 CLI 自动化仍然可用。
+
+![独立 Web 看板，敏感任务内容已打码](docs/screenshots/standalone-board.png)
+
+### 新建 Issue
+
+新建任务时可以直接填写标题、描述、状态、优先级、标签，并关联 Codex task ID。这样任务一开始就带着执行上下文。
+
+![新建 Issue 弹窗，背景敏感内容已打码](docs/screenshots/create-issue.png)
+
+### Issue 详情
+
+Issue 详情页集中展示描述、活动、评论、属性、状态、优先级、标签和项目上下文。Agent 执行后的结论、证据和后续要求也会回写到这里。
+
+![Issue 详情页，敏感内容已打码](docs/screenshots/task-detail.png)
+
+### Codex 内的 Issue 详情
+
+嵌入 Codex 后，任务状态和当前执行上下文可以放在同一个工作窗口里，方便从 Issue 或评论继续创建后续会话。
+
+![Codex 内嵌 Issue 详情，敏感内容已打码](docs/screenshots/embedded-issue-detail.png)
 
 ## 工作方式
 

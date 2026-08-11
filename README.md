@@ -100,44 +100,37 @@ Taskboard can turn issue discussions, comments, and implementation evidence into
 
 ## Preview
 
-<table>
-  <tr>
-    <td width="50%">
-      <strong>Project management</strong><br>
-      Save local projects, group active work, favorite important projects, archive completed ones, and open a global task view.<br><br>
-      <img src="docs/screenshots/project-management.png" alt="Project management">
-    </td>
-    <td width="50%">
-      <strong>Task-state board</strong><br>
-      Keep work visible across backlog, todo, in progress, review, done, blocked, canceled, and archived states.<br><br>
-      <img src="docs/screenshots/task-state-board.png" alt="Task-state board">
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <strong>Favorites</strong><br>
-      Collect urgent review items and follow-ups across projects into one focused view.<br><br>
-      <img src="docs/screenshots/favorites.png" alt="Favorites">
-    </td>
-    <td width="50%">
-      <strong>Embedded in Codex</strong><br>
-      Create sessions from issues inside Codex so the task state and execution context stay linked.<br><br>
-      <img src="docs/screenshots/codex-new-session.png" alt="Embedded in Codex">
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <strong>Review comments and runtime sessions</strong><br>
-      Keep review feedback on the issue and launch Codex, Claude Code, or OMP follow-up sessions from the same comment.<br><br>
-      <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="Review comments and runtime sessions">
-    </td>
-    <td width="50%">
-      <strong>Project knowledge center</strong><br>
-      Convert decisions, evidence, and implementation notes into reviewable local knowledge pages.<br><br>
-      <img src="docs/screenshots/knowledge-base.png" alt="Project knowledge center">
-    </td>
-  </tr>
-</table>
+The screenshots below come from the real local UI. Task titles, comments, names, and other sensitive content are pixelated; the interface itself is not redrawn or fabricated.
+
+### Task-state board
+
+View the same local Taskboard inside the Codex embedded panel. Issues are grouped by status, and cards keep priority, labels, and creation context visible for quick triage.
+
+![Real task-state board with sensitive issue content pixelated](docs/screenshots/task-state-board.png)
+
+### Standalone web board
+
+Taskboard also runs as a normal web app. Without the Codex desktop app, projects, issues, comments, attachments, project knowledge, and CLI automation still work.
+
+![Standalone web board with sensitive issue content pixelated](docs/screenshots/standalone-board.png)
+
+### Create an issue
+
+When creating an issue, you can fill in the title, description, status, priority, labels, and optional Codex task ID so execution context is attached from the beginning.
+
+![Create issue dialog with sensitive background content pixelated](docs/screenshots/create-issue.png)
+
+### Issue detail
+
+The issue detail page centralizes description, activity, comments, properties, status, priority, labels, and project context. Agent results, evidence, and follow-up instructions are written back here.
+
+![Issue detail page with sensitive content pixelated](docs/screenshots/task-detail.png)
+
+### Issue detail inside Codex
+
+When embedded in Codex, task state and execution context stay in the same work window, making it easier to start follow-up sessions from an issue or comment.
+
+![Issue detail embedded in Codex with sensitive content pixelated](docs/screenshots/embedded-issue-detail.png)
 
 ## How it works
 
