@@ -5,11 +5,11 @@
 <h1 align="center">Codex Taskboard</h1>
 
 <p align="center">
-  <strong>A local-first issue board for human and agent work inside Codex.</strong>
+  <strong>A local taskboard that keeps Codex, Claude Code, and Oh My Pi work tied to issues.</strong>
 </p>
 
 <p align="center">
-  Manage projects, issues, comments, runtime sessions, and agent handoffs from one local workspace.
+  Local-first · Standalone web app · Codex desktop panel · Multi-agent session handoff
 </p>
 
 <p align="center">
@@ -20,121 +20,124 @@
   <a href="https://github.com/OhLuckyChen/codex-tasklist/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/OhLuckyChen/codex-tasklist?style=social"></a>
   <img alt="Node.js >= 22.5" src="https://img.shields.io/badge/Node.js-%3E%3D22.5-339933?logo=nodedotjs&logoColor=white">
   <img alt="Local-first" src="https://img.shields.io/badge/data-local--first-2563eb">
-  <img alt="Web and macOS" src="https://img.shields.io/badge/interface-Web%20%7C%20macOS-lightgrey">
+  <img alt="Codex Claude OMP" src="https://img.shields.io/badge/runtimes-Codex%20%7C%20Claude%20Code%20%7C%20OMP-7c3aed">
+  <img alt="No hosted backend" src="https://img.shields.io/badge/cloud-backend%20not%20included-lightgrey">
 </p>
 
-> Codex Taskboard can run as a standalone web app or as a panel embedded in the Codex desktop app. It does not include a hosted collaboration backend: issues, attachments, logs, and runtime metadata are stored locally by default under `.data/`.
+> Codex Taskboard is an unofficial local taskboard. It can run as a standalone web app or as a panel embedded in the Codex desktop app. The repository no longer ships a hosted collaboration backend and does not depend on Cloudflare Worker, D1, R2, Wrangler, or the maintainer's local machine paths. Issues, attachments, logs, and runtime metadata are stored locally under `.data/` by default.
 
-## Contents
+## What problem does it solve?
 
-- [Why it exists](#why-it-exists)
-- [Workflow](#workflow)
-- [Features](#features)
-- [Screenshots](#screenshots)
-- [How it works](#how-it-works)
-- [Requirements](#requirements)
-- [Quick start](#quick-start)
-- [First use](#first-use)
-- [Embed in Codex](#embed-in-codex)
-- [Runtime sessions](#runtime-sessions)
-- [taskctl CLI](#taskctl-cli)
-- [Agent skill](#agent-skill)
-- [Configuration](#configuration)
-- [Data and security](#data-and-security)
-- [Development and verification](#development-and-verification)
-- [FAQ](#faq)
-- [Docs and contributing](#docs-and-contributing)
-- [License](#license)
+AI coding work often spreads across several tools. One requirement may start in Codex, a review comment may be delegated to Claude Code, and a verification step may be handled by Oh My Pi. The human still has to remember:
 
-## Why it exists
+- which task is active;
+- which task is blocked;
+- which review comment has already been assigned to an agent;
+- which session should be continued;
+- which historical sessions contain the decision or evidence;
+- which project still has work waiting for review or cleanup.
 
-Codex Taskboard is designed to move attention away from watching every AI session and back to the state of the work itself.
+Codex Taskboard keeps those tools centered on the issue instead of forcing people to chase conversations.
 
-In real projects, the same backlog is often handled by a human, Codex, Claude Code, and Oh My Pi in turn. Each tool produces its own sessions, logs, comments, and intermediate findings. When that context is scattered across different windows, the human still has to track which task is active, which one is blocked, which one needs review, and which one is already done.
+Each issue can store status, priority, labels, assignee, branch, worktree, local project mapping, comments, attachments, knowledge proposals, and current plus historical runtime sessions. You can start a new Codex / Claude Code / Oh My Pi session from an issue or from a specific comment, attach the current session back to the issue, and later jump back to the linked runtime context.
 
-Codex Taskboard collects that process around the task:
+## Core features
 
-- manage backlog, in-progress, review, blocked, and done work by task state;
-- connect each issue to its current and historical Codex, Claude Code, and Oh My Pi sessions;
-- start follow-up sessions from an issue or a specific comment while keeping the handoff attached to the same task;
-- use comments, attachments, and project knowledge to record intermediate decisions, evidence, and context;
-- turn that accumulated process record into support for later changes, reviews, and continued development.
+### Taskboard
 
-In short, it changes AI-assisted development from "a person chasing sessions" into "tools working around task state", reducing attention overhead while making cross-agent and cross-session work easier to manage and reuse.
+- Multi-project management: create projects, switch projects, set aliases, favorite projects, archive and restore projects.
+- Cross-project focus: collect important work in the global task view and favorites view.
+- Status workflow: backlog, todo, in progress, in review, blocked, done, canceled, and archived.
+- Issue metadata: title, description, acceptance requirements, labels, priority, assignee, due date, recurrence, branch, worktree, and local project path mapping.
+- Issue relations: parent, child, blocking, blocked-by, and related issue links.
+- Version protection: issue and comment writes use version numbers to reduce accidental overwrites from multiple windows or agents.
 
-## Workflow
+### Agent session management
 
-1. Create or map a project to a local repository path.
-2. Add an issue with labels, priority, assignee, due date, branch, and worktree context.
-3. Start a Codex, Claude Code, or OMP session from the issue or from a review comment.
-4. Let the agent update status, add comments, attach evidence, and link its runtime session.
-5. Review the issue, send follow-up work when needed, or move it to done.
-
-## Features
-
-| Area | What is supported |
+| Runtime | Supported flows |
 | --- | --- |
-| Projects | Multi-project boards, cross-project overview, favorites, aliases, archive and restore. |
-| Issues | `backlog`, `todo`, `in_progress`, `in_review`, `blocked`, `done`, `canceled`, and `archived` states; drafts, favorites, priorities, labels, assignees, due dates, and recurrence rules. |
-| Comments and attachments | Markdown descriptions, issue comments, downloads, editing, deletion, and version conflict protection. |
-| Relations | Parent, child, blocking, blocked-by, and related issue links. |
-| Development context | Git branch, worktree path, and local project path mapping per issue. |
-| Runtime sessions | Current and historical Codex, Claude Code, and Oh My Pi sessions, including comment-level session links and follow-up entry points. |
-| Local automation | `taskctl` CLI plus the `manage-taskboard` skill for agents that need to claim work, comment, move status, and record session context. |
-| Project knowledge | Local project knowledge proposals that can be reviewed into `docs/knowledge/`. |
-| Realtime UI | Local HTTP API with Server-Sent Events for refreshing multiple browser windows or embedded Codex panels. |
+| Codex | Start a Codex task from an issue; start a follow-up task from a comment; send a follow-up to the current task; attach or detach the current task; view current and historical tasks; click the task ID to jump back into Codex. |
+| Claude Code | Start a Claude Code session from an issue or comment; record the Claude session ID; resume an attached session through the local terminal. |
+| Oh My Pi / OMP | Start an OMP session from an issue or comment; record the OMP session ID; resume an attached session through the local terminal. |
 
-## Screenshots
+Session links are stored at three useful levels:
 
-The screenshots below cover the main product surfaces: project management, task-state tracking, favorites, Codex embedding, cross-runtime session actions, real review comments, project knowledge, and issue context.
+- Issue current session: the main "continue this task" runtime context.
+- Issue historical sessions: every runtime context that has touched the issue.
+- Comment-level sessions: follow-up work tied to one review note, bug report, or clarification.
 
-### Project management
+### Comments, attachments, and evidence
 
-Start from saved projects, switch between local workspaces, group active projects, open the global task view, and keep project-level actions such as rename, favorite, and archive close to the project list.
+- Issue descriptions and comments support Markdown.
+- Comments can hold review feedback, agent findings, verification notes, and follow-up instructions.
+- Attachments can be uploaded, downloaded, and deleted.
+- Activity history records status changes and important operations for later inspection.
 
-![Project home with saved projects, project grouping, favorites, archive, and global task view](docs/screenshots/project-management.png)
+### Codex desktop embedding
 
-### Task-state board
+- Open Taskboard directly inside the Codex desktop app.
+- Create a Codex task directly from Taskboard.
+- Attach the current Codex task to an issue.
+- Click a task ID from the issue detail page to jump back to the matching Codex task.
+- On macOS, install the Dock launcher so Codex starts with Taskboard injection support.
 
-Track work by status instead of by scattered conversations. Issues stay visible across backlog, todo, in-progress, review, done, blocked, canceled, and archived states.
+The Codex injector only connects to the local loopback CDP port. It adds a Taskboard entry point and task-jump behavior to Codex pages. It does not modify, replace, or re-sign the official Codex app.
 
-![Task-state board with backlog, todo, in progress, and done columns](docs/screenshots/task-state-board.png)
+### Agent automation
 
-### Favorites
+The repository includes the `taskctl` CLI and the `manage-taskboard` skill so agents can work with the board while doing real implementation work:
 
-Collect important tasks across projects into one focused view so urgent review items and follow-ups do not disappear into individual boards.
-
-![Favorite issues view with starred tasks collected across projects](docs/screenshots/favorites.png)
-
-### Embedded in Codex
-
-Create a Codex session directly from a task so task state and execution context stay attached while work is happening.
-
-![Create a Codex session from the taskboard](docs/screenshots/codex-new-session.png)
-
-### Review comments and runtime sessions
-
-Record real review feedback in comments, keep the current and historical session context attached, and start new Codex, Claude Code, or Oh My Pi sessions from the same issue.
-
-![Issue detail showing real review comments plus Codex, Claude Code, and Oh My Pi session actions](docs/screenshots/comment-feedback-and-sessions.png)
+- read projects, issues, comments, and version numbers;
+- claim work;
+- append comments and evidence;
+- move issue status;
+- attach Codex / Claude Code / OMP sessions;
+- dispatch follow-up work from review comments.
 
 ### Project knowledge
 
-Turn issue discussions, comments, and implementation evidence into project knowledge proposals, then review what should become durable documentation.
+Taskboard can turn issue discussions, comments, and implementation evidence into local project knowledge proposals. After review, accepted pages are written to `docs/knowledge/`. This is local project documentation, not a hosted knowledge service.
 
-![Project knowledge center with published pages, pending proposals, health status, and project Q&A](docs/screenshots/knowledge-base.png)
+## Preview
 
-### Create issue with context
-
-Create issues with status, priority, labels, assignee, development context, and optional Codex task linkage from the beginning.
-
-![New issue editor with status, priority, labels, and Codex task link](linear-editor-proof.png)
-
-### Issue detail metadata
-
-Use the issue detail page as the working record for description, acceptance requirements, attachments, properties, activity, and review handoff.
-
-![Issue detail page with description, acceptance requirements, properties, and linked sessions](docs/screenshots/task-detail.png)
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Project management</strong><br>
+      Save local projects, group active work, favorite important projects, archive completed ones, and open a global task view.<br><br>
+      <img src="docs/screenshots/project-management.png" alt="Project management">
+    </td>
+    <td width="50%">
+      <strong>Task-state board</strong><br>
+      Keep work visible across backlog, todo, in progress, review, done, blocked, canceled, and archived states.<br><br>
+      <img src="docs/screenshots/task-state-board.png" alt="Task-state board">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>Favorites</strong><br>
+      Collect urgent review items and follow-ups across projects into one focused view.<br><br>
+      <img src="docs/screenshots/favorites.png" alt="Favorites">
+    </td>
+    <td width="50%">
+      <strong>Embedded in Codex</strong><br>
+      Create sessions from issues inside Codex so the task state and execution context stay linked.<br><br>
+      <img src="docs/screenshots/codex-new-session.png" alt="Embedded in Codex">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>Review comments and runtime sessions</strong><br>
+      Keep review feedback on the issue and launch Codex, Claude Code, or OMP follow-up sessions from the same comment.<br><br>
+      <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="Review comments and runtime sessions">
+    </td>
+    <td width="50%">
+      <strong>Project knowledge center</strong><br>
+      Convert decisions, evidence, and implementation notes into reviewable local knowledge pages.<br><br>
+      <img src="docs/screenshots/knowledge-base.png" alt="Project knowledge center">
+    </td>
+  </tr>
+</table>
 
 ## How it works
 
@@ -142,7 +145,7 @@ Use the issue detail page as the working record for description, acceptance requ
 Web UI / Codex embedded panel / taskctl / manage-taskboard skill
                   |
                   v
-          Local Node.js HTTP API + SSE
+          Local Node.js HTTP API + Server-Sent Events
                   |
                   v
       SQLite + .data/attachments + project path mappings
@@ -151,21 +154,31 @@ Web UI / Codex embedded panel / taskctl / manage-taskboard skill
        Codex / Claude Code / Oh My Pi local integrations
 ```
 
-The Codex injector connects only to the local loopback CDP port and adds the Taskboard entry point plus task-jump behavior inside Codex. It does not modify, replace, or re-sign the official Codex app.
+Typical workflow:
+
+1. Create a project or map one to a local repository path.
+2. Create an issue with description, acceptance requirements, labels, priority, branch, and worktree.
+3. Start Codex / Claude Code / Oh My Pi from the issue or from a specific comment.
+4. Let the agent write back results, evidence, blockers, and the runtime session ID.
+5. Review the comments and changes; when rework is needed, start a follow-up session from the review comment.
+6. Use historical sessions, activity, and comments to inspect the process, then move the issue to done.
 
 ## Requirements
 
-| Requirement | Required | Notes |
+| Requirement | Required | Purpose |
 | --- | --- | --- |
-| Node.js >= 22.5 | Yes | Used by the server, CLI, build, and tests. |
-| npm | Yes | Dependency installation uses the lockfile through `npm ci`. |
-| macOS | Optional | Required only for the Codex desktop launcher, Dock integration, and local terminal restore flows. |
-| Codex desktop app | Optional | Needed for the embedded panel, task jump, and Codex session bridge. |
-| `codex` CLI | Optional | Needed to create or follow up Codex sessions from issues. |
-| `claude` CLI | Optional | Needed to start and restore Claude Code sessions. |
-| `omp` CLI | Optional | Needed to start and restore Oh My Pi sessions. |
+| Node.js >= 22.5 | Yes | Runs the server, CLI, build scripts, and tests. |
+| npm | Yes | Installs dependencies from the lockfile. |
+| Git | Recommended | Clones the repository and helps manage branches and worktrees. |
+| macOS | Optional | Needed only for the Codex desktop launcher, Dock integration, and local terminal restore flows. |
+| Codex desktop app | Optional | Needed for the embedded Taskboard panel, task jump, and Codex session bridge. |
+| `codex` CLI | Optional | Creates and continues Codex tasks from issues or comments. |
+| `claude` CLI | Optional | Starts and resumes Claude Code sessions. |
+| `omp` CLI | Optional | Starts and resumes Oh My Pi sessions. |
 
-## Quick start
+The minimal setup only needs Node.js and npm. Without Codex, Claude Code, or Oh My Pi, the board, issues, comments, attachments, project knowledge, and `taskctl` still work; only the matching runtime launch and resume actions are unavailable until the executable is installed or configured.
+
+## Quick start: standalone web board
 
 ```bash
 git clone https://github.com/OhLuckyChen/codex-tasklist.git
@@ -177,23 +190,27 @@ CODEX_TASKBOARD_HOST=127.0.0.1 npm start
 
 Open <http://127.0.0.1:47823>.
 
+`CODEX_TASKBOARD_HOST=127.0.0.1` keeps the server local to your machine. The default bind address is `0.0.0.0`, which is useful for LAN access but should not be exposed directly to the public internet.
+
 For development:
 
 ```bash
 npm run dev
 ```
 
-The Vite web app runs at <http://127.0.0.1:5173> and proxies API calls to the local Taskboard service.
+The Vite web app runs at <http://127.0.0.1:5173> and proxies API requests to the local Taskboard service.
 
-## First use
+## First-use checklist
 
 1. Start the local service.
-2. Create a project or map an existing project to a local repository path.
-3. Create an issue and fill in status, priority, labels, branch, and worktree context.
-4. Launch or attach a Codex, Claude Code, or OMP session from the issue.
-5. Let the agent comment, attach evidence, move the issue to review, and keep follow-up sessions linked to the same issue.
+2. Create a project from the home page.
+3. Map the project to a local repository path in project settings.
+4. Create an issue with description, acceptance requirements, labels, priority, and development context.
+5. If you want an agent to do the work, start Codex / Claude Code / OMP from the issue or a comment.
+6. Ask the agent to write back comments, evidence, and status.
+7. Review the result and move the issue to in review or done.
 
-## Embed in Codex
+## Embed in the Codex desktop app
 
 The recommended macOS setup is the Dock launcher:
 
@@ -201,13 +218,14 @@ The recommended macOS setup is the Dock launcher:
 ./scripts/install-macos-launcher.sh
 ```
 
-The installer:
+The installer will:
 
-- records the current Node.js path in `.data/node-path`;
-- records the `codex` CLI path in `.data/codex-path` when available;
-- installs a LaunchAgent that watches the local Codex CDP port and restores Taskboard;
-- backs up the Dock configuration to `.data/com.apple.dock.before-codex-taskboard.plist`;
-- replaces the Dock Codex entry with the Codex Taskboard launcher.
+- verify that Node.js is >= 22.5;
+- record the current Node.js path in `.data/node-path`;
+- record the `codex` CLI path in `.data/codex-path` when available;
+- install the `io.github.ohluckychen.codex-taskboard.supervisor` LaunchAgent;
+- back up the current Dock configuration to `.data/com.apple.dock.before-codex-taskboard.plist`;
+- replace the Dock Codex entry with the Codex Taskboard launcher.
 
 If Codex is already open, quit it once after installation and start it again from the new Dock icon.
 
@@ -217,7 +235,7 @@ You can also inject into a Codex instance that already exposes CDP:
 npm run codex:inject -- --port 9229 --open
 ```
 
-To pin explicit executables:
+To pin explicit executable paths:
 
 ```bash
 CODEX_TASKBOARD_NODE=/absolute/path/to/node \
@@ -225,15 +243,19 @@ CODEX_EXECUTABLE=/absolute/path/to/codex \
 ./scripts/install-macos-launcher.sh
 ```
 
-## Runtime sessions
+## Configure runtime executables
 
-| Runtime | Supported flows |
-| --- | --- |
-| Codex | Start a Codex task from an issue, start from a comment, send a follow-up to the current task, attach or detach the current task, view current and historical tasks, and jump back to a Codex task by clicking its ID. |
-| Claude Code | Start a Claude Code session from an issue or comment, record the Claude session ID, and resume an attached session through the local terminal. |
-| Oh My Pi | Start an OMP session from an issue or comment, record the OMP session ID, and resume an attached session through the local terminal. |
+By default, Taskboard finds `codex`, `claude`, and `omp` through `PATH`. If your CLIs live somewhere else, configure them explicitly:
 
-Session links are stored at two levels. The issue-level current session is used for "continue this work now"; historical sessions preserve the runtime contexts that have touched the issue. Comments can also have their own sessions, which is useful when a review note needs a separate follow-up agent.
+```bash
+CODEX_EXECUTABLE=/absolute/path/to/codex \
+CLAUDE_EXECUTABLE=/absolute/path/to/claude \
+OMP_EXECUTABLE=/absolute/path/to/omp \
+CODEX_TASKBOARD_HOST=127.0.0.1 \
+npm start
+```
+
+The macOS Dock launcher also reads `.data/node-path` and `.data/codex-path`. Those files are generated by the installer so GUI-launched apps do not depend on your shell startup files.
 
 ## taskctl CLI
 
@@ -253,9 +275,16 @@ npm run taskctl -- issue create \
   --labels product,mvp
 ```
 
-You can also run `npm link` to expose `taskctl` on your shell path. The full command reference lives in [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md).
+You can also expose `taskctl` on your shell path:
 
-## Agent skill
+```bash
+npm link
+taskctl issue list --project my-project
+```
+
+The full command reference lives in [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md).
+
+## Install the agent skill
 
 Install the local skill for Codex:
 
@@ -270,9 +299,9 @@ Use it in Codex:
 $manage-taskboard ISSUE-ID
 ```
 
-The skill reads the latest issue, comments, and version number before writing back claims, comments, status moves, and session links through `taskctl`.
+The skill reads the latest issue, comments, and version number before writing back claims, comments, status moves, and session links through `taskctl`. This keeps agents from updating an issue based only on stale conversation context.
 
-## Configuration
+## Environment variables
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
@@ -285,15 +314,19 @@ The skill reads the latest issue, comments, and version number before writing ba
 | `OMP_EXECUTABLE` | auto-detected | Oh My Pi CLI path. |
 | `CODEX_TASKBOARD_NODE` | auto-detected | Node.js path used by the macOS launcher. |
 
-The default `0.0.0.0` bind address allows LAN devices to connect. The local service does not provide public account authentication, so do not expose it directly to the public internet.
+## Data boundaries and independent distribution
 
-## Data and security
+The repository is designed for local standalone use:
 
-- `.data/` is not committed to Git. It contains SQLite data, attachments, logs, installer-recorded executable paths, and Dock backups.
+- It does not include Cloudflare Worker, D1, R2, Wrangler, or hosted collaboration migration code.
+- It does not require the maintainer's local paths, private repository paths, or personal launcher scripts.
+- Runtime data is written to `.data/` by default and is not committed to Git.
+- Attachments are written to `.data/attachments`.
 - Project path mappings are stored in SQLite project records.
-- `~/.codex/skills` and `~/.claude/skills` are user-level agent integration directories and are used only when you install the skills.
-- `/Applications/ChatGPT.app` is the default macOS location used by the Codex desktop integration; it is not required for the standalone web board.
-- The repository no longer contains Cloudflare Worker, D1, R2, Wrangler, or hosted collaboration migration code.
+- `~/.codex/skills` and `~/.claude/skills` are used only when the user explicitly installs agent skills.
+- `/Applications/ChatGPT.app` is only used by the macOS Codex desktop integration; the standalone web board does not need it.
+
+The local service does not include public account authentication. For remote access, use a trusted private network, SSH tunnel, or your own authenticated reverse proxy instead of exposing the default service directly to the public internet.
 
 ## Development and verification
 
@@ -315,17 +348,21 @@ npm test
 
 | Question | Answer |
 | --- | --- |
-| `npm ci` says the Node version is unsupported. | Install Node.js 22.5 or newer. |
+| `npm ci` says the Node version is unsupported. | Install Node.js 22.5 or newer, then run `npm ci` again. |
+| The server starts but the page does not open. | Check the server port. The default URL is <http://127.0.0.1:47823>. |
+| The port is already in use. | Start with `CODEX_TASKBOARD_PORT=another-port npm start`. |
 | The web app opens but cannot read project files. | Map the project to a local repository path in project settings, or run `taskctl project map PROJECT_ID --workspace-path /path/to/repo`. |
 | Taskboard does not appear inside Codex. | Start Codex from the Codex Taskboard Dock icon, or manually run `npm run codex:inject -- --port 9229 --open`. |
+| Clicking a Codex task does not jump back to the session. | Make sure Codex was launched with CDP enabled and that the task ID is attached to the issue. |
 | Clicking a Claude or OMP session does nothing. | Make sure the matching CLI is installed, or set `CLAUDE_EXECUTABLE` / `OMP_EXECUTABLE`. |
 | Other devices on my LAN can access the board. | Start with `CODEX_TASKBOARD_HOST=127.0.0.1` for local-only access. |
+| I want a different data directory. | Set `CODEX_TASKBOARD_DATA_DIR=/absolute/path/to/data`. |
 
-## Docs and contributing
+## Documentation
 
-- [`changelog.md`](changelog.md) records notable changes.
-- [`docs/knowledge/`](docs/knowledge/) contains local project knowledge pages.
-- [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md) documents the CLI used by the agent skill.
+- [`changelog.md`](changelog.md): notable changes.
+- [`docs/knowledge/`](docs/knowledge/): local project knowledge pages.
+- [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md): CLI reference used by the agent skill.
 
 ## License
 
