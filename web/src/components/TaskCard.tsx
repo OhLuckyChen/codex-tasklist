@@ -21,13 +21,16 @@ function descriptionPreview(description: string) {
 
 interface TaskCardProps {
   task: Task;
+  projectName?: string;
   statusIndex: number;
   isDragging: boolean;
   dragShift: number;
   isMoving: boolean;
   isSettling: boolean;
   isContextMenuOpen: boolean;
+  isFavorite: boolean;
   onEdit: (task: Task) => void;
+  onToggleFavorite: (task: Task) => void;
   onContextMenu: (task: Task, position: { x: number; y: number }) => void;
   onMove: (task: Task, status: TaskStatus) => void;
   onDragStart: (task: Task, height: number) => void;
@@ -37,13 +40,16 @@ interface TaskCardProps {
 
 export function TaskCard({
   task,
+  projectName,
   statusIndex,
   isDragging,
   dragShift,
   isMoving,
   isSettling,
   isContextMenuOpen,
+  isFavorite,
   onEdit,
+  onToggleFavorite,
   onContextMenu,
   onMove,
   onDragStart,
@@ -98,6 +104,12 @@ export function TaskCard({
       <div className="card-topline">
         <span className="card-reference">
           <span className="task-identifier">{task.identifier}</span>
+          {projectName && (
+            <span className="task-project-name" title={`所属项目：${projectName}`}>
+              <LinearIcon name="folder" />
+              <span>{projectName}</span>
+            </span>
+          )}
           {task.relations.parent && (
             <>
               <LinearIcon name="chevronRight" />
@@ -137,6 +149,16 @@ export function TaskCard({
       {preview && <p className="card-description">{preview}</p>}
 
       <div className="card-properties" aria-label="议题属性">
+        <button
+          className={`task-card-favorite${isFavorite ? " active" : ""}`}
+          type="button"
+          aria-label={isFavorite ? `取消收藏 ${task.identifier}` : `收藏 ${task.identifier}`}
+          aria-pressed={isFavorite}
+          title={isFavorite ? "取消收藏" : "添加到收藏夹"}
+          onClick={stopThen(() => onToggleFavorite(task))}
+        >
+          <LinearIcon name="favorite" />
+        </button>
         <span className={`priority-icon priority-icon-${task.priority}`} title={PRIORITY_LABELS[task.priority]}>
           <LinearPriorityIcon priority={task.priority} />
         </span>

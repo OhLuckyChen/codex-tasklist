@@ -108,7 +108,7 @@ while true; do
     stop_duplicate_injectors
     /bin/sleep 0.2
     log "Detected a new Codex CDP instance on 127.0.0.1:${cdp_port}; starting a fresh Taskboard injector"
-    "$node_binary" "$injector" --port "$cdp_port" --watch --open &
+    "$node_binary" "$injector" --port "$cdp_port" --watch --open --attach-existing &
     child_pid="$!"
     attached_cdp_signature="$current_cdp_signature"
     last_state="attached"

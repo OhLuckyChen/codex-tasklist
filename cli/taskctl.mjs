@@ -68,6 +68,7 @@ const COMMAND_OPTIONS = new Map([
     ]),
   ],
   ["issue move", new Set(["status", "thread-id", "if-version", "json"])],
+  ["issue transfer", new Set(["project", "thread-id", "if-version", "json"])],
   ["issue archive", new Set(["thread-id", "if-version", "json"])],
   ["issue restore", new Set(["thread-id", "if-version", "json"])],
   ["issue relation", new Set(["type", "issue", "thread-id", "if-version", "json"])],
@@ -179,7 +180,7 @@ async function execute(parsed, overrides) {
   const allowedOptions = COMMAND_OPTIONS.get(command);
   if (!allowedOptions) {
     throw usageError(
-      "Expected one of: project list/create/map, cloud login/status/logout, issue list/get/create/update/move/archive/restore/relation, comment list/add/update/delete, attachment download, context current",
+      "Expected one of: project list/create/map, cloud login/status/logout, issue list/get/create/update/move/transfer/archive/restore/relation, comment list/add/update/delete, attachment download, context current",
     );
   }
   validateOptions(parsed.options, allowedOptions);
@@ -248,6 +249,9 @@ async function execute(parsed, overrides) {
     case "issue move":
       expectOperandCount(parsed, 1);
       return moveIssue(api, parsed.operands[0], parsed.options, overrides);
+    case "issue transfer":
+      expectOperandCount(parsed, 1);
+      return transferIssue(api, parsed.operands[0], parsed.options, overrides);
     case "issue archive":
       expectOperandCount(parsed, 1);
       return archiveIssue(api, parsed.operands[0], parsed.options, overrides, "archive");
@@ -317,6 +321,7 @@ function createApiClient(overrides, { baseUrl: explicitBaseUrl } = {}) {
           headers: {
             accept: "application/json",
             "x-taskboard-client": "taskctl",
+            ...(env.TASKBOARD_AGENT_RUNTIME ? { "x-taskboard-agent-runtime": env.TASKBOARD_AGENT_RUNTIME } : {}),
             ...(body === undefined ? {} : { "content-type": "application/json" }),
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -353,6 +358,7 @@ function createApiClient(overrides, { baseUrl: explicitBaseUrl } = {}) {
           headers: {
             accept: "*/*",
             "x-taskboard-client": "taskctl",
+            ...(env.TASKBOARD_AGENT_RUNTIME ? { "x-taskboard-agent-runtime": env.TASKBOARD_AGENT_RUNTIME } : {}),
           },
         });
       } catch (error) {
@@ -541,6 +547,15 @@ async function moveIssue(api, taskId, options, overrides) {
   const threadId = resolveThreadId(options, overrides);
   return api.request("POST", `${taskPath(taskId)}/move`, {
     status,
+    threadId,
+    version: await resolveVersion(api, taskId, options["if-version"]),
+  });
+}
+
+async function transferIssue(api, taskId, options, overrides) {
+  const threadId = resolveThreadId(options, overrides);
+  return api.request("POST", `${taskPath(taskId)}/transfer`, {
+    projectId: requiredOption(options, "project"),
     threadId,
     version: await resolveVersion(api, taskId, options["if-version"]),
   });

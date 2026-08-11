@@ -79,12 +79,25 @@ export function taskFilterCount(filters: TaskFilters): number {
 }
 
 export function matchesTaskSearch(task: Task, search: string): boolean {
-  const needle = search.trim().toLowerCase();
-  if (!needle) return true;
-  return [task.identifier, task.title, task.description, ...task.labels]
-    .join(" ")
+  const needles = search
+    .normalize("NFKC")
+    .trim()
     .toLowerCase()
-    .includes(needle);
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!needles.length) return true;
+
+  const fields = [task.identifier, task.title, task.description, ...task.labels]
+    .map((value) => value.normalize("NFKC").toLowerCase());
+  return needles.every((needle) => fields.some((field) => {
+    if (field.includes(needle)) return true;
+    let needleIndex = 0;
+    for (const character of field) {
+      if (character === needle[needleIndex]) needleIndex += 1;
+      if (needleIndex === needle.length) return true;
+    }
+    return false;
+  }));
 }
 
 export function matchesTaskFilters(

@@ -189,6 +189,8 @@ test("complete App automation payloads cross the injected forwarder into the cur
     workspacePath: "/tmp/local-project",
     skillPath: "/tmp/manage-taskboard/SKILL.md",
     automationId: "automation-1",
+    enabledByUser: true,
+    quotaAware: true,
     intervalMinutes: 10,
     model: "gpt-5.6-sol",
     reasoningEffort: "ultra",
@@ -217,37 +219,73 @@ test("only a loopback Taskboard iframe can request native automation", () => {
   );
 });
 
-test("issues open an unsent native Codex composer in the exact workspace with a Skill mention", () => {
+test("issues submit a native Codex composer in the exact workspace with a Skill mention", () => {
   assert.match(source, /function createThreadForTask\(payload\)/);
+  assert.match(source, /function activateProjectForThread\(payload, workspacePath, bridge\)/);
+  assert.match(source, /await activateProjectForThread\(payload, workspacePath, bridge\)/);
+  assert.match(source, /waitForActiveNativeProject\(activatedProject\.id\)/);
+  assert.match(source, /function selectComposerProject\(project\)/);
+  assert.match(source, /activatedProject\.selectInComposer/);
+  assert.match(source, /skillName === "project-knowledge-builder"/);
+  assert.match(source, /不要打开或使用 Codex 的 Skill 选择菜单/);
+  assert.match(source, /skills\/manage-taskboard\/SKILL\.md/);
+  assert.match(source, /前者负责 Issue、评论和状态操作/);
+  assert.match(source, /requestHost\("prefill-plain-composer"/);
+  assert.doesNotMatch(source, /projectRowById\(snapshotProjectId\)/);
   assert.match(source, /\[data-app-action-sidebar-select-project\]/);
-  assert.match(source, /data-codex-composer/);
   assert.match(source, /type: "electron-set-active-workspace-root"/);
   assert.match(source, /root: workspacePath/);
   assert.doesNotMatch(source, /prefillPrompt: prompt/);
   assert.match(source, /requestHostTaskComposerPrefill\(\{/);
   assert.match(source, /requestHost\("prefill-task-composer"/);
-  assert.match(source, /function waitForPreparedComposer\(identifier, skillPath\)/);
-  assert.match(source, /\[skill-mention-name\]/);
-  assert.match(source, /mention\.getAttribute\("skill-mention-path"\) === skillPath/);
-  assert.doesNotMatch(source, /submit\.click\(\)/);
+  assert.match(source, /submit: true/);
   assert.match(source, /type: "taskboard:thread-prepared"/);
   assert.doesNotMatch(source, /function waitForCreatedThread/);
-  assert.doesNotMatch(source, /type: "taskboard:thread-created"/);
-  assert.doesNotMatch(webApp, /taskboard:thread-created/);
   assert.match(
     webApp,
     /const instruction = `e-taskboard Addressing the issues mentioned in \$\{task\.identifier\}`/,
   );
   assert.match(
     webApp,
-    /const prompt = `\[\$manage-taskboard\]\(\$\{manageTaskboardSkillPath\}\) \$\{instruction\}`/,
+    /const prompt = `\[\$\$\{skill\.name\}\]\(\$\{skill\.path\}\) \$\{instruction\}`/,
   );
-  assert.match(webApp, /skillName: "manage-taskboard"/);
-  assert.match(webApp, /skillDisplayName: "Manage Taskboard"/);
-  assert.match(webApp, /skillPath: manageTaskboardSkillPath/);
+  assert.match(webApp, /name: "project-knowledge-builder"/);
+  assert.match(webApp, /path: projectKnowledgeSkillPath/);
+  assert.match(webApp, /skillName: skill\.name/);
+  assert.match(webApp, /skillDisplayName: skill\.displayName/);
+  assert.match(webApp, /skillPath: skill\.path/);
   assert.match(webApp, /instruction,/);
   assert.match(webApp, /type: "taskboard:create-thread"/);
-  assert.match(webApp, /type: "taskboard:open-thread", payload: \{ threadId \}/);
+  assert.match(webApp, /deviceWorkspacePaths\[task\.projectId\]/);
+  assert.match(webApp, /project\.id === task\.projectId/);
+  const openTaskSource = webApp.slice(
+    webApp.indexOf("function openTaskInThread"),
+    webApp.indexOf("function followUpTaskInThread"),
+  );
+  assert.doesNotMatch(openTaskSource, /hostContext\?\.workspacePath/);
+});
+
+test("existing conversation follow-ups resume review only after the message is persisted", () => {
+  const followUpSource = source.slice(
+    source.indexOf("async function followUpThreadForTask"),
+    source.indexOf("function buildAutomationHostPayload"),
+  );
+  assert.match(followUpSource, /const requestId = typeof payload\?\.requestId/);
+  assert.match(followUpSource, /const marker = `\[taskboard-request:\$\{requestId\}\]`/);
+  assert.match(followUpSource, /action: "follow-up"/);
+  assert.match(followUpSource, /instruction: correlatedInstruction/);
+  assert.match(followUpSource, /submit: true/);
+  assert.match(followUpSource, /persistPendingThreadLinkReceipt\(\{/);
+  assert.match(followUpSource, /action: "follow-up"/);
+  assert.match(followUpSource, /persistPendingTaskThreadLink\(null\)/);
+  assert.match(followUpSource, /deliverPendingThreadLinkReceipt\(\)/);
+  assert.doesNotMatch(followUpSource, /resolvePendingTaskThreadLink\(\)/);
+  assert.match(source, /taskboard:thread-followed-up/);
+  assert.match(source, /threadId !== normalizeThreadId\(request\.threadId\)/);
+  assert.match(webApp, /message\.type === "taskboard:thread-followed-up"/);
+  assert.match(webApp, /task\.status === "in_review"/);
+  assert.match(webApp, /moveTaskRequest\(task, "in_progress", undefined, threadId\)/);
+  assert.match(webApp, /type: "taskboard:thread-link-ack"/);
 });
 
 test("the standalone web page opens linked Codex tasks through the app deep link", () => {
@@ -260,7 +298,7 @@ test("the injected app opens an existing local Codex task instead of a new compo
     source.indexOf("async function openThread"),
     source.indexOf("function projectRowById"),
   );
-  assert.match(openThreadSource, /if \(row\?\.isConnected\) \{\s*row\.click\?\.\(\);\s*return;/);
+  assert.match(openThreadSource, /if \(row\?\.isConnected\) \{[\s\S]*?row\.click\?\.\(\);[\s\S]*?if \(await waitForActiveThread\(normalizedThreadId\)\) return;/);
   assert.match(openThreadSource, /if \(!normalizedThreadId\) return/);
   assert.match(openThreadSource, /await dispatchHostMessage\(\{\s*type: "navigate-to-route",\s*path: routeForThread\(normalizedThreadId\)/);
   assert.match(source, /return `\/local\/\$\{encodeURIComponent\(threadId\)\}`/);
@@ -315,4 +353,11 @@ test("host integration stays thin", () => {
   assert.doesNotMatch(source, /__codexSessionDeleteBridge/);
   assert.doesNotMatch(source, /import\s*\(/);
   assert.doesNotMatch(source, /window\.fetch\s*=/);
+});
+
+test("the embedded board can repeat its readiness handshake after renderer re-attachment", () => {
+  assert.match(
+    webApp,
+    /message\.type !== "taskboard:host-context"[\s\S]*window\.parent\.postMessage\(\{ type: "taskboard:ready" \}, "\*"\)/,
+  );
 });

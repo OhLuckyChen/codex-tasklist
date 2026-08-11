@@ -7,12 +7,45 @@ const boardColumnSource = await readFile(new URL("../web/src/components/BoardCol
 const apiSource = await readFile(new URL("../web/src/api.ts", import.meta.url), "utf8");
 const styles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 const detailSource = await readFile(new URL("../web/src/components/TaskDetail.tsx", import.meta.url), "utf8");
+const knowledgeSource = await readFile(new URL("../web/src/components/KnowledgeCenter.tsx", import.meta.url), "utf8");
 const editorSource = await readFile(new URL("../web/src/components/TaskEditor.tsx", import.meta.url), "utf8");
 const labelPickerSource = await readFile(new URL("../web/src/components/LabelPicker.tsx", import.meta.url), "utf8");
 const contextMenuSource = await readFile(new URL("../web/src/components/TaskContextMenu.tsx", import.meta.url), "utf8");
 const cardSource = await readFile(new URL("../web/src/components/TaskCard.tsx", import.meta.url), "utf8");
 const filterSource = await readFile(new URL("../web/src/taskFilters.ts", import.meta.url), "utf8");
 const typesSource = await readFile(new URL("../web/src/types.ts", import.meta.url), "utf8");
+
+test("published comments can explicitly remove an incorrect conversation association", () => {
+  assert.match(detailSource, /dissociatePublishedCommentFromThread/);
+  assert.match(detailSource, /updateComment\(comment, comment\.body, null\)/);
+  assert.match(detailSource, /解除关联/);
+  assert.match(detailSource, /保留评论和 Codex 会话/);
+  assert.match(detailSource, /className="comment-conversation-unlink"/);
+  assert.match(detailSource, /aria-label="解除评论与会话的关联"/);
+  assert.match(styles, /\.comment-conversation-link:hover \.comment-conversation-unlink/);
+  assert.match(styles, /\.comment-conversation-link:focus-within \.comment-conversation-unlink/);
+  assert.match(apiSource, /threadId\?: string \| null/);
+  assert.match(apiSource, /threadId !== undefined/);
+});
+
+test("project knowledge keeps confirmed files separate from reviewable issue and comment proposals", () => {
+  assert.match(appSource, /type BoardView = "issues" \| "drafts" \| "knowledge"/);
+  assert.match(appSource, />\s*项目知识\{knowledgeProposalCount/);
+  assert.match(appSource, /queueAutomaticKnowledgeReview/);
+  assert.match(appSource, /moved\.status === "in_review" \|\| moved\.status === "done"/);
+  assert.match(detailSource, /整理为项目知识/);
+  assert.match(detailSource, /加入知识提案/);
+  assert.match(detailSource, /选择评论整理/);
+  assert.match(knowledgeSource, /已发布/);
+  assert.match(knowledgeSource, /待确认/);
+  assert.match(knowledgeSource, /健康状态/);
+  assert.match(knowledgeSource, /knowledge-line-diff/);
+  assert.match(knowledgeSource, /保存为知识提案/);
+  assert.match(apiSource, /\/knowledge-source-versions/);
+  assert.match(typesSource, /type KnowledgeProposalStatus = "generating" \| "ready" \| "published"/);
+  assert.match(styles, /\.knowledge-published-layout/);
+  assert.match(styles, /\.comment-knowledge-toolbar/);
+});
 
 function workflowStatuses() {
   const match = typesSource.match(/export const TASK_STATUSES = (\[[\s\S]*?\]) as const/);
@@ -44,9 +77,11 @@ test("text selection is reserved for editable fields", () => {
   assert.match(styles, /input,[\s\S]*?textarea,[\s\S]*?\[contenteditable="true"\][\s\S]*?user-select: text/);
 });
 
-test("issue cards omit redundant metadata and keep three compact, well-spaced rows", () => {
-  assert.doesNotMatch(cardSource, /task\.createdAt|创建于|card-footer|created-at|projectName|project-chip/);
+test("issue cards omit timestamps and keep compact project-aware rows", () => {
+  assert.doesNotMatch(cardSource, /task\.createdAt|创建于|card-footer|created-at|project-chip/);
   assert.doesNotMatch(styles, /\.card-footer|\.created-at|\.project-chip/);
+  assert.match(cardSource, /projectName\?: string/);
+  assert.match(cardSource, /className="task-project-name"/);
   assert.match(styles, /\.task-card \{[\s\S]*?min-height: 80px;[\s\S]*?gap: 6px;[\s\S]*?padding: 7px 8px/);
   assert.match(detailSource, /currentTask\.createdAt/);
 });
@@ -82,8 +117,8 @@ test("the complete Linear-style workflow shares one ordered status source", () =
     "todo",
     "in_progress",
     "in_review",
-    "blocked",
     "done",
+    "blocked",
     "canceled",
     "archived",
   ]);
@@ -131,7 +166,7 @@ test("common issue mutations enter a Linear-style undo queue", () => {
 });
 
 test("issues expose a current conversation and expandable conversation history", () => {
-  assert.match(detailSource, /新建会话处理/);
+  assert.match(detailSource, /新建 Codex 会话/);
   assert.match(detailSource, /onOpenInThread\(currentTask\)/);
   assert.doesNotMatch(appSource, /detail-thread-button/);
   assert.doesNotMatch(detailSource, /输入对话 ID|解除 Codex 对话绑定|>绑定</);
@@ -182,7 +217,7 @@ test("comments stage, upload, render and delete their own attachments", () => {
 test("comments publish before a conversation is associated", () => {
   assert.match(detailSource, /\{submitting \? "发表中…" : "发表评论"\}/);
   assert.doesNotMatch(detailSource, /评论并新建会话|评论并在已有会话跟进|选择会话并发布评论/);
-  assert.match(detailSource, /function openPublishedCommentInNewThread\(comment: Comment\)/);
+  assert.match(detailSource, /function openPublishedCommentInNewThread\(comment: Comment, runtime: TaskRuntime = "codex"\)/);
   assert.match(detailSource, /function associatePublishedCommentWithThread\(comment: Comment, threadId: string\)/);
   assert.match(detailSource, /updateComment\(comment, comment\.body, threadId\)/);
   assert.match(appSource, /const requestId = crypto\.randomUUID\(\)/);
@@ -190,16 +225,34 @@ test("comments publish before a conversation is associated", () => {
   assert.match(appSource, /commentId: comment\?\.id/);
   assert.match(appSource, /writePendingThreadRequests\(pendingThreadRequestsRef\.current\)/);
   assert.match(appSource, /pendingThreadRequestsRef\.current\.get\(payload\.requestId\)/);
-  assert.match(appSource, /await listComments\(payload\.taskId as string\)/);
+  assert.match(appSource, /await listComments\(args\.taskId\)/);
   assert.match(appSource, /taskboard:thread-link-ack/);
   assert.match(appSource, /requestId,/);
   assert.match(appSource, /commentId: comment\?\.id/);
-  assert.match(detailSource, /新建会话处理/);
+  assert.match(detailSource, /新建 Codex 会话/);
   assert.match(detailSource, /关联已有会话/);
+  assert.match(detailSource, /在关联会话处理/);
+  assert.match(detailSource, /在当前会话处理/);
+  assert.match(detailSource, /需要处理时，请点击“在关联会话处理”/);
   assert.match(detailSource, /const commentThreadOptions = \[/);
   assert.match(detailSource, /\.\.\.linkedThreadIds/);
   assert.match(apiSource, /Array\.isArray\(data\.comments\)/);
   assert.match(apiSource, /attachments: Array\.isArray\(comment\.attachments\)/);
+});
+
+test("a sent follow-up resumes an issue under review without changing it on prefill", () => {
+  assert.match(appSource, /action: "follow-up"/);
+  assert.match(appSource, /type: "taskboard:follow-up-thread"/);
+  assert.match(appSource, /message\.type === "taskboard:thread-followed-up"/);
+  assert.match(appSource, /task\.status === "in_review"/);
+  assert.match(appSource, /moveTaskRequest\(task, "in_progress", undefined, threadId\)/);
+  assert.doesNotMatch(
+    appSource.slice(
+      appSource.indexOf("function followUpTaskInThread"),
+      appSource.indexOf("function changeProject"),
+    ),
+    /moveTaskRequest/,
+  );
 });
 
 test("issue creation and detail share one searchable, creatable label picker", () => {

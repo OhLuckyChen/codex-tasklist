@@ -25,12 +25,16 @@ import {
   isLocalCompanionRoute,
 } from "./cloud-proxy.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
+import { createClaudeLauncher } from "./claude-launcher.mjs";
+import { createOmpLauncher } from "./omp-launcher.mjs";
+import { KnowledgeService, knowledgeInternals } from "./knowledge-service.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const execFileAsync = promisify(execFile);
 const JSON_BODY_LIMIT = 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
 const AI_CHAT_TURN_BODY_LIMIT = 25 * 1024 * 1024;
+const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
 const AI_CHAT_ATTACHMENT_LIMIT = 10;
 const AI_CHAT_SKILL_MARKER = "\uFFFC";
 const INLINE_ATTACHMENT_TYPES = new Set([
@@ -50,6 +54,23 @@ const CODEX_AGENT_ACTOR = {
   id: "codex-agent",
   name: "Codex Agent",
   avatarUrl: null,
+};
+const CLAUDE_AGENT_ACTOR = {
+  type: "agent",
+  id: "claude-agent",
+  name: "Claude Agent",
+  avatarUrl: null,
+};
+const OMP_AGENT_ACTOR = {
+  type: "agent",
+  id: "omp-agent",
+  name: "OMP Agent",
+  avatarUrl: null,
+};
+const AGENT_RUNTIME_ACTORS = {
+  "codex": CODEX_AGENT_ACTOR,
+  "claude": CLAUDE_AGENT_ACTOR,
+  "omp": OMP_AGENT_ACTOR,
 };
 const CONTENT_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -516,6 +537,9 @@ function requestHeader(request, name) {
 
 function actorFromRequest(request) {
   if (request.headers["x-taskboard-client"] === "taskctl") {
+    const runtime = requestHeader(request, "x-taskboard-agent-runtime");
+    if (runtime === "claude") return CLAUDE_AGENT_ACTOR;
+    if (runtime === "omp") return OMP_AGENT_ACTOR;
     return CODEX_AGENT_ACTOR;
   }
 
@@ -560,8 +584,8 @@ function actorFromRequest(request) {
 
 function parseAssigneeTarget(value) {
   if (value === undefined) return undefined;
-  if (value !== "current-user" && value !== "codex-agent") {
-    throw new ApiError(400, "INVALID_FIELD", "'assigneeTarget' must be current-user or codex-agent");
+  if (value !== "current-user" && value !== "codex-agent" && value !== "claude-agent" && value !== "omp-agent") {
+    throw new ApiError(400, "INVALID_FIELD", "'assigneeTarget' must be current-user, codex-agent, claude-agent or omp-agent");
   }
   return value;
 }
@@ -569,6 +593,8 @@ function parseAssigneeTarget(value) {
 function resolveAssignee(target, actor) {
   if (target === undefined) return actor;
   if (target === "codex-agent") return CODEX_AGENT_ACTOR;
+  if (target === "claude-agent") return CLAUDE_AGENT_ACTOR;
+  if (target === "omp-agent") return OMP_AGENT_ACTOR;
   if (actor.type !== "user") {
     throw new ApiError(400, "INVALID_FIELD", "'current-user' requires a user request identity");
   }
@@ -583,11 +609,19 @@ function parseWorkflowId(value) {
   return workflowId;
 }
 
+function parseRuntime(value) {
+  if (value === undefined) return undefined;
+  if (value !== "codex" && value !== "claude" && value !== "omp") {
+    throw new ApiError(400, "INVALID_FIELD", "'runtime' must be 'codex', 'claude' or 'omp'");
+  }
+  return value;
+}
+
 function parseTaskCreate(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
     "projectId", "title", "description", "status", "priority", "labels", "sortOrder", "threadId",
-    "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
+    "runtime", "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
   ]));
   const projectId = validateProjectId(body.projectId ?? DEFAULT_PROJECT_ID);
   const task = {
@@ -599,6 +633,7 @@ function parseTaskCreate(body) {
     labels: body.labels === undefined ? [] : parseLabels(body.labels),
     sortOrder: body.sortOrder === undefined ? undefined : parseSortOrder(body.sortOrder),
     threadId: parseThreadId(body.threadId),
+    runtime: parseRuntime(body.runtime) ?? "codex",
     assigneeTarget: parseAssigneeTarget(body.assigneeTarget),
     workflowId: parseWorkflowId(body.workflowId ?? null),
     developmentContext: parseDevelopmentContext(body.developmentContext ?? null),
@@ -615,11 +650,12 @@ function parseTaskPatch(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
     "version", "title", "description", "status", "priority", "labels", "threadId",
-    "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
+    "runtime", "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
   ]));
   const version = parseVersion(body.version);
   const threadId = parseThreadId(body.threadId);
   const assigneeTarget = parseAssigneeTarget(body.assigneeTarget);
+  const runtime = parseRuntime(body.runtime);
   const changes = {};
   if (body.title !== undefined) changes.title = stringField(body.title, "title", { required: true, maxLength: 240 });
   if (body.description !== undefined) changes.description = stringField(body.description, "description", { maxLength: 100_000 });
@@ -630,6 +666,7 @@ function parseTaskPatch(body) {
   if (body.developmentContext !== undefined) changes.developmentContext = parseDevelopmentContext(body.developmentContext);
   if (body.dueDate !== undefined) changes.dueDate = parseDueDate(body.dueDate);
   if (body.recurrence !== undefined) changes.recurrence = parseRecurrence(body.recurrence);
+  if (runtime !== undefined) changes.runtime = runtime;
   if (changes.recurrence && body.dueDate === null) {
     throw new ApiError(400, "INVALID_FIELD", "A recurring issue requires 'dueDate'");
   }
@@ -650,10 +687,26 @@ function parseMove(body) {
   };
 }
 
+function parseTaskTransfer(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version", "projectId", "threadId"]));
+  return {
+    version: parseVersion(body.version),
+    projectId: validateProjectId(body.projectId),
+    threadId: parseThreadId(body.threadId),
+  };
+}
+
 function parseArchive(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set(["version", "threadId"]));
   return { version: parseVersion(body.version), threadId: parseThreadId(body.threadId) };
+}
+
+function parseTaskThreadDelete(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version"]));
+  return { version: parseVersion(body.version) };
 }
 
 function parseIssueRelationType(value) {
@@ -685,7 +738,7 @@ function parseCommentPatch(body) {
   return {
     version: parseVersion(body.version),
     body: stringField(body.body, "body", { maxLength: 100_000 }),
-    threadId: parseThreadId(body.threadId),
+    threadId: body.threadId === null ? null : parseThreadId(body.threadId),
   };
 }
 
@@ -945,6 +998,124 @@ function parseAiTurn(body) {
     dangerFullAccessConfirmed: body.dangerFullAccessConfirmed,
     attachments,
   };
+}
+
+function parseKnowledgeContext(value) {
+  if (value === undefined || value === null) return null;
+  assertPlainObject(value);
+  assertAllowedKeys(value, new Set(["type", "branch"]));
+  if (value.type !== "branch" && value.type !== "worktree") {
+    throw new ApiError(400, "INVALID_FIELD", "Knowledge development context must be branch or worktree");
+  }
+  const branch = stringField(value.branch ?? null, "branch", { nullable: true, maxLength: 512 });
+  if (value.type === "branch" && !branch) {
+    throw new ApiError(400, "INVALID_FIELD", "Branch knowledge context requires a branch name");
+  }
+  return { type: value.type, branch };
+}
+
+function parseKnowledgeSourceSnapshot(value) {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(400, "INVALID_FIELD", "Knowledge source snapshot must be an object");
+  }
+  return value;
+}
+
+function knowledgeTextField(value, name, { nullable = false, maxLength } = {}) {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be a string${nullable ? " or null" : ""}`);
+  }
+  if (value.length > maxLength) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot exceed ${maxLength} characters`);
+  }
+  return value;
+}
+
+function parseKnowledgeChanges(value) {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new ApiError(400, "INVALID_FIELD", "Knowledge changes must contain at most 50 items");
+  }
+  return value.map((change, index) => {
+    assertPlainObject(change);
+    assertAllowedKeys(change, new Set([
+      "id", "proposalId", "targetPath", "operation", "baseDigest",
+      "beforeContent", "afterContent", "sortOrder",
+    ]));
+    const targetPath = knowledgeInternals.normalizeRelativePath(change.targetPath);
+    if (!knowledgeInternals.isAllowedTarget(targetPath)) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_PATH", `Knowledge target '${targetPath}' is not allowed`);
+    }
+    if (!["create", "update", "delete"].includes(change.operation)) {
+      throw new ApiError(400, "INVALID_FIELD", "Knowledge operation must be create, update or delete");
+    }
+    const beforeContent = knowledgeTextField(change.beforeContent ?? null, "beforeContent", {
+      nullable: true,
+      maxLength: 1024 * 1024,
+    });
+    const afterContent = knowledgeTextField(change.afterContent ?? null, "afterContent", {
+      nullable: true,
+      maxLength: 1024 * 1024,
+    });
+    if (change.operation !== "delete" && !afterContent) {
+      throw new ApiError(400, "INVALID_FIELD", "Create and update changes require afterContent");
+    }
+    return {
+      id: stringField(change.id ?? randomUUID(), "changeId", { required: true, maxLength: 128 }),
+      targetPath,
+      operation: change.operation,
+      baseDigest: stringField(change.baseDigest ?? null, "baseDigest", { nullable: true, maxLength: 256 }),
+      beforeContent,
+      afterContent: change.operation === "delete" ? null : afterContent,
+      sortOrder: Number.isSafeInteger(change.sortOrder) ? change.sortOrder : index,
+    };
+  });
+}
+
+function parseKnowledgeProposalCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "id", "title", "sourceType", "sourceSnapshot", "developmentContext",
+    "status", "summary", "error", "changes",
+  ]));
+  const sourceType = stringField(body.sourceType, "sourceType", { required: true, maxLength: 64 });
+  if (!["project_scan", "issue", "comments", "question", "stale_refresh", "project_review"].includes(sourceType)) {
+    throw new ApiError(400, "INVALID_FIELD", "Unknown knowledge proposal source type");
+  }
+  const status = stringField(body.status ?? "ready", "status", { required: true, maxLength: 32 });
+  if (!["generating", "ready", "failed"].includes(status)) {
+    throw new ApiError(400, "INVALID_FIELD", "New knowledge proposals must be generating, ready or failed");
+  }
+  return {
+    id: stringField(body.id ?? randomUUID(), "id", { required: true, maxLength: 128 }),
+    title: stringField(body.title, "title", { required: true, maxLength: 240 }),
+    sourceType,
+    sourceSnapshot: parseKnowledgeSourceSnapshot(body.sourceSnapshot),
+    developmentContext: parseKnowledgeContext(body.developmentContext),
+    status,
+    summary: stringField(body.summary ?? "", "summary", { maxLength: 20_000 }),
+    error: stringField(body.error ?? null, "error", { nullable: true, maxLength: 65_536 }),
+    changes: parseKnowledgeChanges(body.changes ?? []),
+  };
+}
+
+function parseKnowledgeProposalPatch(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version", "title", "summary", "status", "error", "changes"]));
+  const changes = {};
+  if (body.title !== undefined) changes.title = stringField(body.title, "title", { required: true, maxLength: 240 });
+  if (body.summary !== undefined) changes.summary = stringField(body.summary, "summary", { maxLength: 20_000 });
+  if (body.error !== undefined) changes.error = stringField(body.error, "error", { nullable: true, maxLength: 65_536 });
+  if (body.status !== undefined) {
+    const status = stringField(body.status, "status", { required: true, maxLength: 32 });
+    if (!["generating", "ready", "published", "rejected", "failed"].includes(status)) {
+      throw new ApiError(400, "INVALID_FIELD", "Unknown knowledge proposal status");
+    }
+    changes.status = status;
+  }
+  if (body.changes !== undefined) changes.changes = parseKnowledgeChanges(body.changes);
+  return { version: parseVersion(body.version), changes };
 }
 
 class EventHub {
@@ -1301,6 +1472,8 @@ export function resolveServerOptions(options = {}) {
     cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
+    claudeExecutable: options.claudeExecutable ?? process.env.CLAUDE_EXECUTABLE ?? "claude",
+    ompExecutable: options.ompExecutable ?? process.env.OMP_EXECUTABLE ?? "omp",
     codexExecutable: options.codexExecutable ?? process.env.CODEX_EXECUTABLE ?? "codex",
     codexStatePath: options.codexStatePath
       ?? path.join(codexHome, ".codex-global-state.json"),
@@ -1352,7 +1525,93 @@ export function createTaskboardServer(options = {}) {
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
   });
+  const knowledge = options.knowledgeService ?? new KnowledgeService({
+    codexExecutable: resolved.codexExecutable,
+    processEnv: options.processEnv ?? process.env,
+  });
+  const claudeLauncher = createClaudeLauncher({
+    dataDirectory: resolved.dataDirectory,
+    claudeExecutable: resolved.claudeExecutable,
+    skillSourceDir: path.join(PROJECT_ROOT, "skills", "manage-taskboard"),
+  });
+  // Ensure the manage-taskboard skill is discoverable by Claude Code. This only
+  // manages the ~/.claude/skills/manage-taskboard symlink (idempotent, never
+  // overwrites a foreign entry); it does not touch model, settings, keybindings,
+  // or any other Claude Code configuration.
+  claudeLauncher.ensureClaudeSkill();
+  const ompLauncher = createOmpLauncher({
+    dataDirectory: resolved.dataDirectory,
+    ompExecutable: resolved.ompExecutable,
+  });
   const aiEventResponses = new Set();
+  const knowledgeRuns = new Map();
+
+  function knowledgeRun(runId, token) {
+    const run = knowledgeRuns.get(runId);
+    if (!run || run.expiresAt <= Date.now()) {
+      knowledgeRuns.delete(runId);
+      throw new ApiError(404, "KNOWLEDGE_RUN_NOT_FOUND", "Knowledge analysis run was not found");
+    }
+    if (typeof token !== "string" || token !== run.token) {
+      throw new ApiError(403, "KNOWLEDGE_RUN_TOKEN_INVALID", "Knowledge analysis run token is invalid");
+    }
+    return run;
+  }
+
+  async function readDeviceProjectWorkspaces() {
+    const config = await cloudConfig.read();
+    const workspaces = { ...config.projectMappings };
+    const localProjects = database.listProjects();
+    const codexProjects = await readCodexProjectWorkspaces(resolved.codexStatePath);
+    const discovered = [
+      ...localProjects
+        .filter((project) => project.workspacePath)
+        .map((project) => [project.id, project.workspacePath]),
+      ...Object.entries(codexProjects),
+    ];
+    for (const [projectId, workspacePath] of discovered) {
+      if (workspaces[projectId]) continue;
+      await cloudConfig.setProjectWorkspace(projectId, workspacePath);
+      workspaces[projectId] = workspacePath;
+    }
+    return workspaces;
+  }
+
+  async function resolveKnowledgeWorkspace(projectId, requestedWorkspacePath) {
+    const config = await cloudConfig.read();
+    const deviceWorkspaces = await readDeviceProjectWorkspaces();
+    let project;
+    if (config.remoteUrl) {
+      project = { id: projectId, workspacePath: deviceWorkspaces[projectId] ?? null };
+    } else {
+      const dbProject = database.getProject(projectId);
+      // Local mode keeps a project's creation-time workspace_path in the database, but
+      // projects mapped later only carry a device-local project mapping. Fall back to that
+      // mapping so knowledge still resolves for projects created without --workspace-path.
+      project = dbProject
+        ? { ...dbProject, workspacePath: deviceWorkspaces[projectId] ?? dbProject.workspacePath ?? null }
+        : null;
+    }
+    if (!project) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    if (!project.workspacePath) {
+      throw new ApiError(409, "PROJECT_WORKSPACE_REQUIRED", "Map this project to a local workspace before using project knowledge");
+    }
+    const scan = await scanDevelopmentContexts(project.workspacePath);
+    const allowed = new Set([
+      path.resolve(project.workspacePath),
+      ...(scan.workspacePath ? [path.resolve(scan.workspacePath)] : []),
+      ...scan.contexts
+        .filter((context) => context.type === "worktree")
+        .map((context) => path.resolve(context.path)),
+    ]);
+    const selected = path.resolve(requestedWorkspacePath || scan.workspacePath || project.workspacePath);
+    if (!allowed.has(selected)) {
+      throw new ApiError(400, "INVALID_WORKSPACE_CONTEXT", "Knowledge workspace must match the project or one of its discovered worktrees");
+    }
+    return selected;
+  }
 
   const server = createServer(async (request, response) => {
     response.setHeader("x-content-type-options", "nosniff");
@@ -1430,6 +1689,110 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "PUT", "DELETE"]);
       }
 
+      const createKnowledgeRunRoute = pathname.match(
+        /^\/api\/local\/projects\/([^/]+)\/knowledge-runs$/,
+      );
+      if (createKnowledgeRunRoute) {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "Create project knowledge analysis run");
+        const projectId = validateProjectId(decodeRouteSegment(createKnowledgeRunRoute[1], "Project id"));
+        const body = await readJson(request, KNOWLEDGE_BODY_LIMIT, "Knowledge run request is too large");
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set([
+          "workspacePath", "sourceType", "sourceSnapshot", "developmentContext", "persist",
+        ]));
+        const workspacePath = await resolveKnowledgeWorkspace(
+          projectId,
+          stringField(body.workspacePath ?? null, "workspacePath", { nullable: true, maxLength: 4096 }),
+        );
+        const sourceType = stringField(body.sourceType, "sourceType", { required: true, maxLength: 64 });
+        const sourceSnapshot = parseKnowledgeSourceSnapshot(body.sourceSnapshot);
+        const developmentContext = parseKnowledgeContext(body.developmentContext);
+        const persist = body.persist === true;
+        const runId = randomUUID();
+        const token = `${randomUUID()}${randomUUID()}`;
+        const callbackUrl = `http://127.0.0.1:${request.socket.localPort}/api/local/knowledge-runs/${runId}/complete`;
+        const run = {
+          id: runId,
+          token,
+          projectId,
+          workspacePath,
+          sourceType,
+          sourceSnapshot,
+          developmentContext,
+          persist,
+          status: "waiting",
+          proposal: null,
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        };
+        knowledgeRuns.set(runId, run);
+        return sendJson(response, 201, {
+          run: {
+            id: runId,
+            token,
+            status: run.status,
+            instruction: knowledge.knowledgeRunInstruction({
+              sourceType,
+              sourceSnapshot,
+              workspacePath,
+              callbackUrl,
+              callbackToken: token,
+            }),
+          },
+        });
+      }
+
+      const knowledgeRunRoute = pathname.match(/^\/api\/local\/knowledge-runs\/([^/]+)(?:\/(complete))?$/);
+      if (knowledgeRunRoute) {
+        assertNoQuery(url.searchParams, "Project knowledge analysis run");
+        const runId = decodeRouteSegment(knowledgeRunRoute[1], "Knowledge run id");
+        const token = request.headers["x-taskboard-knowledge-run-token"];
+        const run = knowledgeRun(runId, Array.isArray(token) ? token[0] : token);
+        if (knowledgeRunRoute[2] === "complete") {
+          if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+          if (run.status === "completed") return sendJson(response, 200, { ok: true });
+          const body = await readJson(request, KNOWLEDGE_BODY_LIMIT, "Knowledge analysis result is too large");
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["analysis", "error"]));
+          if (body.error !== undefined) {
+            run.error = stringField(body.error, "error", { required: true, maxLength: 20_000 });
+            run.status = "failed";
+            return sendJson(response, 200, { ok: true });
+          }
+          assertPlainObject(body.analysis);
+          const proposal = await knowledge.prepareProposal(run.workspacePath, {
+            sourceType: run.sourceType,
+            sourceSnapshot: run.sourceSnapshot,
+            developmentContext: run.developmentContext,
+          }, body.analysis);
+          run.proposal = run.persist
+            ? database.createKnowledgeProposal({
+              projectId: run.projectId,
+              ...proposal,
+              id: run.id,
+              actor: CODEX_AGENT_ACTOR,
+            })
+            : { ...proposal, id: run.id };
+          run.status = "completed";
+          if (run.persist) {
+            events.emit("knowledge-proposal.created", {
+              projectId: run.projectId,
+              proposal: run.proposal,
+            });
+          }
+          return sendJson(response, 200, { ok: true });
+        }
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        return sendJson(response, 200, {
+          run: {
+            id: run.id,
+            status: run.status,
+            ...(run.proposal ? { proposal: run.proposal } : {}),
+            ...(run.error ? { error: run.error } : {}),
+          },
+        });
+      }
+
       const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
       if (projectMappingRoute) {
         if (request.method !== "PUT") return methodNotAllowed(response, ["PUT"]);
@@ -1461,7 +1824,18 @@ export function createTaskboardServer(options = {}) {
         }
         return sendJson(response, 200, {
           manageTaskboardSkillPath: resolved.skillPath,
-          capabilities: { localAiChat: isLoopbackAddress(request.socket.remoteAddress) },
+          projectKnowledgeSkillPath: path.join(
+            PROJECT_ROOT,
+            "skills",
+            "project-knowledge-builder",
+            "SKILL.md",
+          ),
+          claudeRuntime: claudeLauncher.supportedPlatform,
+          ompRuntime: ompLauncher.supportedPlatform,
+          capabilities: {
+            localAiChat: isLoopbackAddress(request.socket.remoteAddress),
+            localKnowledge: isLoopbackAddress(request.socket.remoteAddress),
+          },
           ...(capabilityCloudConfig?.remoteUrl
             ? {
               mode: "cloud",
@@ -1565,13 +1939,259 @@ export function createTaskboardServer(options = {}) {
         return sendJson(response, 200, { run });
       }
 
+      const localKnowledgeRoute = pathname.match(
+        /^\/api\/local\/projects\/([^/]+)\/knowledge(?:\/(pages|search|check|generate|ask|publish))?$/,
+      );
+      if (localKnowledgeRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(localKnowledgeRoute[1], "Project id"));
+        const action = localKnowledgeRoute[2] ?? "overview";
+        if (action === "overview") {
+          if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+          assertAllowedQuery(url.searchParams, new Set(["workspacePath"]), "GET project knowledge");
+          const workspacePath = await resolveKnowledgeWorkspace(
+            projectId,
+            stringField(url.searchParams.get("workspacePath") ?? null, "workspacePath", {
+              nullable: true,
+              maxLength: 4096,
+            }),
+          );
+          return sendJson(response, 200, await knowledge.overview(workspacePath));
+        }
+        if (action === "pages") {
+          if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+          assertAllowedQuery(url.searchParams, new Set(["workspacePath", "path"]), "GET project knowledge page");
+          const workspacePath = await resolveKnowledgeWorkspace(
+            projectId,
+            stringField(url.searchParams.get("workspacePath") ?? null, "workspacePath", {
+              nullable: true,
+              maxLength: 4096,
+            }),
+          );
+          const pagePath = stringField(url.searchParams.get("path") ?? "", "path", {
+            required: true,
+            maxLength: 4096,
+          });
+          return sendJson(response, 200, await knowledge.readPage(workspacePath, pagePath));
+        }
+        if (action === "search") {
+          if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+          assertAllowedQuery(url.searchParams, new Set(["workspacePath", "q"]), "GET project knowledge search");
+          const workspacePath = await resolveKnowledgeWorkspace(
+            projectId,
+            stringField(url.searchParams.get("workspacePath") ?? null, "workspacePath", {
+              nullable: true,
+              maxLength: 4096,
+            }),
+          );
+          const query = stringField(url.searchParams.get("q") ?? "", "q", { required: true, maxLength: 200 });
+          return sendJson(response, 200, { results: await knowledge.search(workspacePath, query) });
+        }
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(
+          request,
+          KNOWLEDGE_BODY_LIMIT,
+          "Knowledge requests cannot exceed 6 MiB",
+        );
+        assertPlainObject(body);
+        const requestedWorkspace = stringField(body.workspacePath ?? null, "workspacePath", {
+          nullable: true,
+          maxLength: 4096,
+        });
+        const workspacePath = await resolveKnowledgeWorkspace(projectId, requestedWorkspace);
+        if (action === "check") {
+          assertAllowedKeys(body, new Set(["workspacePath", "sourceVersions"]));
+          const sourceVersions = body.sourceVersions ?? {};
+          if (sourceVersions === null || typeof sourceVersions !== "object" || Array.isArray(sourceVersions)) {
+            throw new ApiError(400, "INVALID_FIELD", "sourceVersions must be an object");
+          }
+          return sendJson(response, 200, await knowledge.overview(workspacePath, sourceVersions));
+        }
+        if (action === "generate") {
+          assertAllowedKeys(body, new Set([
+            "workspacePath", "sourceType", "sourceSnapshot", "developmentContext",
+          ]));
+          const sourceType = stringField(body.sourceType, "sourceType", { required: true, maxLength: 64 });
+          const proposal = await knowledge.generateProposal(workspacePath, {
+            sourceType,
+            sourceSnapshot: parseKnowledgeSourceSnapshot(body.sourceSnapshot),
+            developmentContext: parseKnowledgeContext(body.developmentContext),
+          });
+          return sendJson(response, 200, { proposal });
+        }
+        if (action === "ask") {
+          assertAllowedKeys(body, new Set(["workspacePath", "question"]));
+          const question = knowledgeTextField(body.question, "question", { maxLength: 20_000 });
+          return sendJson(response, 200, await knowledge.ask(workspacePath, question));
+        }
+        if (action === "publish") {
+          assertAllowedKeys(body, new Set(["workspacePath", "proposal"]));
+          assertPlainObject(body.proposal);
+          assertAllowedKeys(body.proposal, new Set(["id", "version", "changes"]));
+          const receipt = await knowledge.publish(workspacePath, {
+            id: stringField(body.proposal.id, "proposalId", { required: true, maxLength: 128 }),
+            version: parseVersion(body.proposal.version),
+            changes: parseKnowledgeChanges(body.proposal.changes),
+          });
+          return sendJson(response, 200, { receipt });
+        }
+      }
+
+      if (pathname === "/api/local/claude/session") {
+        assertNoQuery(url.searchParams, "/api/local/claude/session");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["taskId", "workspacePath", "instruction", "requestId", "commentId"]));
+        const taskId = stringField(body.taskId, "taskId", { required: true, maxLength: 128 });
+        const workspacePath = stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 });
+        if (!path.isAbsolute(workspacePath) || workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute local path");
+        }
+        const home = os.homedir();
+        const resolvedWorkspace = path.resolve(workspacePath);
+        if (resolvedWorkspace !== home && !resolvedWorkspace.startsWith(`${home}/`)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be inside the user home directory");
+        }
+        const instruction = stringField(body.instruction, "instruction", { required: true, maxLength: 20_000 });
+        const requestId = stringField(body.requestId, "requestId", { required: true, maxLength: 64 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'requestId' must be a valid UUID (used as the Claude session id)");
+        }
+        if (!claudeLauncher.supportedPlatform) {
+          throw new ApiError(400, "UNSUPPORTED", "Claude runtime is only supported on macOS (Terminal.app).");
+        }
+        const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
+        try {
+          claudeLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt });
+        } catch (error) {
+          throw new ApiError(500, "CLAUDE_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch Claude session");
+        }
+        return sendJson(response, 201, { threadId: requestId, runtime: "claude" });
+      }
+
+      if (pathname === "/api/local/claude/resume") {
+        assertNoQuery(url.searchParams, "/api/local/claude/resume");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["threadId", "workspacePath", "followUp"]));
+        const threadId = stringField(body.threadId, "threadId", { required: true, maxLength: 128 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'threadId' must be a valid Claude session UUID");
+        }
+        const workspacePath = stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 });
+        if (!path.isAbsolute(workspacePath) || workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute local path");
+        }
+        const home = os.homedir();
+        const resolvedWorkspace = path.resolve(workspacePath);
+        if (resolvedWorkspace !== home && !resolvedWorkspace.startsWith(`${home}/`)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be inside the user home directory");
+        }
+        const followUp = body.followUp === undefined
+          ? undefined
+          : stringField(body.followUp, "followUp", { maxLength: 20_000 });
+        if (!claudeLauncher.supportedPlatform) {
+          throw new ApiError(400, "UNSUPPORTED", "Claude runtime is only supported on macOS (Terminal.app).");
+        }
+        try {
+          claudeLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp });
+        } catch (error) {
+          throw new ApiError(500, "CLAUDE_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to resume Claude session");
+        }
+        return sendJson(response, 200, { ok: true });
+      }
+
+      if (pathname === "/api/local/claude/status") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const sessionId = stringField(url.searchParams.get("sessionId") ?? "", "sessionId", { required: true, maxLength: 64 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'sessionId' must be a valid Claude session UUID");
+        }
+        return sendJson(response, 200, { running: claudeLauncher.isRunning(sessionId) });
+      }
+      if (pathname === "/api/local/omp/session") {
+        assertNoQuery(url.searchParams, "/api/local/omp/session");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["taskId", "workspacePath", "instruction", "requestId", "commentId"]));
+        const taskId = stringField(body.taskId, "taskId", { required: true, maxLength: 128 });
+        const workspacePath = stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 });
+        if (!path.isAbsolute(workspacePath) || workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute local path");
+        }
+        const home = os.homedir();
+        const resolvedWorkspace = path.resolve(workspacePath);
+        if (resolvedWorkspace !== home && !resolvedWorkspace.startsWith(`${home}/`)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be inside the user home directory");
+        }
+        const instruction = stringField(body.instruction, "instruction", { required: true, maxLength: 20_000 });
+        const requestId = stringField(body.requestId, "requestId", { required: true, maxLength: 64 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'requestId' must be a valid UUID (used as the OMP session id)");
+        }
+        if (!ompLauncher.supportedPlatform) {
+          throw new ApiError(400, "UNSUPPORTED", "OMP runtime is only supported on macOS (Terminal.app).");
+        }
+        const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
+        try {
+          ompLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt });
+        } catch (error) {
+          throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch OMP session");
+        }
+        return sendJson(response, 201, { threadId: requestId, runtime: "omp" });
+      }
+
+      if (pathname === "/api/local/omp/resume") {
+        assertNoQuery(url.searchParams, "/api/local/omp/resume");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["threadId", "workspacePath", "followUp"]));
+        const threadId = stringField(body.threadId, "threadId", { required: true, maxLength: 128 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'threadId' must be a valid OMP session UUID");
+        }
+        const workspacePath = stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 });
+        if (!path.isAbsolute(workspacePath) || workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute local path");
+        }
+        const home = os.homedir();
+        const resolvedWorkspace = path.resolve(workspacePath);
+        if (resolvedWorkspace !== home && !resolvedWorkspace.startsWith(`${home}/`)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be inside the user home directory");
+        }
+        const followUp = body.followUp === undefined
+          ? undefined
+          : stringField(body.followUp, "followUp", { maxLength: 20_000 });
+        if (!ompLauncher.supportedPlatform) {
+          throw new ApiError(400, "UNSUPPORTED", "OMP runtime is only supported on macOS (Terminal.app).");
+        }
+        try {
+          ompLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp });
+        } catch (error) {
+          throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to resume OMP session");
+        }
+        return sendJson(response, 200, { ok: true });
+      }
+
+      if (pathname === "/api/local/omp/status") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const sessionId = stringField(url.searchParams.get("sessionId") ?? "", "sessionId", { required: true, maxLength: 64 });
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+          throw new ApiError(400, "INVALID_FIELD", "'sessionId' must be a valid OMP session UUID");
+        }
+        return sendJson(response, 200, { running: ompLauncher.isRunning(sessionId) });
+      }
+
       if (pathname === "/api/device-workspaces") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
         if ([...url.searchParams.keys()].length > 0) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/device-workspaces does not accept query parameters");
         }
         return sendJson(response, 200, {
-          workspaces: await readCodexProjectWorkspaces(resolved.codexStatePath),
+          workspaces: await readDeviceProjectWorkspaces(),
         });
       }
 
@@ -1626,6 +2246,80 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 201, { project });
         }
         return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const projectKnowledgeSourcesRoute = pathname.match(
+        /^\/api\/projects\/([^/]+)\/knowledge-source-versions$/,
+      );
+      if (projectKnowledgeSourcesRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectKnowledgeSourcesRoute[1], "Project id"));
+        assertNoQuery(url.searchParams, "Project knowledge source versions");
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        return sendJson(response, 200, { versions: database.knowledgeSourceVersions(projectId) });
+      }
+
+      const projectKnowledgeProposalsRoute = pathname.match(
+        /^\/api\/projects\/([^/]+)\/knowledge-proposals$/,
+      );
+      if (projectKnowledgeProposalsRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectKnowledgeProposalsRoute[1], "Project id"));
+        if (request.method === "GET") {
+          assertAllowedQuery(url.searchParams, new Set(["status"]), "GET project knowledge proposals");
+          const status = stringField(url.searchParams.get("status") ?? null, "status", {
+            nullable: true,
+            maxLength: 32,
+          });
+          if (status && !["generating", "ready", "published", "rejected", "failed"].includes(status)) {
+            throw new ApiError(400, "INVALID_FIELD", "Unknown knowledge proposal status");
+          }
+          return sendJson(response, 200, {
+            proposals: database.listKnowledgeProposals(projectId, status),
+          });
+        }
+        if (request.method === "POST") {
+          assertNoQuery(url.searchParams, "POST project knowledge proposal");
+          const proposal = database.createKnowledgeProposal({
+            projectId,
+            ...parseKnowledgeProposalCreate(await readJson(
+              request,
+              KNOWLEDGE_BODY_LIMIT,
+              "Knowledge proposals cannot exceed 6 MiB",
+            )),
+            actor: actorFromRequest(request),
+          });
+          events.emit("knowledge-proposal.created", { projectId, proposal });
+          return sendJson(response, 201, { proposal });
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const knowledgeProposalRoute = pathname.match(/^\/api\/knowledge-proposals\/([^/]+)$/);
+      if (knowledgeProposalRoute) {
+        const proposalId = decodeRouteSegment(knowledgeProposalRoute[1], "Knowledge proposal id");
+        assertNoQuery(url.searchParams, "Knowledge proposal routes");
+        if (request.method === "GET") {
+          const proposal = database.getKnowledgeProposal(proposalId);
+          if (!proposal) {
+            throw new ApiError(404, "KNOWLEDGE_PROPOSAL_NOT_FOUND", `Knowledge proposal '${proposalId}' does not exist`);
+          }
+          return sendJson(response, 200, { proposal });
+        }
+        if (request.method === "PATCH") {
+          const parsed = parseKnowledgeProposalPatch(await readJson(
+            request,
+            KNOWLEDGE_BODY_LIMIT,
+            "Knowledge proposals cannot exceed 6 MiB",
+          ));
+          const proposal = database.updateKnowledgeProposal(
+            proposalId,
+            parsed.version,
+            parsed.changes,
+            actorFromRequest(request),
+          );
+          events.emit("knowledge-proposal.updated", { projectId: proposal.projectId, proposal });
+          return sendJson(response, 200, { proposal });
+        }
+        return methodNotAllowed(response, ["GET", "PATCH"]);
       }
 
       const workflowWorkspaceRoute = pathname.match(/^\/api\/projects\/([^/]+)\/workflow-workspace$/);
@@ -1711,6 +2405,14 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "POST") {
           const actor = actorFromRequest(request);
           const { assigneeTarget, ...input } = parseTaskCreate(await readJson(request));
+          // An issue created by a runtime agent inherits that runtime, so the
+          // taskboard routes its linked session to the right launcher.
+          if (input.runtime === "codex" && actor.id === "claude-agent") {
+            input.runtime = "claude";
+          }
+          if (input.runtime === "codex" && actor.id === "omp-agent") {
+            input.runtime = "omp";
+          }
           const task = database.createTask({
             ...input,
             actor,
@@ -1891,6 +2593,32 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "POST"]);
       }
 
+      const taskThreadRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/threads\/([^/]+)$/);
+      if (taskThreadRoute) {
+        let taskId;
+        let threadId;
+        try {
+          taskId = decodeURIComponent(taskThreadRoute[1]);
+          threadId = decodeURIComponent(taskThreadRoute[2]);
+        } catch {
+          throw new ApiError(400, "INVALID_PATH", "Task or thread id contains invalid encoding");
+        }
+        if (taskId.length === 0 || taskId.length > 128) {
+          throw new ApiError(400, "INVALID_PATH", "Task id is invalid");
+        }
+        if (threadId.length === 0 || threadId.length > 256) {
+          throw new ApiError(400, "INVALID_PATH", "Thread id is invalid");
+        }
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Task thread routes do not accept query parameters");
+        }
+        if (request.method !== "DELETE") return methodNotAllowed(response, ["DELETE"]);
+        const { version } = parseTaskThreadDelete(await readJson(request));
+        const task = database.unlinkTaskThread(taskId, version, threadId);
+        events.emit("task.updated", { task });
+        return sendJson(response, 200, { task });
+      }
+
       const taskAttachmentsRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/attachments$/);
       if (taskAttachmentsRoute) {
         let taskId;
@@ -1993,7 +2721,7 @@ export function createTaskboardServer(options = {}) {
         return sendEmpty(response, 204);
       }
 
-      const taskRoute = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(archive|restore|move))?$/);
+      const taskRoute = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(archive|restore|move|transfer))?$/);
       if (taskRoute) {
         let id;
         try {
@@ -2027,6 +2755,17 @@ export function createTaskboardServer(options = {}) {
           const task = database.moveTask(id, move.version, move.status, move.sortOrder, move.threadId);
           events.emit("task.moved", { task });
           return sendJson(response, 200, { task });
+        }
+        if (action === "transfer" && request.method === "POST") {
+          const transfer = parseTaskTransfer(await readJson(request));
+          const result = database.transferTask(
+            id,
+            transfer.version,
+            transfer.projectId,
+            transfer.threadId,
+          );
+          events.emit("task.transferred", result);
+          return sendJson(response, 200, result);
         }
         if (action === "archive" && request.method === "POST") {
           const { version, threadId } = parseArchive(await readJson(request));

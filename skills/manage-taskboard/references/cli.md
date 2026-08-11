@@ -84,6 +84,7 @@ taskctl issue update ID \
   [--json]
 
 taskctl issue move ID --status STATUS [--thread-id ID] [--if-version N] [--json]
+taskctl issue transfer ID --project PROJECT_ID [--thread-id ID] [--if-version N] [--json]
 taskctl issue archive ID [--thread-id ID] [--if-version N] [--json]
 taskctl issue restore ID [--thread-id ID] [--if-version N] [--json]
 ```
@@ -91,6 +92,8 @@ taskctl issue restore ID [--thread-id ID] [--if-version N] [--json]
 Use `issue move` to set `in_progress` before implementation and `in_review` after implementation and self-verification. Codex must not move work directly from `in_progress` to `done`; use `done` only after the user explicitly confirms acceptance or explicitly asks to mark the issue complete. Use `blocked` when work cannot continue, `canceled` when it will not continue, and `archived` for retained work that should leave the active completion set. On a version conflict, fetch the issue again and reconcile before retrying.
 
 Use either `--git-branch` or `--worktree-path`/`--worktree-branch`; an issue has only one development context. Issue JSON stores it as `developmentContext`, either `{ "type": "branch", "branch": "..." }` or `{ "type": "worktree", "path": "...", "branch": "..." }`. `threadId` is the current Codex conversation that most recently created or changed the issue itself, while `threadIds` contains every conversation associated with the issue, with the current conversation first. Recurrence requires a due date.
+
+`issue transfer` keeps the issue's stable ID and content, assigns the next identifier from the target project, and preserves comments, attachments, linked conversations, status, assignee, labels, workflow, development context, and recurrence. Because issue relations cannot cross projects, existing parent, sub-issue, blocking, and related relations are detached atomically and returned as `detachedRelations` in the response.
 
 ## Issue relations
 

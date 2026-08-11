@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目知识库构建"
+  short_description: "只读分析代码、文档与议题评论，生成可审核的项目知识提案"
+  default_prompt: "Use $project-knowledge-builder to initialize this project knowledge base as a pending proposal."

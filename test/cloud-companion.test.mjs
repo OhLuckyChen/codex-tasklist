@@ -520,6 +520,13 @@ test("configured server proxies business APIs without touching local rows and ad
       realtime: { transport: "poll", intervalMs: 2000 },
       localCapabilities: { available: true },
       manageTaskboardSkillPath: app.options.skillPath,
+      projectKnowledgeSkillPath: path.resolve(
+        import.meta.dirname,
+        "../skills/project-knowledge-builder/SKILL.md",
+      ),
+      claudeRuntime: true,
+      ompRuntime: true,
+      capabilities: { localAiChat: true, localKnowledge: true },
     });
     const session = await fetch(`${baseUrl}/api/local/cloud-session`)
       .then((response) => response.json());

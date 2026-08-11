@@ -2,7 +2,7 @@ const HOST_REQUEST_ERROR = "自动认领配置暂时无法应用，请刷新后�
 const AUTOMATION_SCHEMA_DIAGNOSTIC = "AUTOMATION_SCHEMA_MISMATCH";
 
 function parseHostRequest(payload, parseAutomationRequest) {
-  if (typeof payload !== "string" || payload.length > 16_384) {
+  if (typeof payload !== "string" || payload.length > 262_144) {
     return { id: null, request: null, error: HOST_REQUEST_ERROR };
   }
 
@@ -42,6 +42,15 @@ function parseHostRequest(payload, parseAutomationRequest) {
         };
   }
   if (
+    request.action === "prefill-plain-composer"
+    && typeof request.instruction === "string"
+    && request.instruction.length > 0
+    && request.instruction.length <= 250_000
+    && (request.submit === undefined || typeof request.submit === "boolean")
+  ) {
+    return { id, request, error: null };
+  }
+  if (
     request.action === "prefill-task-composer"
     && typeof request.instruction === "string"
     && request.instruction.length > 0
@@ -54,6 +63,7 @@ function parseHostRequest(payload, parseAutomationRequest) {
     && typeof request.skillPath === "string"
     && request.skillPath.length > 0
     && request.skillPath.length <= 1_024
+    && (request.submit === undefined || typeof request.submit === "boolean")
   ) {
     return { id, request, error: null };
   }
@@ -121,6 +131,54 @@ export async function reconcileInjectionRuntime({
   const shouldRemainOpen = currentStatus.pageVisible === true;
   if (replaced && shouldRemainOpen) await reopen();
   return { replaced, scriptIdentifier, shouldRemainOpen };
+}
+
+export function classifyHeartbeatFailure({
+  previousFailures,
+  connectionClosed,
+  threshold,
+}) {
+  const failures = previousFailures + 1;
+  return {
+    failures,
+    shouldReconnect: connectionClosed || failures >= threshold,
+  };
+}
+
+export function rendererBootstrapReason({
+  injectionVersion,
+  frameTree,
+  expectedFrameUrl,
+}) {
+  if (!injectionVersion) return "missing-injection";
+  const pending = frameTree ? [frameTree] : [];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    const frame = current?.frame;
+    if (
+      frame?.url === "chrome-error://chromewebdata/"
+      && typeof frame.unreachableUrl === "string"
+      && frame.unreachableUrl.startsWith(expectedFrameUrl)
+    ) {
+      return "taskboard-frame-unreachable";
+    }
+    pending.push(...(current?.childFrames || []));
+  }
+  return null;
+}
+
+export function frameUrlMatches(actualUrl, expectedUrl) {
+  try {
+    const actual = new URL(actualUrl);
+    const expected = new URL(expectedUrl);
+    if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) return false;
+    for (const [key, value] of expected.searchParams) {
+      if (!actual.searchParams.getAll(key).includes(value)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function findResidentInjectorPids({

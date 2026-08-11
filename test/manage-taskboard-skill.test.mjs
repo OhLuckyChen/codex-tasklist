@@ -12,6 +12,8 @@ test("the taskboard skill coordinates safe issue execution and review handoff", 
   assert.match(skillSource, /completed work.*returned|returned.*completed work/i);
   assert.match(skillSource, /claim.*`todo`.*`in_progress`.*`--if-version`/is);
   assert.match(skillSource, /version conflict.*skip the issue.*do not implement/is);
+  assert.match(skillSource, /confirmed as `in_progress`[\s\S]*`set_thread_title`[\s\S]*<issue identifier> · <issue title>/i);
+  assert.match(skillSource, /renaming as best-effort and non-blocking/i);
 
   assert.match(
     skillSource,

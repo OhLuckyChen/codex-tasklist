@@ -10,10 +10,22 @@ import type {
   Comment,
   DevelopmentScan,
   IssueRelationType,
+  GeneratedKnowledgeProposal,
+  KnowledgeAnswer,
+  KnowledgeDevelopmentContext,
+  KnowledgeOverview,
+  KnowledgePage,
+  KnowledgeProposal,
+  KnowledgeProposalChange,
+  KnowledgeProposalStatus,
+  KnowledgeSearchResult,
+  KnowledgeSourceType,
   Project,
   Task,
   TaskboardMetadata,
   TaskDraft,
+  TaskProjectTransferResult,
+  TaskRuntime,
   TaskStatus,
   WorkflowCapabilities,
   WorkflowWorkspaceRecord,
@@ -78,7 +90,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       },
     });
   }
-  const body = (await response.json().catch(() => ({}))) as T & ApiErrorBody;
+  let body: T & ApiErrorBody;
+  try {
+    body = await response.json() as T & ApiErrorBody;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    body = {} as T & ApiErrorBody;
+  }
 
   if (!response.ok) throw new ApiError(response.status, body);
   return body;
@@ -223,6 +241,13 @@ export async function listDeviceWorkspaces(signal?: AbortSignal): Promise<Record
   }
 }
 
+export async function setDeviceWorkspace(projectId: string, workspacePath: string): Promise<void> {
+  await request(`/api/local/project-mappings/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ workspacePath }),
+  });
+}
+
 export async function listWorkflowCapabilities(
   workspacePath?: string,
   signal?: AbortSignal,
@@ -289,8 +314,244 @@ export async function listDevelopmentContexts(
   );
 }
 
-export async function listTasks(projectId: string, signal?: AbortSignal): Promise<Task[]> {
-  const params = new URLSearchParams({ projectId, archived: "all" });
+function knowledgeWorkspaceQuery(workspacePath?: string): URLSearchParams {
+  const query = new URLSearchParams();
+  if (workspacePath) query.set("workspacePath", workspacePath);
+  return query;
+}
+
+export async function getKnowledgeOverview(
+  projectId: string,
+  workspacePath?: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeOverview> {
+  const query = knowledgeWorkspaceQuery(workspacePath);
+  const suffix = query.size > 0 ? `?${query}` : "";
+  return request<KnowledgeOverview>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge${suffix}`,
+    { signal },
+  );
+}
+
+export async function getKnowledgePage(
+  projectId: string,
+  pagePath: string,
+  workspacePath?: string,
+  signal?: AbortSignal,
+): Promise<KnowledgePage> {
+  const query = knowledgeWorkspaceQuery(workspacePath);
+  query.set("path", pagePath);
+  return request<KnowledgePage>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge/pages?${query}`,
+    { signal },
+  );
+}
+
+export async function searchKnowledge(
+  projectId: string,
+  value: string,
+  workspacePath?: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeSearchResult[]> {
+  const query = knowledgeWorkspaceQuery(workspacePath);
+  query.set("q", value);
+  const data = await request<{ results: KnowledgeSearchResult[] }>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge/search?${query}`,
+    { signal },
+  );
+  return data.results;
+}
+
+export async function checkKnowledge(
+  projectId: string,
+  workspacePath?: string,
+  sourceVersions?: Record<string, string | number>,
+): Promise<KnowledgeOverview> {
+  return request<KnowledgeOverview>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge/check`,
+    {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, sourceVersions: sourceVersions ?? {} }),
+    },
+  );
+}
+
+export async function generateKnowledgeProposal(
+  projectId: string,
+  input: {
+    workspacePath?: string;
+    sourceType: KnowledgeSourceType;
+    sourceSnapshot?: Record<string, unknown>;
+    developmentContext?: KnowledgeDevelopmentContext | null;
+  },
+): Promise<GeneratedKnowledgeProposal> {
+  const data = await request<{ proposal: GeneratedKnowledgeProposal }>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge/generate`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return data.proposal;
+}
+
+export interface KnowledgeRunHandle {
+  id: string;
+  token: string;
+  status: "waiting" | "completed" | "failed";
+  instruction: string;
+}
+
+export async function createKnowledgeRun(
+  projectId: string,
+  input: {
+    workspacePath?: string;
+    sourceType: KnowledgeSourceType;
+    sourceSnapshot?: Record<string, unknown>;
+    developmentContext?: KnowledgeDevelopmentContext | null;
+  },
+): Promise<KnowledgeRunHandle> {
+  const data = await request<{ run: KnowledgeRunHandle }>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge-runs`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return data.run;
+}
+
+export async function getKnowledgeRun(
+  run: Pick<KnowledgeRunHandle, "id" | "token">,
+): Promise<{
+  status: "waiting" | "completed" | "failed";
+  proposal?: GeneratedKnowledgeProposal;
+  error?: string;
+}> {
+  const data = await request<{
+    run: {
+      status: "waiting" | "completed" | "failed";
+      proposal?: GeneratedKnowledgeProposal;
+      error?: string;
+    };
+  }>(`/api/local/knowledge-runs/${encodeURIComponent(run.id)}`, {
+    headers: { "X-Taskboard-Knowledge-Run-Token": run.token },
+  });
+  return data.run;
+}
+
+export async function askProjectKnowledge(
+  projectId: string,
+  question: string,
+  workspacePath?: string,
+): Promise<KnowledgeAnswer> {
+  return request<KnowledgeAnswer>(
+    `/api/local/projects/${encodeURIComponent(projectId)}/knowledge/ask`,
+    {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, question }),
+    },
+  );
+}
+
+export async function listKnowledgeProposals(
+  projectId: string,
+  status?: KnowledgeProposalStatus,
+  signal?: AbortSignal,
+): Promise<KnowledgeProposal[]> {
+  const query = new URLSearchParams();
+  if (status) query.set("status", status);
+  const suffix = query.size > 0 ? `?${query}` : "";
+  const data = await request<{ proposals: KnowledgeProposal[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/knowledge-proposals${suffix}`,
+    { signal },
+  );
+  return data.proposals;
+}
+
+export async function getKnowledgeSourceVersions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<Record<string, string | number>> {
+  const data = await request<{ versions: Record<string, string | number> }>(
+    `/api/projects/${encodeURIComponent(projectId)}/knowledge-source-versions`,
+    { signal },
+  );
+  return data.versions;
+}
+
+export async function createKnowledgeProposal(
+  projectId: string,
+  proposal: GeneratedKnowledgeProposal & {
+    id?: string;
+    status?: "generating" | "ready" | "failed";
+    error?: string | null;
+  },
+): Promise<KnowledgeProposal> {
+  const data = await request<{ proposal: KnowledgeProposal }>(
+    `/api/projects/${encodeURIComponent(projectId)}/knowledge-proposals`,
+    {
+      method: "POST",
+      body: JSON.stringify({ ...proposal, status: proposal.status ?? "ready" }),
+    },
+  );
+  return data.proposal;
+}
+
+export async function getKnowledgeProposal(
+  proposalId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeProposal> {
+  const data = await request<{ proposal: KnowledgeProposal }>(
+    `/api/knowledge-proposals/${encodeURIComponent(proposalId)}`,
+    { signal },
+  );
+  return data.proposal;
+}
+
+export async function updateKnowledgeProposal(
+  proposal: KnowledgeProposal,
+  changes: {
+    title?: string;
+    summary?: string;
+    status?: KnowledgeProposalStatus;
+    error?: string | null;
+    changes?: KnowledgeProposalChange[];
+  },
+): Promise<KnowledgeProposal> {
+  const data = await request<{ proposal: KnowledgeProposal }>(
+    `/api/knowledge-proposals/${encodeURIComponent(proposal.id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ version: proposal.version, ...changes }),
+    },
+  );
+  return data.proposal;
+}
+
+export async function publishKnowledgeProposal(
+  projectId: string,
+  proposal: KnowledgeProposal,
+  workspacePath?: string,
+): Promise<{
+  publishedAt: string;
+  changes: Array<{ targetPath: string; operation: string; digest: string | null }>;
+}> {
+  const data = await request<{
+    receipt: {
+      publishedAt: string;
+      changes: Array<{ targetPath: string; operation: string; digest: string | null }>;
+    };
+  }>(`/api/local/projects/${encodeURIComponent(projectId)}/knowledge/publish`, {
+    method: "POST",
+    body: JSON.stringify({
+      workspacePath,
+      proposal: { id: proposal.id, version: proposal.version, changes: proposal.changes },
+    }),
+  });
+  return data.receipt;
+}
+
+export async function listTasks(projectId?: string, signal?: AbortSignal): Promise<Task[]> {
+  const params = new URLSearchParams({ archived: "all" });
+  if (projectId) params.set("projectId", projectId);
   const data = await request<{ tasks: Task[] }>(`/api/tasks?${params}`, { signal });
   return data.tasks;
 }
@@ -311,18 +572,88 @@ export async function updateTask(task: Task, draft: TaskDraft, threadId?: string
   return data.task;
 }
 
-export async function linkTaskThread(task: Task, threadId: string): Promise<Task> {
+export async function linkTaskThread(task: Task, threadId: string, runtime?: TaskRuntime): Promise<Task> {
   const data = await request<{ task: Task }>(`/api/tasks/${encodeURIComponent(task.id)}`, {
     method: "PATCH",
-    body: JSON.stringify({ version: task.version, threadId }),
+    body: JSON.stringify({ version: task.version, threadId, ...(runtime ? { runtime } : {}) }),
   });
   return data.task;
+}
+
+export async function unlinkTaskThread(task: Task, threadId: string): Promise<Task> {
+  const data = await request<{ task: Task }>(
+    `/api/tasks/${encodeURIComponent(task.id)}/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "DELETE",
+      body: JSON.stringify({ version: task.version }),
+    },
+  );
+  return data.task;
+}
+
+export async function createClaudeSession(input: {
+  taskId: string;
+  workspacePath: string;
+  instruction: string;
+  requestId: string;
+  commentId?: string;
+}): Promise<{ threadId: string; runtime: "claude" }> {
+  return request<{ threadId: string; runtime: "claude" }>("/api/local/claude/session", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function resumeClaudeSession(input: {
+  threadId: string;
+  workspacePath: string;
+  followUp?: string;
+}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/api/local/claude/resume", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getClaudeSessionStatus(sessionId: string): Promise<{ running: boolean }> {
+  return request<{ running: boolean }>(
+    `/api/local/claude/status?sessionId=${encodeURIComponent(sessionId)}`,
+  );
+}
+export async function createOmpSession(input: {
+  taskId: string;
+  workspacePath: string;
+  instruction: string;
+  requestId: string;
+  commentId?: string;
+}): Promise<{ threadId: string; runtime: "omp" }> {
+  return request<{ threadId: string; runtime: "omp" }>("/api/local/omp/session", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function resumeOmpSession(input: {
+  threadId: string;
+  workspacePath: string;
+  followUp?: string;
+}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/api/local/omp/resume", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getOmpSessionStatus(sessionId: string): Promise<{ running: boolean }> {
+  return request<{ running: boolean }>(
+    `/api/local/omp/status?sessionId=${encodeURIComponent(sessionId)}`,
+  );
 }
 
 export async function moveTask(
   task: Task,
   status: TaskStatus,
-  sortOrder: number,
+  sortOrder?: number,
   threadId?: string,
 ): Promise<Task> {
   const data = await request<{ task: Task }>(
@@ -333,6 +664,24 @@ export async function moveTask(
     },
   );
   return data.task;
+}
+
+export async function transferTaskProject(
+  task: Task,
+  projectId: string,
+  threadId?: string,
+): Promise<TaskProjectTransferResult> {
+  return request<TaskProjectTransferResult>(
+    `/api/tasks/${encodeURIComponent(task.id)}/transfer`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        version: task.version,
+        projectId,
+        ...(threadId ? { threadId } : {}),
+      }),
+    },
+  );
 }
 
 export async function archiveTask(task: Task, threadId?: string): Promise<Task> {
@@ -414,12 +763,16 @@ export async function createComment(taskId: string, body: string, threadId?: str
   };
 }
 
-export async function updateComment(comment: Comment, body: string, threadId?: string): Promise<Comment> {
+export async function updateComment(comment: Comment, body: string, threadId?: string | null): Promise<Comment> {
   const data = await request<{ comment: Comment }>(
     `/api/comments/${encodeURIComponent(comment.id)}`,
     {
       method: "PATCH",
-      body: JSON.stringify({ version: comment.version, body, ...(threadId ? { threadId } : {}) }),
+      body: JSON.stringify({
+        version: comment.version,
+        body,
+        ...(threadId !== undefined ? { threadId } : {}),
+      }),
     },
   );
   return {

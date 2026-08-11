@@ -27,20 +27,29 @@ interface BoardColumnProps {
   status: TaskStatus;
   statusIndex: number;
   tasks: Task[];
+  projectNames?: Record<string, string>;
   isDropTarget: boolean;
+  isColumnDragging: boolean;
+  columnDropPosition: "before" | "after" | null;
   draggedTaskId: string | null;
   draggedTaskHeight: number;
   movingTaskId: string | null;
   settlingTaskId: string | null;
   contextMenuTaskId: string | null;
+  favoriteTaskIds: Set<string>;
   onCreate: (status: TaskStatus) => void;
   onEdit: (task: Task) => void;
+  onToggleFavorite: (task: Task) => void;
   onContextMenu: (task: Task, position: { x: number; y: number }) => void;
   onMove: (task: Task, status: TaskStatus) => void;
   onDragStart: (task: Task, height: number) => void;
   onDragEnd: () => void;
   onDragEnter: (status: TaskStatus) => void;
   onDrop: (status: TaskStatus, taskId: string, beforeTaskId: string | null) => void;
+  onColumnDragStart: (status: TaskStatus) => void;
+  onColumnDragOver: (status: TaskStatus, position: "before" | "after") => void;
+  onColumnDrop: (source: TaskStatus, target: TaskStatus, position: "before" | "after") => void;
+  onColumnDragEnd: () => void;
   onOpenThread: (threadId: string) => void;
   onHide: (status: TaskStatus) => void;
 }
@@ -49,20 +58,29 @@ export function BoardColumn({
   status,
   statusIndex,
   tasks,
+  projectNames,
   isDropTarget,
+  isColumnDragging,
+  columnDropPosition,
   draggedTaskId,
   draggedTaskHeight,
   movingTaskId,
   settlingTaskId,
   contextMenuTaskId,
+  favoriteTaskIds,
   onCreate,
   onEdit,
+  onToggleFavorite,
   onContextMenu,
   onMove,
   onDragStart,
   onDragEnd,
   onDragEnter,
   onDrop,
+  onColumnDragStart,
+  onColumnDragOver,
+  onColumnDrop,
+  onColumnDragEnd,
   onOpenThread,
   onHide,
 }: BoardColumnProps) {
@@ -91,6 +109,16 @@ export function BoardColumn({
 
   function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
+    const sourceStatus = event.dataTransfer.getData("application/x-taskboard-column") as TaskStatus;
+    if (sourceStatus) {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      onColumnDrop(
+        sourceStatus,
+        status,
+        event.clientX < bounds.left + bounds.width / 2 ? "before" : "after",
+      );
+      return;
+    }
     const taskId =
       event.dataTransfer.getData("application/x-taskboard-task") ||
       event.dataTransfer.getData("text/plain");
@@ -111,12 +139,21 @@ export function BoardColumn({
 
   return (
     <section
-      className={`board-column status-${status}${isDropTarget ? " is-drop-target" : ""}`}
+      className={`board-column status-${status}${isDropTarget ? " is-drop-target" : ""}${isColumnDragging ? " is-column-dragging" : ""}${columnDropPosition ? ` is-column-drop-${columnDropPosition}` : ""}`}
+      data-column-status={status}
       aria-labelledby={`column-${status}`}
-      onDragEnter={() => onDragEnter(status)}
+      onDragEnter={(event) => {
+        if (event.dataTransfer.types.includes("application/x-taskboard-column")) return;
+        onDragEnter(status);
+      }}
       onDragOver={(event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
+        if (event.dataTransfer.types.includes("application/x-taskboard-column")) {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          onColumnDragOver(status, event.clientX < bounds.left + bounds.width / 2 ? "before" : "after");
+          return;
+        }
         onDragEnter(status);
         setDropBeforeTaskId(findDropBefore(event.currentTarget, event.clientY));
       }}
@@ -127,7 +164,22 @@ export function BoardColumn({
       }}
       onDrop={handleDrop}
     >
-      <header className="column-header">
+      <header
+        className="column-header"
+        draggable
+        title={`拖动调整${details.label}列的位置`}
+        onDragStart={(event) => {
+          if (event.target instanceof Element && event.target.closest("button")) {
+            event.preventDefault();
+            return;
+          }
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("application/x-taskboard-column", status);
+          event.dataTransfer.setData("text/plain", status);
+          onColumnDragStart(status);
+        }}
+        onDragEnd={onColumnDragEnd}
+      >
         <div className="column-heading">
           <span className={`status-icon status-icon-${details.tone}`}>
             <StatusIcon status={status} />
@@ -161,13 +213,16 @@ export function BoardColumn({
             <TaskCard
               key={task.id}
               task={task}
+              projectName={projectNames?.[task.projectId]}
               statusIndex={statusIndex}
               isDragging={draggedTaskId === task.id}
               dragShift={dragShift}
               isMoving={movingTaskId === task.id}
               isSettling={settlingTaskId === task.id}
               isContextMenuOpen={contextMenuTaskId === task.id}
+              isFavorite={favoriteTaskIds.has(task.id)}
               onEdit={onEdit}
+              onToggleFavorite={onToggleFavorite}
               onContextMenu={onContextMenu}
               onMove={onMove}
               onDragStart={onDragStart}

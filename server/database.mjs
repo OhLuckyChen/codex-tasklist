@@ -34,6 +34,7 @@ function taskFromRow(row) {
     labels: JSON.parse(row.labels),
     sortOrder: row.sort_order,
     threadId: row.thread_id,
+    runtime: row.runtime ?? "codex",
     creatorType: row.creator_type,
     creatorId: row.creator_id,
     creatorName: row.creator_name,
@@ -171,6 +172,54 @@ function aiChatEventFromRow(row) {
   };
 }
 
+function knowledgeChangeFromRow(row) {
+  return {
+    id: row.id,
+    proposalId: row.proposal_id,
+    targetPath: row.target_path,
+    operation: row.operation,
+    baseDigest: row.base_digest,
+    beforeContent: row.before_content,
+    afterContent: row.after_content,
+    sortOrder: row.sort_order,
+  };
+}
+
+function knowledgeProposalFromRow(row, changes = []) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    sourceType: row.source_type,
+    sourceSnapshot: JSON.parse(row.source_snapshot),
+    developmentContext: row.development_context_type === "worktree"
+      ? { type: "worktree", branch: row.development_branch }
+      : row.development_context_type === "branch"
+        ? { type: "branch", branch: row.development_branch }
+        : null,
+    status: row.status,
+    summary: row.summary,
+    error: row.error,
+    creator: {
+      type: row.creator_type,
+      id: row.creator_id,
+      name: row.creator_name,
+    },
+    publisher: row.publisher_id
+      ? {
+          type: row.publisher_type,
+          id: row.publisher_id,
+          name: row.publisher_name,
+        }
+      : null,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    publishedAt: row.published_at,
+    changes,
+  };
+}
+
 function projectPrefix(projectId) {
   const prefix = projectId.toUpperCase().replace(/[^A-Z0-9]+/g, "");
   return (prefix || "TASK").slice(0, 12);
@@ -209,6 +258,7 @@ export class TaskboardDatabase {
         labels TEXT NOT NULL DEFAULT '[]',
         sort_order REAL NOT NULL,
         thread_id TEXT,
+        runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
         creator_type TEXT NOT NULL DEFAULT 'user',
         creator_id TEXT NOT NULL DEFAULT 'local-user',
         creator_name TEXT NOT NULL DEFAULT '本地用户',
@@ -332,6 +382,53 @@ export class TaskboardDatabase {
       CREATE INDEX IF NOT EXISTS ai_chat_events_thread_created
         ON ai_chat_events(thread_id, created_at, id);
 
+      CREATE TABLE IF NOT EXISTS knowledge_proposals (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        source_type TEXT NOT NULL CHECK (source_type IN (
+          'project_scan', 'issue', 'comments', 'question', 'stale_refresh', 'project_review'
+        )),
+        source_snapshot TEXT NOT NULL DEFAULT '{}',
+        development_context_type TEXT CHECK (
+          development_context_type IS NULL OR development_context_type IN ('branch', 'worktree')
+        ),
+        development_branch TEXT,
+        status TEXT NOT NULL CHECK (status IN (
+          'generating', 'ready', 'published', 'rejected', 'failed'
+        )),
+        summary TEXT NOT NULL DEFAULT '',
+        error TEXT,
+        creator_type TEXT NOT NULL,
+        creator_id TEXT NOT NULL,
+        creator_name TEXT NOT NULL,
+        publisher_type TEXT,
+        publisher_id TEXT,
+        publisher_name TEXT,
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        published_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS knowledge_proposals_project_status
+        ON knowledge_proposals(project_id, status, updated_at DESC, id);
+
+      CREATE TABLE IF NOT EXISTS knowledge_proposal_changes (
+        id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL REFERENCES knowledge_proposals(id) ON DELETE CASCADE,
+        target_path TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
+        base_digest TEXT,
+        before_content TEXT,
+        after_content TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(proposal_id, target_path)
+      );
+
+      CREATE INDEX IF NOT EXISTS knowledge_proposal_changes_proposal
+        ON knowledge_proposal_changes(proposal_id, sort_order, id);
+
     `);
 
     const projectColumns = this.database.prepare("PRAGMA table_info(projects)").all();
@@ -369,6 +466,9 @@ export class TaskboardDatabase {
     }
     if (!taskColumns.some((column) => column.name === "recurrence_unit")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN recurrence_unit TEXT");
+    }
+    if (!taskColumns.some((column) => column.name === "runtime")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'codex'");
     }
     this.#migrateTaskStatuses();
     const migratedTaskColumns = this.database.prepare("PRAGMA table_info(tasks)").all();
@@ -413,6 +513,11 @@ export class TaskboardDatabase {
       }
     }
     this.#migrateArchivedStatus();
+    const runtimeCheckColumns = this.database.prepare("PRAGMA table_info(tasks)").all();
+    if (!runtimeCheckColumns.some((column) => column.name === "runtime")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'codex'");
+    }
+    this.#migrateRuntimeCheckConstraint();
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
         ON tasks(project_id, archived_at, status, sort_order, created_at)
@@ -668,6 +773,86 @@ export class TaskboardDatabase {
     const violation = this.database.prepare("PRAGMA foreign_key_check").get();
     if (violation) {
       throw new Error(`Archived status migration produced a foreign key violation in '${violation.table}'`);
+    }
+  }
+  #migrateRuntimeCheckConstraint() {
+    const tasksSql = this.database.prepare(`
+      SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'tasks'
+    `).get()?.sql ?? "";
+    // If the table SQL has no runtime CHECK constraint at all (column was
+    // added via ALTER TABLE), or it already includes 'omp', nothing to do.
+    if (!tasksSql.includes("CHECK (runtime IN")) return;
+    if (tasksSql.includes("'omp'")) return;
+
+    this.database.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE tasks_runtime_check_migration (
+          id TEXT PRIMARY KEY,
+          identifier TEXT NOT NULL UNIQUE,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK (status IN (
+            'backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled', 'archived'
+          )),
+          priority TEXT NOT NULL CHECK (priority IN ('none', 'urgent', 'high', 'medium', 'low')),
+          labels TEXT NOT NULL DEFAULT '[]',
+          sort_order REAL NOT NULL,
+          thread_id TEXT,
+          runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
+          creator_type TEXT NOT NULL DEFAULT 'user',
+          creator_id TEXT NOT NULL DEFAULT 'local-user',
+          creator_name TEXT NOT NULL DEFAULT '本地用户',
+          creator_avatar_url TEXT,
+          assignee_type TEXT NOT NULL DEFAULT 'user' CHECK (assignee_type IN ('user', 'agent')),
+          assignee_id TEXT NOT NULL DEFAULT 'local-user',
+          assignee_name TEXT NOT NULL DEFAULT '本地用户',
+          assignee_avatar_url TEXT,
+          workflow_id TEXT,
+          git_branch TEXT,
+          worktree_path TEXT,
+          worktree_branch TEXT,
+          due_date TEXT,
+          recurrence_interval INTEGER,
+          recurrence_unit TEXT,
+          archived_at TEXT,
+          version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO tasks_runtime_check_migration (
+          id, identifier, project_id, title, description, status, priority, labels,
+          sort_order, thread_id, runtime, creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        )
+        SELECT
+          id, identifier, project_id, title, description, status, priority, labels,
+          sort_order, thread_id, runtime, creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        FROM tasks;
+
+        DROP TABLE tasks;
+        ALTER TABLE tasks_runtime_check_migration RENAME TO tasks;
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
+    }
+
+    const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+    if (violation) {
+      throw new Error(`Runtime CHECK constraint migration produced a foreign key violation in '${violation.table}'`);
     }
   }
 
@@ -1019,6 +1204,153 @@ export class TaskboardDatabase {
     }
   }
 
+  listKnowledgeProposals(projectId, status) {
+    const rows = this.database.prepare(`
+      SELECT * FROM knowledge_proposals
+      WHERE project_id = ?
+        AND (? IS NULL OR status = ?)
+      ORDER BY
+        CASE status
+          WHEN 'ready' THEN 1
+          WHEN 'generating' THEN 2
+          WHEN 'failed' THEN 3
+          WHEN 'published' THEN 4
+          WHEN 'rejected' THEN 5
+        END,
+        updated_at DESC,
+        id DESC
+    `).all(projectId, status ?? null, status ?? null);
+    return rows.map((row) => knowledgeProposalFromRow(row, this.#knowledgeChanges(row.id)));
+  }
+
+  knowledgeSourceVersions(projectId) {
+    const project = this.getProject(projectId);
+    if (!project) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    const versions = {};
+    const tasks = this.database.prepare(`
+      SELECT id, identifier, version FROM tasks WHERE project_id = ?
+    `).all(projectId);
+    for (const task of tasks) {
+      versions[`issue:${task.id}`] = task.version;
+      versions[`issue:${task.identifier}`] = task.version;
+    }
+    const comments = this.database.prepare(`
+      SELECT comments.id, comments.version
+      FROM comments
+      INNER JOIN tasks ON tasks.id = comments.task_id
+      WHERE tasks.project_id = ?
+    `).all(projectId);
+    for (const comment of comments) versions[`comment:${comment.id}`] = comment.version;
+    return versions;
+  }
+
+  getKnowledgeProposal(id) {
+    const row = this.database.prepare("SELECT * FROM knowledge_proposals WHERE id = ?").get(id);
+    return row ? knowledgeProposalFromRow(row, this.#knowledgeChanges(id)) : null;
+  }
+
+  createKnowledgeProposal(input) {
+    const project = this.getProject(input.projectId);
+    if (!project) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${input.projectId}' does not exist`);
+    }
+    const id = input.id ?? randomUUID();
+    const timestamp = input.createdAt ?? now();
+    const context = input.developmentContext ?? null;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO knowledge_proposals (
+          id, project_id, title, source_type, source_snapshot,
+          development_context_type, development_branch, status, summary, error,
+          creator_type, creator_id, creator_name, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        input.projectId,
+        input.title,
+        input.sourceType,
+        JSON.stringify(input.sourceSnapshot ?? {}),
+        context?.type ?? null,
+        context?.branch ?? null,
+        input.status ?? "ready",
+        input.summary ?? "",
+        input.error ?? null,
+        input.actor.type,
+        input.actor.id,
+        input.actor.name,
+        timestamp,
+        timestamp,
+      );
+      this.#replaceKnowledgeChanges(id, input.changes ?? []);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getKnowledgeProposal(id);
+  }
+
+  updateKnowledgeProposal(id, expectedVersion, changes, actor) {
+    const current = this.getKnowledgeProposal(id);
+    if (!current) {
+      throw new ApiError(404, "KNOWLEDGE_PROPOSAL_NOT_FOUND", `Knowledge proposal '${id}' does not exist`);
+    }
+    if (current.version !== expectedVersion) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Knowledge proposal was changed by another client", {
+        expectedVersion,
+        actualVersion: current.version,
+      });
+    }
+    const nextStatus = changes.status ?? current.status;
+    const allowedTransitions = {
+      generating: new Set(["generating", "ready", "failed", "rejected"]),
+      failed: new Set(["failed", "generating", "ready", "rejected"]),
+      ready: new Set(["ready", "published", "rejected"]),
+      published: new Set(["published"]),
+      rejected: new Set(["rejected"]),
+    };
+    if (!allowedTransitions[current.status]?.has(nextStatus)) {
+      throw new ApiError(409, "INVALID_PROPOSAL_TRANSITION", `Cannot change proposal from ${current.status} to ${nextStatus}`);
+    }
+    const timestamp = now();
+    const publisher = nextStatus === "published" ? actor : current.publisher;
+    const publishedAt = nextStatus === "published" ? (current.publishedAt ?? timestamp) : current.publishedAt;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        UPDATE knowledge_proposals
+        SET title = ?, summary = ?, status = ?, error = ?,
+            publisher_type = ?, publisher_id = ?, publisher_name = ?, published_at = ?,
+            version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(
+        changes.title ?? current.title,
+        changes.summary ?? current.summary,
+        nextStatus,
+        Object.hasOwn(changes, "error") ? changes.error : current.error,
+        publisher?.type ?? null,
+        publisher?.id ?? null,
+        publisher?.name ?? null,
+        publishedAt,
+        timestamp,
+        id,
+        expectedVersion,
+      );
+      if (result.changes !== 1) {
+        throw new ApiError(409, "VERSION_CONFLICT", "Knowledge proposal was changed by another client");
+      }
+      if (changes.changes) this.#replaceKnowledgeChanges(id, changes.changes);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getKnowledgeProposal(id);
+  }
+
   listTasks(filters) {
     const where = [];
     const values = [];
@@ -1092,12 +1424,12 @@ export class TaskboardDatabase {
       this.database.prepare(`
         INSERT INTO tasks (
           id, identifier, project_id, title, description, status, priority, labels,
-          sort_order, thread_id, creator_type, creator_id, creator_name, creator_avatar_url,
+          sort_order, thread_id, runtime, creator_type, creator_id, creator_name, creator_avatar_url,
           assignee_type, assignee_id, assignee_name, assignee_avatar_url,
           workflow_id, git_branch, worktree_path, worktree_branch,
           due_date, recurrence_interval, recurrence_unit,
           archived_at, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       `).run(
         id,
         identifier,
@@ -1109,6 +1441,7 @@ export class TaskboardDatabase {
         JSON.stringify(input.labels),
         sortOrder,
         input.threadId ?? null,
+        input.runtime ?? "codex",
         input.actor.type,
         input.actor.id,
         input.actor.name,
@@ -1154,6 +1487,7 @@ export class TaskboardDatabase {
       labels: "labels",
       workflowId: "workflow_id",
       dueDate: "due_date",
+      runtime: "runtime",
     };
     const assignments = [];
     const values = [];
@@ -1214,6 +1548,46 @@ export class TaskboardDatabase {
     return this.getTask(current.id);
   }
 
+  unlinkTaskThread(id, version, threadId) {
+    const current = this.#requireTask(id);
+    this.#requireVersion(current, version);
+    const linked = this.database.prepare(`
+      SELECT 1 FROM task_threads WHERE task_id = ? AND thread_id = ?
+    `).get(current.id, threadId);
+    if (!linked) {
+      throw new ApiError(404, "THREAD_LINK_NOT_FOUND", "This conversation is not linked to the issue");
+    }
+
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        UPDATE tasks
+        SET
+          thread_id = CASE WHEN thread_id = ? THEN NULL ELSE thread_id END,
+          version = version + 1,
+          updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(threadId, timestamp, current.id, version);
+      if (result.changes !== 1) {
+        this.#throwMissingOrConflict(id, version);
+      }
+      this.database.prepare(`
+        UPDATE comments
+        SET thread_id = NULL, version = version + 1, updated_at = ?
+        WHERE task_id = ? AND thread_id = ?
+      `).run(timestamp, current.id, threadId);
+      this.database.prepare(`
+        DELETE FROM task_threads WHERE task_id = ? AND thread_id = ?
+      `).run(current.id, threadId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getTask(current.id);
+  }
+
   moveTask(id, version, status, sortOrder, threadId) {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
@@ -1246,6 +1620,83 @@ export class TaskboardDatabase {
       throw error;
     }
     return this.getTask(current.id);
+  }
+
+  transferTask(id, version, projectId, threadId) {
+    const current = this.#requireTask(id);
+    this.#requireVersion(current, version);
+    if (current.projectId === projectId) {
+      throw new ApiError(409, "TASK_ALREADY_IN_PROJECT", "Issue already belongs to the target project");
+    }
+
+    const detachedRelations = [
+      ...(current.relations.parent
+        ? [{ type: "parent", task: current.relations.parent }]
+        : []),
+      ...current.relations.subIssues.map((task) => ({ type: "sub_issue", task })),
+      ...current.relations.blockedBy.map((task) => ({ type: "blocked_by", task })),
+      ...current.relations.blocks.map((task) => ({ type: "blocks", task })),
+      ...current.relations.related.map((task) => ({ type: "related", task })),
+    ];
+    const timestamp = now();
+
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const targetProject = this.database.prepare(`
+        SELECT id, next_task_number FROM projects WHERE id = ?
+      `).get(projectId);
+      if (!targetProject) {
+        throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+      }
+      const identifier = `${projectPrefix(targetProject.id)}-${targetProject.next_task_number}`;
+      const sortOrder = this.database.prepare(`
+        SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_order
+        FROM tasks
+        WHERE project_id = ? AND status = ? AND id != ?
+      `).get(projectId, current.status, current.id).next_order;
+
+      this.database.prepare(`
+        DELETE FROM task_relations
+        WHERE source_task_id = ? OR target_task_id = ?
+      `).run(current.id, current.id);
+      this.database.prepare(`
+        UPDATE projects
+        SET next_task_number = next_task_number + 1, updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, projectId);
+      this.database.prepare(`
+        UPDATE projects SET updated_at = ? WHERE id = ?
+      `).run(timestamp, current.projectId);
+      const result = this.database.prepare(`
+        UPDATE tasks
+        SET identifier = ?, project_id = ?, sort_order = ?,
+            thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(
+        identifier,
+        projectId,
+        sortOrder,
+        threadId ?? null,
+        timestamp,
+        current.id,
+        version,
+      );
+      if (result.changes !== 1) {
+        this.#throwMissingOrConflict(id, version);
+      }
+      this.#linkTaskThread(current.id, threadId, timestamp);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+
+    return {
+      task: this.getTask(current.id),
+      previousProjectId: current.projectId,
+      previousIdentifier: current.identifier,
+      detachedRelations,
+    };
   }
 
   archiveTask(id, version, threadId) {
@@ -1449,13 +1900,36 @@ export class TaskboardDatabase {
     try {
       const result = this.database.prepare(`
         UPDATE comments
-        SET body = ?, thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
+        SET
+          body = ?,
+          thread_id = CASE WHEN ? = 1 THEN ? ELSE thread_id END,
+          version = version + 1,
+          updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(body, threadId ?? null, timestamp, id, version);
+      `).run(body, threadId !== undefined ? 1 : 0, threadId ?? null, timestamp, id, version);
       if (result.changes !== 1) {
         this.#throwMissingCommentOrConflict(id, version);
       }
       this.#linkTaskThread(current.taskId, threadId, timestamp);
+      if (threadId === null && current.threadId) {
+        this.database.prepare(`
+          DELETE FROM task_threads
+          WHERE task_id = ? AND thread_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM tasks WHERE id = ? AND thread_id = ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM comments WHERE task_id = ? AND thread_id = ?
+            )
+        `).run(
+          current.taskId,
+          current.threadId,
+          current.taskId,
+          current.threadId,
+          current.taskId,
+          current.threadId,
+        );
+      }
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1753,5 +2227,35 @@ export class TaskboardDatabase {
       expectedVersion,
       actualVersion: comment.version,
     });
+  }
+
+  #knowledgeChanges(proposalId) {
+    return this.database.prepare(`
+      SELECT * FROM knowledge_proposal_changes
+      WHERE proposal_id = ?
+      ORDER BY sort_order, id
+    `).all(proposalId).map(knowledgeChangeFromRow);
+  }
+
+  #replaceKnowledgeChanges(proposalId, changes) {
+    this.database.prepare("DELETE FROM knowledge_proposal_changes WHERE proposal_id = ?").run(proposalId);
+    const insert = this.database.prepare(`
+      INSERT INTO knowledge_proposal_changes (
+        id, proposal_id, target_path, operation, base_digest,
+        before_content, after_content, sort_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const [index, change] of changes.entries()) {
+      insert.run(
+        change.id ?? randomUUID(),
+        proposalId,
+        change.targetPath,
+        change.operation,
+        change.baseDigest ?? null,
+        change.beforeContent ?? null,
+        change.afterContent ?? null,
+        change.sortOrder ?? index,
+      );
+    }
   }
 }

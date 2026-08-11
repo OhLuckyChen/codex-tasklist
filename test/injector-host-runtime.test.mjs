@@ -2,11 +2,83 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  classifyHeartbeatFailure,
+  frameUrlMatches,
   findResidentInjectorPids,
   handleHostBindingPayload,
   reconcileInjectionRuntime,
+  rendererBootstrapReason,
   restartResidentInjector,
 } from "../scripts/codex-injector-runtime.mjs";
+
+test("Taskboard frame matching permits in-app route parameters but rejects another origin or path", () => {
+  const expected = "http://127.0.0.1:47823/?host=codex&__codex_taskboard_refresh=abc";
+  assert.equal(frameUrlMatches(
+    "http://127.0.0.1:47823/?host=codex&__codex_taskboard_refresh=abc&view=global&issue=LOCAL-1",
+    expected,
+  ), true);
+  assert.equal(frameUrlMatches(
+    "http://127.0.0.1:47823/other?host=codex&__codex_taskboard_refresh=abc",
+    expected,
+  ), false);
+  assert.equal(frameUrlMatches(
+    "http://example.com/?host=codex&__codex_taskboard_refresh=abc",
+    expected,
+  ), false);
+  assert.equal(frameUrlMatches("chrome-error://chromewebdata/", expected), false);
+});
+
+test("heartbeat recovery ignores transient delays and reconnects only at the threshold", () => {
+  assert.deepEqual(classifyHeartbeatFailure({
+    previousFailures: 0,
+    connectionClosed: false,
+    threshold: 3,
+  }), { failures: 1, shouldReconnect: false });
+  assert.deepEqual(classifyHeartbeatFailure({
+    previousFailures: 1,
+    connectionClosed: false,
+    threshold: 3,
+  }), { failures: 2, shouldReconnect: false });
+  assert.deepEqual(classifyHeartbeatFailure({
+    previousFailures: 2,
+    connectionClosed: false,
+    threshold: 3,
+  }), { failures: 3, shouldReconnect: true });
+  assert.deepEqual(classifyHeartbeatFailure({
+    previousFailures: 0,
+    connectionClosed: true,
+    threshold: 3,
+  }), { failures: 1, shouldReconnect: true });
+});
+
+test("renderer bootstrap reload is limited to a fresh renderer or failed Taskboard frame", () => {
+  assert.equal(rendererBootstrapReason({
+    injectionVersion: null,
+    frameTree: null,
+    expectedFrameUrl: "http://127.0.0.1:47823/?host=codex",
+  }), "missing-injection");
+  assert.equal(rendererBootstrapReason({
+    injectionVersion: "0.6.8",
+    expectedFrameUrl: "http://127.0.0.1:47823/?host=codex",
+    frameTree: {
+      frame: { url: "app://-/index.html" },
+      childFrames: [{
+        frame: {
+          url: "chrome-error://chromewebdata/",
+          unreachableUrl: "http://127.0.0.1:47823/?host=codex&retry=1",
+        },
+      }],
+    },
+  }), "taskboard-frame-unreachable");
+  assert.equal(rendererBootstrapReason({
+    injectionVersion: "0.6.8",
+    expectedFrameUrl: "http://127.0.0.1:47823/?host=codex",
+    frameTree: {
+      frame: { url: "app://-/index.html" },
+      childFrames: [{ frame: { url: "http://127.0.0.1:47823/?host=codex" } }],
+    },
+  }), null);
+});
 
 const currentAutomationRequest = {
   id: "host-request-1",
@@ -84,6 +156,77 @@ test("the host bridge resolves a taskboard request marker to a Codex thread", as
     ok: true,
     status: "resolved",
     threadId: "019fd55d-010a-76d1-90ec-dcde7169b1c3",
+  }]);
+});
+
+test("the host bridge accepts an explicit submit request for a prepared task composer", async () => {
+  const responses = [];
+  const received = [];
+  const request = {
+    id: "submit-request-1",
+    action: "prefill-task-composer",
+    instruction: "Address ISSUE-1",
+    skillName: "manage-taskboard",
+    skillDisplayName: "Manage Taskboard",
+    skillPath: "/tmp/manage-taskboard/SKILL.md",
+    submit: true,
+  };
+  const result = await handleHostBindingPayload(
+    { payload: JSON.stringify(request), executionContextId: 23 },
+    {
+      parseAutomationRequest: () => null,
+      ensure: async () => assert.fail("ensure must not run"),
+      runAutomation: async () => assert.fail("automation must not run"),
+      resolveTaskThread: async () => assert.fail("resolution must not run"),
+      prefill: async (payload) => {
+        received.push(payload);
+        return { prefilled: true, submitted: true };
+      },
+      sendResponse: async (_executionContextId, response) => responses.push(response),
+    },
+  );
+
+  assert.deepEqual(result, { responded: true, accepted: true });
+  assert.deepEqual(received, [request]);
+  assert.deepEqual(responses, [{
+    id: request.id,
+    ok: true,
+    prefilled: true,
+    submitted: true,
+  }]);
+});
+
+test("the host bridge accepts a read-only project knowledge composer request", async () => {
+  const responses = [];
+  const received = [];
+  const request = {
+    id: "knowledge-request-1",
+    action: "prefill-plain-composer",
+    instruction: "Analyze the complete current project without editing files.",
+    submit: true,
+  };
+  const result = await handleHostBindingPayload(
+    { payload: JSON.stringify(request), executionContextId: 29 },
+    {
+      parseAutomationRequest: () => null,
+      ensure: async () => assert.fail("ensure must not run"),
+      runAutomation: async () => assert.fail("automation must not run"),
+      resolveTaskThread: async () => assert.fail("resolution must not run"),
+      prefill: async (payload) => {
+        received.push(payload);
+        return { prefilled: true, submitted: true };
+      },
+      sendResponse: async (_executionContextId, response) => responses.push(response),
+    },
+  );
+
+  assert.deepEqual(result, { responded: true, accepted: true });
+  assert.deepEqual(received, [request]);
+  assert.deepEqual(responses, [{
+    id: request.id,
+    ok: true,
+    prefilled: true,
+    submitted: true,
   }]);
 });
 
