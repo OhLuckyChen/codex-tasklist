@@ -86,19 +86,23 @@ In short, it changes AI-assisted development from "a person chasing sessions" in
 
 ## Screenshots
 
-The screenshots below show the main workflow: keep attention on task state, open the board inside Codex, create issues with execution context, and preserve review evidence in the issue history.
+The screenshots below cover the main product surfaces: project management, task-state tracking, favorites, Codex embedding, cross-runtime session actions, real review comments, project knowledge, and issue context.
 
-| Task-state board | Embedded in Codex |
+| Project management | Task-state board |
 | --- | --- |
-| <img src="linear-ui-proof.png" alt="Task-state board with backlog, todo, in progress, and done columns" width="420"> | <img src="injection-proof.png" alt="Codex Taskboard embedded in the Codex desktop app" width="420"> |
+| <img src="docs/screenshots/project-management.png" alt="Project home with saved projects, project grouping, favorites, archive, and global task view" width="420"> | <img src="linear-ui-proof.png" alt="Task-state board with backlog, todo, in progress, and done columns" width="420"> |
 
-| Create issue with context | Issue detail with review context |
+| Favorites | Embedded in Codex |
 | --- | --- |
-| <img src="linear-editor-proof.png" alt="New issue editor with status, priority, labels, and Codex task link" width="420"> | <img src="task-detail-embedded-proof.png" alt="Issue detail with comments and session context" width="420"> |
+| <img src="docs/screenshots/favorites.png" alt="Favorite issues view with starred tasks collected across projects" width="420"> | <img src="injection-proof.png" alt="Codex Taskboard embedded in the Codex desktop app" width="420"> |
 
-| Comments, evidence, and task metadata | Narrow issue detail |
+| Review comments and runtime sessions | Project knowledge |
 | --- | --- |
-| <img src="task-detail-proof.png" alt="Issue detail page with comments, properties, and activity timeline" width="420"> | <img src="task-detail-narrow-proof.png" alt="Narrow issue detail layout for focused review" width="420"> |
+| <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="Issue detail showing real review comments plus Codex, Claude Code, and Oh My Pi session actions" width="420"> | <img src="docs/screenshots/knowledge-base.png" alt="Project knowledge center with published pages, pending proposals, health status, and project Q&A" width="420"> |
+
+| Create issue with context | Issue detail metadata |
+| --- | --- |
+| <img src="linear-editor-proof.png" alt="New issue editor with status, priority, labels, and Codex task link" width="420"> | <img src="task-detail-proof.png" alt="Issue detail page with comments, properties, and activity timeline" width="420"> |
 
 ## How it works
 

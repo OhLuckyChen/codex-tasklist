@@ -86,19 +86,23 @@ Codex Taskboard 把这些过程收束到任务本身：
 
 ## 界面截图
 
-下面这些截图按主流程组织：把注意力放在任务状态上，在 Codex 内打开看板，带执行上下文创建议题，并把评审证据沉淀到议题历史中。
+下面这些截图覆盖主要功能面：项目管理、任务状态跟踪、收藏、Codex 内嵌、跨运行时会话操作、真实评审评论、项目知识库和议题上下文。
 
-| 任务状态看板 | 嵌入 Codex |
+| 项目管理 | 任务状态看板 |
 | --- | --- |
-| <img src="linear-ui-proof.png" alt="包含 backlog、待办、进行中和完成列的任务状态看板" width="420"> | <img src="injection-proof.png" alt="嵌入 Codex 桌面端的 Codex Taskboard" width="420"> |
+| <img src="docs/screenshots/project-management.png" alt="包含已保存项目、项目分组、收藏、归档和全局任务视角的项目首页" width="420"> | <img src="linear-ui-proof.png" alt="包含 backlog、待办、进行中和完成列的任务状态看板" width="420"> |
 
-| 带上下文创建议题 | 议题详情与评审上下文 |
+| 收藏 | 嵌入 Codex |
 | --- | --- |
-| <img src="linear-editor-proof.png" alt="包含状态、优先级、标签和 Codex task 链接的新建议题编辑器" width="420"> | <img src="task-detail-embedded-proof.png" alt="带评论和会话上下文的议题详情" width="420"> |
+| <img src="docs/screenshots/favorites.png" alt="跨项目汇总星标任务的收藏议题视图" width="420"> | <img src="injection-proof.png" alt="嵌入 Codex 桌面端的 Codex Taskboard" width="420"> |
 
-| 评论、证据和任务元数据 | 窄屏议题详情 |
+| 评审评论与运行时会话 | 项目知识库 |
 | --- | --- |
-| <img src="task-detail-proof.png" alt="包含评论、属性和活动时间线的议题详情页" width="420"> | <img src="task-detail-narrow-proof.png" alt="适合聚焦评审的窄屏议题详情布局" width="420"> |
+| <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="展示真实评审评论以及 Codex、Claude Code、Oh My Pi 会话操作的议题详情" width="420"> | <img src="docs/screenshots/knowledge-base.png" alt="包含已发布页面、待确认提案、健康状态和项目问答的项目知识中心" width="420"> |
+
+| 带上下文创建议题 | 议题详情元数据 |
+| --- | --- |
+| <img src="linear-editor-proof.png" alt="包含状态、优先级、标签和 Codex task 链接的新建议题编辑器" width="420"> | <img src="task-detail-proof.png" alt="包含评论、属性和活动时间线的议题详情页" width="420"> |
 
 ## 运行方式
 
