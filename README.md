@@ -98,7 +98,7 @@ Start from saved projects, switch between local workspaces, group active project
 
 Track work by status instead of by scattered conversations. Issues stay visible across backlog, todo, in-progress, review, done, blocked, canceled, and archived states.
 
-![Task-state board with backlog, todo, in progress, and done columns](linear-ui-proof.png)
+![Task-state board with backlog, todo, in progress, and done columns](docs/screenshots/task-state-board.png)
 
 ### Favorites
 
@@ -108,9 +108,9 @@ Collect important tasks across projects into one focused view so urgent review i
 
 ### Embedded in Codex
 
-Open the same taskboard inside the Codex desktop app, keeping task state and agent execution context available while work is happening.
+Create a Codex session directly from a task so task state and execution context stay attached while work is happening.
 
-![Codex Taskboard embedded in the Codex desktop app](injection-proof.png)
+![Create a Codex session from the taskboard](docs/screenshots/codex-new-session.png)
 
 ### Review comments and runtime sessions
 
@@ -132,9 +132,9 @@ Create issues with status, priority, labels, assignee, development context, and 
 
 ### Issue detail metadata
 
-Use the issue detail page as the working record for comments, attachments, properties, activity, and review handoff.
+Use the issue detail page as the working record for description, acceptance requirements, attachments, properties, activity, and review handoff.
 
-![Issue detail page with comments, properties, and activity timeline](task-detail-proof.png)
+![Issue detail page with description, acceptance requirements, properties, and linked sessions](docs/screenshots/task-detail.png)
 
 ## How it works
 
