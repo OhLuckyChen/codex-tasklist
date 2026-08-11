@@ -1,72 +1,123 @@
-# Codex Taskboard
+<p align="center">
+  <img src="web/public/codex-app-icon.png" alt="Codex Taskboard icon" width="128" height="128">
+</p>
 
-Codex Taskboard 是一个本地优先的项目任务面板。它可以作为普通 Web 应用独立运行，也可以嵌入 Codex 桌面端，让人、Codex、Claude Code 和 Oh My Pi 围绕同一批项目议题协作。
+<h1 align="center">Codex Taskboard</h1>
 
-这个仓库当前不包含云端协作后端：任务数据默认写入本机 SQLite，附件和日志保存在本机 `.data/`，实时刷新通过本地 HTTP API 和 Server-Sent Events 完成。
+<p align="center">
+  <strong>A local-first issue board for human and agent work inside Codex.</strong>
+</p>
 
-## 界面预览
+<p align="center">
+  Manage projects, issues, comments, runtime sessions, and agent handoffs from one local workspace.
+</p>
 
-![Codex 侧边栏中的任务面板](injection-proof.png)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README_ZH.md">简体中文</a>
+</p>
 
-![新建议题编辑器](linear-editor-proof.png)
+<p align="center">
+  <a href="https://github.com/OhLuckyChen/codex-tasklist/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/OhLuckyChen/codex-tasklist?style=social"></a>
+  <img alt="Node.js >= 22.5" src="https://img.shields.io/badge/Node.js-%3E%3D22.5-339933?logo=nodedotjs&logoColor=white">
+  <img alt="Local-first" src="https://img.shields.io/badge/data-local--first-2563eb">
+  <img alt="Web and macOS" src="https://img.shields.io/badge/interface-Web%20%7C%20macOS-lightgrey">
+</p>
 
-![议题详情与评论](task-detail-embedded-proof.png)
+> Codex Taskboard can run as a standalone web app or as a panel embedded in the Codex desktop app. It does not include a hosted collaboration backend: issues, attachments, logs, and runtime metadata are stored locally by default under `.data/`.
 
-## 核心功能
+## Contents
 
-| 能力 | 说明 |
+- [Why it exists](#why-it-exists)
+- [Workflow](#workflow)
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [First use](#first-use)
+- [Embed in Codex](#embed-in-codex)
+- [Runtime sessions](#runtime-sessions)
+- [taskctl CLI](#taskctl-cli)
+- [Agent skill](#agent-skill)
+- [Configuration](#configuration)
+- [Data and security](#data-and-security)
+- [Development and verification](#development-and-verification)
+- [FAQ](#faq)
+- [Docs and contributing](#docs-and-contributing)
+- [License](#license)
+
+## Why it exists
+
+Codex Taskboard is built for projects where a human, Codex, Claude Code, and Oh My Pi may all touch the same backlog. A normal issue tracker can describe the work, but it usually does not know which local repository, branch, Codex task, terminal session, comment, or project note belongs to the issue being handled now.
+
+This project keeps that operational context close to the codebase:
+
+- plan and review work through a board that looks like a familiar issue tracker;
+- open the same board inside Codex while an agent is working;
+- attach current and historical Codex, Claude Code, and OMP sessions to each issue;
+- create follow-up sessions from an issue or a specific comment;
+- keep project knowledge, attachments, and task state in local files and SQLite.
+
+## Workflow
+
+1. Create or map a project to a local repository path.
+2. Add an issue with labels, priority, assignee, due date, branch, and worktree context.
+3. Start a Codex, Claude Code, or OMP session from the issue or from a review comment.
+4. Let the agent update status, add comments, attach evidence, and link its runtime session.
+5. Review the issue, send follow-up work when needed, or move it to done.
+
+## Features
+
+| Area | What is supported |
 | --- | --- |
-| 项目看板 | 多项目管理、跨项目总览、收藏项目、项目别名、归档与恢复。 |
-| 议题管理 | backlog、todo、in_progress、in_review、blocked、done、canceled、archived 状态流转；支持优先级、标签、负责人、截止日期、重复规则、草稿箱和收藏。 |
-| 评论与附件 | 议题详情支持 Markdown 描述、评论、附件下载、评论编辑删除和版本冲突保护。 |
-| 关系建模 | 支持父子、阻塞、被阻塞和相关议题关系。 |
-| 开发上下文 | 每个议题可记录 Git 分支、worktree 路径和项目本地目录映射。 |
-| 实时刷新 | 多个浏览器窗口或 Codex 内嵌页面通过本地 SSE 同步刷新。 |
-| taskctl CLI | 用命令行创建项目、移动议题、添加评论、下载附件、读取当前上下文。 |
-| manage-taskboard Skill | Codex Agent 可按议题读取上下文、认领任务、提交评论、送审和关联当前会话。 |
-| 项目知识 | 基于本地项目目录生成待确认知识提案，审核后写入 `docs/knowledge/`。 |
-| AI 对话 | 在已映射项目中围绕项目、议题、评论和知识页发起本地 AI 对话。 |
+| Projects | Multi-project boards, cross-project overview, favorites, aliases, archive and restore. |
+| Issues | `backlog`, `todo`, `in_progress`, `in_review`, `blocked`, `done`, `canceled`, and `archived` states; drafts, favorites, priorities, labels, assignees, due dates, and recurrence rules. |
+| Comments and attachments | Markdown descriptions, issue comments, downloads, editing, deletion, and version conflict protection. |
+| Relations | Parent, child, blocking, blocked-by, and related issue links. |
+| Development context | Git branch, worktree path, and local project path mapping per issue. |
+| Runtime sessions | Current and historical Codex, Claude Code, and Oh My Pi sessions, including comment-level session links and follow-up entry points. |
+| Local automation | `taskctl` CLI plus the `manage-taskboard` skill for agents that need to claim work, comment, move status, and record session context. |
+| Project knowledge | Local project knowledge proposals that can be reviewed into `docs/knowledge/`. |
+| Realtime UI | Local HTTP API with Server-Sent Events for refreshing multiple browser windows or embedded Codex panels. |
 
-## Agent 与会话
+## Screenshots
 
-| Runtime | 支持内容 |
+![Codex Taskboard embedded in the Codex desktop app](injection-proof.png)
+
+| New issue editor | Issue detail and review context |
 | --- | --- |
-| Codex | 从议题新建 Codex 会话；从评论新建会话；向当前会话 follow-up；关联或取消关联当前会话；查看当前会话与历史会话；点击会话 ID 跳回对应 Codex task。 |
-| Claude Code | 从议题或评论启动 Claude Code 会话；记录 Claude 会话 ID；点击已关联会话可通过本机终端恢复。 |
-| Oh My Pi | 从议题或评论启动 Oh My Pi 会话；记录 OMP 会话 ID；点击已关联会话可通过本机终端恢复。 |
+| ![New issue editor](linear-editor-proof.png) | ![Issue detail with comments and session context](task-detail-embedded-proof.png) |
 
-会话关联分两层保存：议题的当前会话用于“继续当前任务”，历史会话用于追踪曾经处理过这个议题的 Codex、Claude Code 或 Oh My Pi 上下文。评论也可以独立关联会话，适合从某条评论直接分派一个新会话。
-
-## 工作方式
+## How it works
 
 ```text
-Web UI / Codex 内嵌页 / taskctl / manage-taskboard Skill
+Web UI / Codex embedded panel / taskctl / manage-taskboard skill
                   |
                   v
-          本地 Node.js HTTP API + SSE
+          Local Node.js HTTP API + SSE
                   |
                   v
-      SQLite + .data/attachments + 项目目录映射
+      SQLite + .data/attachments + project path mappings
                   |
                   v
-     Codex / Claude Code / Oh My Pi 本机集成
+       Codex / Claude Code / Oh My Pi local integrations
 ```
 
-注入器只通过回环地址连接 Codex 的 CDP 端口，在 Codex 页面中增加 Taskboard 入口和会话跳转能力。它不会修改、替换或重新签名官方 Codex 应用。
+The Codex injector connects only to the local loopback CDP port and adds the Taskboard entry point plus task-jump behavior inside Codex. It does not modify, replace, or re-sign the official Codex app.
 
-## 安装要求
+## Requirements
 
-| 项目 | 是否必需 | 说明 |
+| Requirement | Required | Notes |
 | --- | --- | --- |
-| Node.js >= 22.5 | 必需 | 服务端、CLI、构建和测试都依赖 Node。 |
-| npm | 必需 | 使用 `npm ci` 安装锁定依赖。 |
-| macOS | 可选 | 只有 Codex 桌面注入、Dock 启动器、Claude/OMP 终端恢复需要 macOS。 |
-| Codex 桌面端 | 可选 | 需要内嵌看板、点击跳回 Codex task、Codex 会话桥接时使用。 |
-| `codex` CLI | 可选 | 用于从议题创建或 follow-up Codex 会话。 |
-| `claude` CLI | 可选 | 用于 Claude Code 会话启动和恢复。 |
-| `omp` CLI | 可选 | 用于 Oh My Pi 会话启动和恢复。 |
+| Node.js >= 22.5 | Yes | Used by the server, CLI, build, and tests. |
+| npm | Yes | Dependency installation uses the lockfile through `npm ci`. |
+| macOS | Optional | Required only for the Codex desktop launcher, Dock integration, and local terminal restore flows. |
+| Codex desktop app | Optional | Needed for the embedded panel, task jump, and Codex session bridge. |
+| `codex` CLI | Optional | Needed to create or follow up Codex sessions from issues. |
+| `claude` CLI | Optional | Needed to start and restore Claude Code sessions. |
+| `omp` CLI | Optional | Needed to start and restore Oh My Pi sessions. |
 
-## 快速开始
+## Quick start
 
 ```bash
 git clone https://github.com/OhLuckyChen/codex-tasklist.git
@@ -76,41 +127,49 @@ npm run build:web
 CODEX_TASKBOARD_HOST=127.0.0.1 npm start
 ```
 
-打开 <http://127.0.0.1:47823>。
+Open <http://127.0.0.1:47823>.
 
-开发模式：
+For development:
 
 ```bash
 npm run dev
 ```
 
-Vite 页面默认在 <http://127.0.0.1:5173>，API 会代理到本地 Taskboard 服务。
+The Vite web app runs at <http://127.0.0.1:5173> and proxies API calls to the local Taskboard service.
 
-## 嵌入 Codex
+## First use
 
-推荐方式是安装 macOS Dock 启动器：
+1. Start the local service.
+2. Create a project or map an existing project to a local repository path.
+3. Create an issue and fill in status, priority, labels, branch, and worktree context.
+4. Launch or attach a Codex, Claude Code, or OMP session from the issue.
+5. Let the agent comment, attach evidence, move the issue to review, and keep follow-up sessions linked to the same issue.
+
+## Embed in Codex
+
+The recommended macOS setup is the Dock launcher:
 
 ```bash
 ./scripts/install-macos-launcher.sh
 ```
 
-安装器会做这些事：
+The installer:
 
-- 检查并记录当前可用的 Node.js 路径到 `.data/node-path`。
-- 如果能找到 `codex` CLI，会记录到 `.data/codex-path`。
-- 安装 LaunchAgent，后台监听 Codex 的本地 CDP 端口并恢复 Taskboard。
-- 备份 Dock 配置到 `.data/com.apple.dock.before-codex-taskboard.plist`。
-- 将 Dock 中的 Codex 入口替换为 Codex Taskboard 启动器。
+- records the current Node.js path in `.data/node-path`;
+- records the `codex` CLI path in `.data/codex-path` when available;
+- installs a LaunchAgent that watches the local Codex CDP port and restores Taskboard;
+- backs up the Dock configuration to `.data/com.apple.dock.before-codex-taskboard.plist`;
+- replaces the Dock Codex entry with the Codex Taskboard launcher.
 
-如果 Codex 已经打开，首次安装后请退出一次，再从新的 Dock 图标启动。
+If Codex is already open, quit it once after installation and start it again from the new Dock icon.
 
-也可以手动注入一个已经启用 CDP 的 Codex 实例：
+You can also inject into a Codex instance that already exposes CDP:
 
 ```bash
 npm run codex:inject -- --port 9229 --open
 ```
 
-需要指定自定义可执行文件时使用环境变量：
+To pin explicit executables:
 
 ```bash
 CODEX_TASKBOARD_NODE=/absolute/path/to/node \
@@ -118,9 +177,19 @@ CODEX_EXECUTABLE=/absolute/path/to/codex \
 ./scripts/install-macos-launcher.sh
 ```
 
-## 使用 taskctl
+## Runtime sessions
 
-从仓库内运行：
+| Runtime | Supported flows |
+| --- | --- |
+| Codex | Start a Codex task from an issue, start from a comment, send a follow-up to the current task, attach or detach the current task, view current and historical tasks, and jump back to a Codex task by clicking its ID. |
+| Claude Code | Start a Claude Code session from an issue or comment, record the Claude session ID, and resume an attached session through the local terminal. |
+| Oh My Pi | Start an OMP session from an issue or comment, record the OMP session ID, and resume an attached session through the local terminal. |
+
+Session links are stored at two levels. The issue-level current session is used for "continue this work now"; historical sessions preserve the runtime contexts that have touched the issue. Comments can also have their own sessions, which is useful when a review note needs a separate follow-up agent.
+
+## taskctl CLI
+
+Run commands from the repository:
 
 ```bash
 npm run taskctl -- project create \
@@ -136,57 +205,57 @@ npm run taskctl -- issue create \
   --labels product,mvp
 ```
 
-也可以执行 `npm link`，让 `taskctl` 出现在当前 shell 的命令搜索路径。完整命令见 [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md)。
+You can also run `npm link` to expose `taskctl` on your shell path. The full command reference lives in [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md).
 
-## 安装 Skill
+## Agent skill
 
-Codex 使用：
+Install the local skill for Codex:
 
 ```bash
 mkdir -p ~/.codex/skills
 ln -s "$(pwd)/skills/manage-taskboard" ~/.codex/skills/manage-taskboard
 ```
 
-然后在 Codex 中用：
+Use it in Codex:
 
 ```text
 $manage-taskboard ISSUE-ID
 ```
 
-Skill 会读取最新议题、评论和版本号，用 `taskctl` 写回认领、评论、移动状态和会话关联。
+The skill reads the latest issue, comments, and version number before writing back claims, comments, status moves, and session links through `taskctl`.
 
-## 配置
+## Configuration
 
-| 环境变量 | 默认值 | 作用 |
+| Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP 监听地址。独立本机使用建议设为 `127.0.0.1`。 |
-| `CODEX_TASKBOARD_PORT` | `47823` | HTTP 服务端口。 |
-| `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite、附件、日志和运行文件目录。 |
-| `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | `taskctl` 访问的 API 地址。 |
-| `CODEX_EXECUTABLE` | 自动探测 | Codex CLI 路径。 |
-| `CLAUDE_EXECUTABLE` | 自动探测 | Claude Code CLI 路径。 |
-| `OMP_EXECUTABLE` | 自动探测 | Oh My Pi CLI 路径。 |
-| `CODEX_TASKBOARD_NODE` | 自动探测 | macOS 启动器使用的 Node.js 路径。 |
+| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP bind address. Use `127.0.0.1` for local-only standalone use. |
+| `CODEX_TASKBOARD_PORT` | `47823` | HTTP server port. |
+| `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite database, attachments, logs, and runtime files. |
+| `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | API URL used by `taskctl`. |
+| `CODEX_EXECUTABLE` | auto-detected | Codex CLI path. |
+| `CLAUDE_EXECUTABLE` | auto-detected | Claude Code CLI path. |
+| `OMP_EXECUTABLE` | auto-detected | Oh My Pi CLI path. |
+| `CODEX_TASKBOARD_NODE` | auto-detected | Node.js path used by the macOS launcher. |
 
-默认监听 `0.0.0.0` 是为了允许局域网设备访问。这个本地服务没有公网账户认证，不要直接暴露到公网。
+The default `0.0.0.0` bind address allows LAN devices to connect. The local service does not provide public account authentication, so do not expose it directly to the public internet.
 
-## 数据边界
+## Data and security
 
-- `.data/` 不提交到 Git，里面包含 SQLite、附件、日志、安装器记录的本机可执行文件路径和 Dock 备份。
-- 项目目录映射保存在 SQLite 的项目记录中，不依赖个人机器上的额外配置文件。
-- `~/.codex/skills` 和 `~/.claude/skills` 是用户级 Agent 集成目录，只在你选择安装 Skill 时使用。
-- `/Applications/ChatGPT.app` 是 macOS Codex 桌面集成的默认位置；只运行 Web 看板时不需要它。
-- 仓库不再包含 Cloudflare Worker、D1、R2、Wrangler 或云端协作迁移脚本。
+- `.data/` is not committed to Git. It contains SQLite data, attachments, logs, installer-recorded executable paths, and Dock backups.
+- Project path mappings are stored in SQLite project records.
+- `~/.codex/skills` and `~/.claude/skills` are user-level agent integration directories and are used only when you install the skills.
+- `/Applications/ChatGPT.app` is the default macOS location used by the Codex desktop integration; it is not required for the standalone web board.
+- The repository no longer contains Cloudflare Worker, D1, R2, Wrangler, or hosted collaboration migration code.
 
-## 验证
+## Development and verification
 
 ```bash
 npm run check
 ```
 
-这个命令会执行 TypeScript 类型检查、Web 生产构建和 Node 测试。
+This runs TypeScript type checking, a production web build, and the Node test suite.
 
-也可以拆开执行：
+You can run the pieces separately:
 
 ```bash
 npm run typecheck
@@ -194,16 +263,22 @@ npm run build
 npm test
 ```
 
-## 常见问题
+## FAQ
 
-| 问题 | 处理方式 |
+| Question | Answer |
 | --- | --- |
-| `npm ci` 报 Node 版本不满足 | 安装 Node.js 22.5 或更高版本。 |
-| Web 能打开但无法读取项目文件 | 在项目设置中映射本地仓库目录，或用 `taskctl project map PROJECT_ID --workspace-path /path/to/repo`。 |
-| Codex 内没有 Taskboard | 确认从 Codex Taskboard Dock 图标启动，或手动运行 `npm run codex:inject -- --port 9229 --open`。 |
-| 点击 Claude/OMP 会话没有反应 | 确认本机安装了对应 CLI，或设置 `CLAUDE_EXECUTABLE` / `OMP_EXECUTABLE`。 |
-| 局域网其他设备能访问 | 启动时设置 `CODEX_TASKBOARD_HOST=127.0.0.1`。 |
+| `npm ci` says the Node version is unsupported. | Install Node.js 22.5 or newer. |
+| The web app opens but cannot read project files. | Map the project to a local repository path in project settings, or run `taskctl project map PROJECT_ID --workspace-path /path/to/repo`. |
+| Taskboard does not appear inside Codex. | Start Codex from the Codex Taskboard Dock icon, or manually run `npm run codex:inject -- --port 9229 --open`. |
+| Clicking a Claude or OMP session does nothing. | Make sure the matching CLI is installed, or set `CLAUDE_EXECUTABLE` / `OMP_EXECUTABLE`. |
+| Other devices on my LAN can access the board. | Start with `CODEX_TASKBOARD_HOST=127.0.0.1` for local-only access. |
 
-## 许可证
+## Docs and contributing
 
-当前仓库尚未声明开源许可证。在添加许可证前，默认保留全部权利。
+- [`changelog.md`](changelog.md) records notable changes.
+- [`docs/knowledge/`](docs/knowledge/) contains local project knowledge pages.
+- [`skills/manage-taskboard/references/cli.md`](skills/manage-taskboard/references/cli.md) documents the CLI used by the agent skill.
+
+## License
+
+This repository does not currently declare an open-source license. Until a license is added, all rights are reserved by default.
