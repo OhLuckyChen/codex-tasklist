@@ -48,15 +48,19 @@
 
 ## Why it exists
 
-Codex Taskboard is built for projects where a human, Codex, Claude Code, and Oh My Pi may all touch the same backlog. A normal issue tracker can describe the work, but it usually does not know which local repository, branch, Codex task, terminal session, comment, or project note belongs to the issue being handled now.
+Codex Taskboard is designed to move attention away from watching every AI session and back to the state of the work itself.
 
-This project keeps that operational context close to the codebase:
+In real projects, the same backlog is often handled by a human, Codex, Claude Code, and Oh My Pi in turn. Each tool produces its own sessions, logs, comments, and intermediate findings. When that context is scattered across different windows, the human still has to track which task is active, which one is blocked, which one needs review, and which one is already done.
 
-- plan and review work through a board that looks like a familiar issue tracker;
-- open the same board inside Codex while an agent is working;
-- attach current and historical Codex, Claude Code, and OMP sessions to each issue;
-- create follow-up sessions from an issue or a specific comment;
-- keep project knowledge, attachments, and task state in local files and SQLite.
+Codex Taskboard collects that process around the task:
+
+- manage backlog, in-progress, review, blocked, and done work by task state;
+- connect each issue to its current and historical Codex, Claude Code, and Oh My Pi sessions;
+- start follow-up sessions from an issue or a specific comment while keeping the handoff attached to the same task;
+- use comments, attachments, and project knowledge to record intermediate decisions, evidence, and context;
+- turn that accumulated process record into support for later changes, reviews, and continued development.
+
+In short, it changes AI-assisted development from "a person chasing sessions" into "tools working around task state", reducing attention overhead while making cross-agent and cross-session work easier to manage and reuse.
 
 ## Workflow
 
@@ -82,11 +86,19 @@ This project keeps that operational context close to the codebase:
 
 ## Screenshots
 
-![Codex Taskboard embedded in the Codex desktop app](injection-proof.png)
+The screenshots below show the main workflow: keep attention on task state, open the board inside Codex, create issues with execution context, and preserve review evidence in the issue history.
 
-| New issue editor | Issue detail and review context |
+| Task-state board | Embedded in Codex |
 | --- | --- |
-| ![New issue editor](linear-editor-proof.png) | ![Issue detail with comments and session context](task-detail-embedded-proof.png) |
+| <img src="linear-ui-proof.png" alt="Task-state board with backlog, todo, in progress, and done columns" width="420"> | <img src="injection-proof.png" alt="Codex Taskboard embedded in the Codex desktop app" width="420"> |
+
+| Create issue with context | Issue detail with review context |
+| --- | --- |
+| <img src="linear-editor-proof.png" alt="New issue editor with status, priority, labels, and Codex task link" width="420"> | <img src="task-detail-embedded-proof.png" alt="Issue detail with comments and session context" width="420"> |
+
+| Comments, evidence, and task metadata | Narrow issue detail |
+| --- | --- |
+| <img src="task-detail-proof.png" alt="Issue detail page with comments, properties, and activity timeline" width="420"> | <img src="task-detail-narrow-proof.png" alt="Narrow issue detail layout for focused review" width="420"> |
 
 ## How it works
 

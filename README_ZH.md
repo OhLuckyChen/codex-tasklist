@@ -48,15 +48,19 @@
 
 ## 为什么需要它
 
-Codex Taskboard 面向这样的项目场景：同一批 backlog 会被人、Codex、Claude Code 和 Oh My Pi 反复接力处理。普通 issue tracker 可以描述任务，但通常不知道这个议题当前对应哪个本地仓库、分支、Codex task、终端会话、评论或项目知识页。
+Codex Taskboard 的目标不是让人继续盯着每一个 AI 会话，而是把注意力从“会话进行到哪了”转移到“任务现在是什么状态”。
 
-这个项目把这些操作上下文留在代码工作区旁边：
+在真实项目里，同一批 backlog 往往会被人、Codex、Claude Code 和 Oh My Pi 轮流处理。每个工具都会产生自己的会话、日志、评论和中间结论。如果这些信息分散在不同窗口里，人就需要不断追踪多个会话上下文，判断哪个任务在进行、哪个卡住了、哪个需要评审、哪个已经完成。
 
-- 用接近常规 issue tracker 的看板规划和评审任务；
-- 在 Codex 工作时直接打开同一个内嵌看板；
-- 为每个议题记录当前和历史 Codex、Claude Code、OMP 会话；
-- 从议题或某条评论直接创建 follow-up 会话；
-- 将项目知识、附件和任务状态保存在本机文件与 SQLite 中。
+Codex Taskboard 把这些过程收束到任务本身：
+
+- 以任务状态为中心管理 backlog、进行中、评审、阻塞和完成；
+- 在同一个议题下关联 Codex、Claude Code、Oh My Pi 的当前会话和历史会话；
+- 从议题或评论直接创建 follow-up 会话，让跨工具接力仍然围绕同一个任务展开；
+- 用评论、附件和项目知识记录中间过程，保留关键判断、证据和上下文；
+- 将沉淀下来的过程内容作为后续变更、评审和继续开发的支撑。
+
+换句话说，它把 AI 协作从“人追着会话跑”改成“工具围着任务状态转”，减少人的注意力消耗，也让跨 Agent、跨会话的开发过程更容易管理和复用。
 
 ## 工作流
 
@@ -82,11 +86,19 @@ Codex Taskboard 面向这样的项目场景：同一批 backlog 会被人、Code
 
 ## 界面截图
 
-![嵌入 Codex 桌面端的 Codex Taskboard](injection-proof.png)
+下面这些截图按主流程组织：把注意力放在任务状态上，在 Codex 内打开看板，带执行上下文创建议题，并把评审证据沉淀到议题历史中。
 
-| 新建议题编辑器 | 议题详情与评审上下文 |
+| 任务状态看板 | 嵌入 Codex |
 | --- | --- |
-| ![新建议题编辑器](linear-editor-proof.png) | ![带评论和会话上下文的议题详情](task-detail-embedded-proof.png) |
+| <img src="linear-ui-proof.png" alt="包含 backlog、待办、进行中和完成列的任务状态看板" width="420"> | <img src="injection-proof.png" alt="嵌入 Codex 桌面端的 Codex Taskboard" width="420"> |
+
+| 带上下文创建议题 | 议题详情与评审上下文 |
+| --- | --- |
+| <img src="linear-editor-proof.png" alt="包含状态、优先级、标签和 Codex task 链接的新建议题编辑器" width="420"> | <img src="task-detail-embedded-proof.png" alt="带评论和会话上下文的议题详情" width="420"> |
+
+| 评论、证据和任务元数据 | 窄屏议题详情 |
+| --- | --- |
+| <img src="task-detail-proof.png" alt="包含评论、属性和活动时间线的议题详情页" width="420"> | <img src="task-detail-narrow-proof.png" alt="适合聚焦评审的窄屏议题详情布局" width="420"> |
 
 ## 运行方式
 
