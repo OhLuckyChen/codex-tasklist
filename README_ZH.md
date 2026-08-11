@@ -88,21 +88,53 @@ Codex Taskboard 把这些过程收束到任务本身：
 
 下面这些截图覆盖主要功能面：项目管理、任务状态跟踪、收藏、Codex 内嵌、跨运行时会话操作、真实评审评论、项目知识库和议题上下文。
 
-| 项目管理 | 任务状态看板 |
-| --- | --- |
-| <img src="docs/screenshots/project-management.png" alt="包含已保存项目、项目分组、收藏、归档和全局任务视角的项目首页" width="420"> | <img src="linear-ui-proof.png" alt="包含 backlog、待办、进行中和完成列的任务状态看板" width="420"> |
+### 项目管理
 
-| 收藏 | 嵌入 Codex |
-| --- | --- |
-| <img src="docs/screenshots/favorites.png" alt="跨项目汇总星标任务的收藏议题视图" width="420"> | <img src="injection-proof.png" alt="嵌入 Codex 桌面端的 Codex Taskboard" width="420"> |
+从已保存项目开始，切换本地工作区，按分组查看活跃项目，进入全局任务视角，并在项目列表旁直接处理重命名、收藏和归档。
 
-| 评审评论与运行时会话 | 项目知识库 |
-| --- | --- |
-| <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="展示真实评审评论以及 Codex、Claude Code、Oh My Pi 会话操作的议题详情" width="420"> | <img src="docs/screenshots/knowledge-base.png" alt="包含已发布页面、待确认提案、健康状态和项目问答的项目知识中心" width="420"> |
+![包含已保存项目、项目分组、收藏、归档和全局任务视角的项目首页](docs/screenshots/project-management.png)
 
-| 带上下文创建议题 | 议题详情元数据 |
-| --- | --- |
-| <img src="linear-editor-proof.png" alt="包含状态、优先级、标签和 Codex task 链接的新建议题编辑器" width="420"> | <img src="task-detail-proof.png" alt="包含评论、属性和活动时间线的议题详情页" width="420"> |
+### 任务状态看板
+
+用任务状态组织工作，而不是让人追着分散的会话跑。议题会停留在 backlog、待办、进行中、评审、完成、阻塞、取消和归档这些明确状态里。
+
+![包含 backlog、待办、进行中和完成列的任务状态看板](linear-ui-proof.png)
+
+### 收藏
+
+把跨项目的重要任务收拢到一个聚焦视图里，紧急评审项和后续跟进不会散落在各个项目看板中。
+
+![跨项目汇总星标任务的收藏议题视图](docs/screenshots/favorites.png)
+
+### 嵌入 Codex
+
+在 Codex 桌面端内直接打开同一个任务面板，让任务状态和 Agent 执行上下文在工作发生时保持可见。
+
+![嵌入 Codex 桌面端的 Codex Taskboard](injection-proof.png)
+
+### 评审评论与运行时会话
+
+把真实评审反馈记录在评论里，同时保留当前与历史会话上下文，并能从同一个议题继续新建 Codex、Claude Code 或 Oh My Pi 会话。
+
+![展示真实评审评论以及 Codex、Claude Code、Oh My Pi 会话操作的议题详情](docs/screenshots/comment-feedback-and-sessions.png)
+
+### 项目知识库
+
+将议题讨论、评论和实现证据整理成项目知识提案，再人工确认哪些内容应该沉淀为长期文档。
+
+![包含已发布页面、待确认提案、健康状态和项目问答的项目知识中心](docs/screenshots/knowledge-base.png)
+
+### 带上下文创建议题
+
+新建议题时就记录状态、优先级、标签、负责人、开发上下文，并可关联 Codex task。
+
+![包含状态、优先级、标签和 Codex task 链接的新建议题编辑器](linear-editor-proof.png)
+
+### 议题详情元数据
+
+把议题详情页作为工作记录中心，集中承载评论、附件、属性、活动记录和评审交接。
+
+![包含评论、属性和活动时间线的议题详情页](task-detail-proof.png)
 
 ## 运行方式
 

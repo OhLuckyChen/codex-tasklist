@@ -88,21 +88,53 @@ In short, it changes AI-assisted development from "a person chasing sessions" in
 
 The screenshots below cover the main product surfaces: project management, task-state tracking, favorites, Codex embedding, cross-runtime session actions, real review comments, project knowledge, and issue context.
 
-| Project management | Task-state board |
-| --- | --- |
-| <img src="docs/screenshots/project-management.png" alt="Project home with saved projects, project grouping, favorites, archive, and global task view" width="420"> | <img src="linear-ui-proof.png" alt="Task-state board with backlog, todo, in progress, and done columns" width="420"> |
+### Project management
 
-| Favorites | Embedded in Codex |
-| --- | --- |
-| <img src="docs/screenshots/favorites.png" alt="Favorite issues view with starred tasks collected across projects" width="420"> | <img src="injection-proof.png" alt="Codex Taskboard embedded in the Codex desktop app" width="420"> |
+Start from saved projects, switch between local workspaces, group active projects, open the global task view, and keep project-level actions such as rename, favorite, and archive close to the project list.
 
-| Review comments and runtime sessions | Project knowledge |
-| --- | --- |
-| <img src="docs/screenshots/comment-feedback-and-sessions.png" alt="Issue detail showing real review comments plus Codex, Claude Code, and Oh My Pi session actions" width="420"> | <img src="docs/screenshots/knowledge-base.png" alt="Project knowledge center with published pages, pending proposals, health status, and project Q&A" width="420"> |
+![Project home with saved projects, project grouping, favorites, archive, and global task view](docs/screenshots/project-management.png)
 
-| Create issue with context | Issue detail metadata |
-| --- | --- |
-| <img src="linear-editor-proof.png" alt="New issue editor with status, priority, labels, and Codex task link" width="420"> | <img src="task-detail-proof.png" alt="Issue detail page with comments, properties, and activity timeline" width="420"> |
+### Task-state board
+
+Track work by status instead of by scattered conversations. Issues stay visible across backlog, todo, in-progress, review, done, blocked, canceled, and archived states.
+
+![Task-state board with backlog, todo, in progress, and done columns](linear-ui-proof.png)
+
+### Favorites
+
+Collect important tasks across projects into one focused view so urgent review items and follow-ups do not disappear into individual boards.
+
+![Favorite issues view with starred tasks collected across projects](docs/screenshots/favorites.png)
+
+### Embedded in Codex
+
+Open the same taskboard inside the Codex desktop app, keeping task state and agent execution context available while work is happening.
+
+![Codex Taskboard embedded in the Codex desktop app](injection-proof.png)
+
+### Review comments and runtime sessions
+
+Record real review feedback in comments, keep the current and historical session context attached, and start new Codex, Claude Code, or Oh My Pi sessions from the same issue.
+
+![Issue detail showing real review comments plus Codex, Claude Code, and Oh My Pi session actions](docs/screenshots/comment-feedback-and-sessions.png)
+
+### Project knowledge
+
+Turn issue discussions, comments, and implementation evidence into project knowledge proposals, then review what should become durable documentation.
+
+![Project knowledge center with published pages, pending proposals, health status, and project Q&A](docs/screenshots/knowledge-base.png)
+
+### Create issue with context
+
+Create issues with status, priority, labels, assignee, development context, and optional Codex task linkage from the beginning.
+
+![New issue editor with status, priority, labels, and Codex task link](linear-editor-proof.png)
+
+### Issue detail metadata
+
+Use the issue detail page as the working record for comments, attachments, properties, activity, and review handoff.
+
+![Issue detail page with comments, properties, and activity timeline](task-detail-proof.png)
 
 ## How it works
 
