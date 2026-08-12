@@ -194,6 +194,11 @@ export interface KnowledgeAnswer {
   }>;
 }
 
+export type KnowledgeQuestionnaireScope = "project" | "page" | "gap";
+export interface KnowledgeAnswerRecord { id: string; content: string; confidence: "high" | "medium" | "low" | "unknown"; status: "submitted" | "accepted" | "needs_revision" | "rejected"; author: Pick<ActorIdentity, "type" | "id" | "name">; reviewNote: string | null; proposalId: string | null; createdAt: string; updatedAt: string; }
+export interface KnowledgeQuestionRecord { id: string; context: string; prompt: string; gapReason: string; checkedSources: string[]; targetRole: string; answerFormat: string; knowledgeTarget: string; answers: KnowledgeAnswerRecord[]; }
+export interface KnowledgeQuestionnaire { id: string; projectId: string; scopeType: KnowledgeQuestionnaireScope; scopeRef: string | null; title: string; status: "draft" | "open" | "closed"; creator: Pick<ActorIdentity, "type" | "id" | "name">; createdAt: string; updatedAt: string; questions: KnowledgeQuestionRecord[]; }
+
 export interface WorkflowCapabilityOption {
   id: string;
   label: string;

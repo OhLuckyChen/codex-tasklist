@@ -178,6 +178,29 @@ test("project knowledge proposals preserve review state and publish only through
   assert.equal(published.body.proposal.status, "published");
 });
 
+test("knowledge questionnaires require gap evidence and only accepted answers create reviewable proposals", async () => {
+  const baseUrl = await startServer();
+  await request(baseUrl, "/api/projects", { method: "POST", body: { id: "survey", name: "Survey" } });
+  const invalid = await request(baseUrl, "/api/projects/survey/knowledge-questionnaires", { method: "POST", body: { scopeType: "project", title: "Bad", questions: [{ context: "c", prompt: "p", gapReason: "", checkedSources: [], targetRole: "r", answerFormat: "f", knowledgeTarget: "docs/knowledge/index.md" }] } });
+  assert.equal(invalid.response.status, 400);
+  const created = await request(baseUrl, "/api/projects/survey/knowledge-questionnaires", { method: "POST", body: { scopeType: "project", title: "Business gap", questions: [{ context: "订单取消", prompt: "实际取消规则是什么？", gapReason: "现有源码只有状态枚举，未说明业务口径。", checkedSources: ["docs/knowledge/architecture.md", "server/orders.ts"], targetRole: "订单负责人", answerFormat: "规则和例外", knowledgeTarget: "docs/knowledge/index.md" }] } });
+  assert.equal(created.response.status, 201);
+  const questionnaire = created.body.questionnaire;
+  const questionId = questionnaire.questions[0].id;
+  const beforeOpen = await request(baseUrl, `/api/knowledge-questions/${questionId}/answers`, { method: "POST", body: { content: "人工规则", confidence: "high" } });
+  assert.equal(beforeOpen.response.status, 409);
+  const opened = await request(baseUrl, `/api/projects/survey/knowledge-questionnaires/${questionnaire.id}`, { method: "PATCH", body: { status: "open" } });
+  assert.equal(opened.response.status, 200);
+  const answer = await request(baseUrl, `/api/knowledge-questions/${questionId}/answers`, { method: "POST", body: { content: "已付款订单只有财务确认后才能取消。", confidence: "high" } });
+  assert.equal(answer.response.status, 201);
+  const review = await request(baseUrl, `/api/knowledge-answers/${answer.body.answerId}/review`, { method: "POST", body: { status: "accepted", reviewNote: "已确认" } });
+  assert.equal(review.response.status, 200);
+  assert.equal(review.body.proposal.status, "ready");
+  assert.match(review.body.proposal.changes[0].afterContent, /财务确认/);
+  const closed = await request(baseUrl, `/api/projects/survey/knowledge-questionnaires/${questionnaire.id}`, { method: "PATCH", body: { status: "closed" } });
+  assert.equal(closed.response.status, 200);
+});
+
 test("a persistent project knowledge run stores its callback as a ready proposal", async () => {
   let workspacePath;
   const baseUrl = await startServer(async (directory) => {
