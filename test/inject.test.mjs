@@ -223,6 +223,10 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.match(source, /function createThreadForTask\(payload\)/);
   assert.match(source, /function activateProjectForThread\(payload, workspacePath, bridge\)/);
   assert.match(source, /await activateProjectForThread\(payload, workspacePath, bridge\)/);
+  assert.match(source, /function nativeCodexTaskInProgress\(\)/);
+  assert.match(source, /label === "停止" \|\| label === "stop"/);
+  assert.match(source, /function assertNativeComposerCanStartTask\(\)/);
+  assert.match(source, /assertNativeComposerCanStartTask\(\)/);
   assert.match(source, /waitForActiveNativeProject\(activatedProject\.id\)/);
   assert.match(source, /function selectComposerProject\(project\)/);
   assert.match(source, /activatedProject\.selectInComposer/);
@@ -240,6 +244,8 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.match(source, /requestHost\("prefill-task-composer"/);
   assert.match(source, /submit: true/);
   assert.match(source, /type: "taskboard:thread-prepared"/);
+  assert.match(source, /if \(page\?\.hidden !== false\) openTaskboard\(\);/);
+  assert.match(source, /type: "taskboard:thread-create-error"/);
   assert.doesNotMatch(source, /function waitForCreatedThread/);
   assert.match(
     webApp,

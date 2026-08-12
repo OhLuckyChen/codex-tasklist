@@ -218,6 +218,23 @@
     schedulePendingThreadLinkReceipt();
   }
 
+  function nativeCodexTaskInProgress() {
+    return Array.from(document.querySelectorAll("button")).some((button) => {
+      const label = (
+        button.getAttribute("aria-label")
+        || button.textContent
+        || ""
+      ).trim().toLowerCase();
+      return !button.disabled && (label === "停止" || label === "stop");
+    });
+  }
+
+  function assertNativeComposerCanStartTask() {
+    if (nativeCodexTaskInProgress()) {
+      throw new Error("Codex 当前仍在运行任务，请等待完成或点击停止后再新建会话。");
+    }
+  }
+
   pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
   pendingTaskThreadLink = readPendingTaskThreadLink();
   releaseExpiredThreadTransaction();
@@ -1157,6 +1174,7 @@
         throw new Error("当前 Codex 版本没有提供原生对话导航能力");
       }
       const activatedProject = await activateProjectForThread(payload, workspacePath, bridge);
+      assertNativeComposerCanStartTask();
 
       closeTaskboard(false);
       await dispatchHostMessage({
@@ -1191,6 +1209,7 @@
       if (pendingTaskThreadLink?.requestId === requestId) persistPendingTaskThreadLink(null);
       if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
       pendingThreadCheckTimer = null;
+      if (page?.hidden !== false) openTaskboard();
       postToFrame({
         type: "taskboard:thread-create-error",
         payload: {
