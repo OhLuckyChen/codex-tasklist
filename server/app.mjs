@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
@@ -17,6 +17,8 @@ import {
 import { normalizeCodexThreadId } from "../shared/codex-thread-id.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
+import { resolveAiWorkspace } from "./ai-chat-catalog.mjs";
+import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createClaudeLauncher } from "./claude-launcher.mjs";
 import { createOmpLauncher } from "./omp-launcher.mjs";
@@ -30,6 +32,8 @@ const AI_CHAT_TURN_BODY_LIMIT = 25 * 1024 * 1024;
 const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
 const AI_CHAT_ATTACHMENT_LIMIT = 10;
 const AI_CHAT_SKILL_MARKER = "\uFFFC";
+const HOST_RUNTIME_TTL_MS = 3_000;
+const CODEX_PLAN_TAIL_BYTES = 16 * 1024 * 1024;
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -568,7 +572,7 @@ function parseTaskCreate(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
     "projectId", "title", "description", "status", "priority", "labels", "sortOrder", "threadId",
-    "runtime", "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
+    "runtime", "assigneeTarget", "workflowId", "developmentContext", "startDate", "dueDate", "recurrence",
   ]));
   const projectId = validateProjectId(body.projectId ?? DEFAULT_PROJECT_ID);
   const task = {
@@ -584,6 +588,7 @@ function parseTaskCreate(body) {
     assigneeTarget: parseAssigneeTarget(body.assigneeTarget),
     workflowId: parseWorkflowId(body.workflowId ?? null),
     developmentContext: parseDevelopmentContext(body.developmentContext ?? null),
+    startDate: parseDueDate(body.startDate ?? null, "startDate"),
     dueDate: parseDueDate(body.dueDate ?? null),
     recurrence: parseRecurrence(body.recurrence ?? null),
   };
@@ -597,7 +602,7 @@ function parseTaskPatch(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
     "version", "title", "description", "status", "priority", "labels", "threadId",
-    "runtime", "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
+    "runtime", "assigneeTarget", "workflowId", "developmentContext", "startDate", "dueDate", "recurrence",
   ]));
   const version = parseVersion(body.version);
   const threadId = parseThreadId(body.threadId);
@@ -611,6 +616,7 @@ function parseTaskPatch(body) {
   if (body.labels !== undefined) changes.labels = parseLabels(body.labels);
   if (body.workflowId !== undefined) changes.workflowId = parseWorkflowId(body.workflowId);
   if (body.developmentContext !== undefined) changes.developmentContext = parseDevelopmentContext(body.developmentContext);
+  if (body.startDate !== undefined) changes.startDate = parseDueDate(body.startDate, "startDate");
   if (body.dueDate !== undefined) changes.dueDate = parseDueDate(body.dueDate);
   if (body.recurrence !== undefined) changes.recurrence = parseRecurrence(body.recurrence);
   if (runtime !== undefined) changes.runtime = runtime;
@@ -651,6 +657,84 @@ function parseArchive(body) {
 }
 
 function parseTaskThreadDelete(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version"]));
+  return { version: parseVersion(body.version) };
+}
+
+function parseConnectorRuntime(value) {
+  if (value === undefined) {
+    throw new ApiError(400, "INVALID_FIELD", "'runtime' is required");
+  }
+  if (value !== "claude" && value !== "omp") {
+    throw new ApiError(400, "INVALID_FIELD", "'runtime' must be 'claude' or 'omp' (codex not supported)");
+  }
+  return value;
+}
+
+function parseConnectorCustomHeaders(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  assertPlainObject(value);
+  const result = {};
+  for (const [key, raw] of Object.entries(value)) {
+    result[stringField(key, "customHeaders key", { required: true, maxLength: 120 })] =
+      stringField(raw, "customHeaders value", { required: true, maxLength: 1024 });
+  }
+  return result;
+}
+
+function parseConnectorCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "name", "runtime", "baseUrl", "apiKey", "model", "customHeaders",
+    "executable", "isDefault", "sortOrder",
+  ]));
+  const runtime = parseConnectorRuntime(body.runtime);
+  const name = stringField(body.name, "name", { required: true, maxLength: 120 });
+  const baseUrl = stringField(body.baseUrl ?? null, "baseUrl", { nullable: true, maxLength: 2048 });
+  const apiKey = stringField(body.apiKey ?? null, "apiKey", { nullable: true, maxLength: 512 });
+  const model = stringField(body.model ?? null, "model", { nullable: true, maxLength: 120 });
+  const executable = stringField(body.executable ?? null, "executable", { nullable: true, maxLength: 4096 });
+  const customHeaders = parseConnectorCustomHeaders(body.customHeaders);
+  const isDefault = body.isDefault === undefined ? false : Boolean(body.isDefault);
+  const sortOrder = body.sortOrder === undefined ? 0 : parseSortOrder(body.sortOrder);
+  return { name, runtime, baseUrl, apiKey, model, customHeaders, executable, isDefault, sortOrder };
+}
+
+function parseConnectorPatch(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "version", "name", "baseUrl", "apiKey", "model", "customHeaders",
+    "executable", "isDefault", "sortOrder",
+  ]));
+  const version = parseVersion(body.version);
+  const changes = {};
+  if (body.name !== undefined) {
+    changes.name = stringField(body.name, "name", { required: true, maxLength: 120 });
+  }
+  if (body.baseUrl !== undefined) {
+    changes.baseUrl = stringField(body.baseUrl ?? null, "baseUrl", { nullable: true, maxLength: 2048 });
+  }
+  if (body.apiKey !== undefined) {
+    changes.apiKey = stringField(body.apiKey ?? null, "apiKey", { nullable: true, maxLength: 512 });
+  }
+  if (body.model !== undefined) {
+    changes.model = stringField(body.model ?? null, "model", { nullable: true, maxLength: 120 });
+  }
+  if (body.executable !== undefined) {
+    changes.executable = stringField(body.executable ?? null, "executable", { nullable: true, maxLength: 4096 });
+  }
+  if (body.customHeaders !== undefined) changes.customHeaders = parseConnectorCustomHeaders(body.customHeaders);
+  if (body.isDefault !== undefined) changes.isDefault = Boolean(body.isDefault);
+  if (body.sortOrder !== undefined) changes.sortOrder = parseSortOrder(body.sortOrder);
+  if (Object.keys(changes).length === 0) {
+    throw new ApiError(400, "INVALID_BODY", "PATCH requires at least one connector field");
+  }
+  return { version, changes };
+}
+
+function parseConnectorVersionBody(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set(["version"]));
   return { version: parseVersion(body.version) };
@@ -1448,11 +1532,57 @@ export function createTaskboardServer(options = {}) {
   const resolved = resolveServerOptions(options);
   const database = new TaskboardDatabase(resolved.databasePath);
   const events = new EventHub();
+  const codexProcessEnvironment = withoutTaskboardLauncherEnvironment(
+    options.processEnv ?? process.env,
+  );
+
+  // Local-only AI chat context resolver: resolves the project workspace via the
+  // codex state path, falling back to PROJECT_ROOT for the default project, and
+  // attaches the active issue when an issueId is given. Mirrors the local branch
+  // of upstream's resolver without the cloud-companion path (not applicable here).
+  async function resolveAiChatContext(projectId, issueId) {
+    let resolvedWorkspace;
+    try {
+      resolvedWorkspace = await resolveAiWorkspace(
+        projectId,
+        resolved.codexStatePath,
+        database,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof ApiError)
+        || error.code !== "PROJECT_WORKSPACE_UNAVAILABLE"
+        || projectId !== DEFAULT_PROJECT_ID
+      ) {
+        throw error;
+      }
+      resolvedWorkspace = {
+        workspacePath: PROJECT_ROOT,
+        addDirectories: [],
+        project: database.getProject(projectId),
+      };
+    }
+    let issue;
+    if (issueId !== undefined) {
+      issue = database.getTask(issueId);
+      if (!issue || issue.projectId !== projectId || issue.archivedAt != null) {
+        throw new ApiError(
+          404,
+          "AI_CHAT_ISSUE_NOT_FOUND",
+          `Task '${issueId}' is not an active task in project '${projectId}'`,
+        );
+      }
+    }
+    return { ...resolvedWorkspace, issue };
+  }
+
   const aiChat = new AiChatService({
     database,
     codexExecutable: resolved.codexExecutable,
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
+    processEnv: codexProcessEnvironment,
+    resolveContext: resolveAiChatContext,
   });
   const knowledge = options.knowledgeService ?? new KnowledgeService({
     codexExecutable: resolved.codexExecutable,
@@ -1474,6 +1604,130 @@ export function createTaskboardServer(options = {}) {
   });
   const aiEventResponses = new Set();
   const knowledgeRuns = new Map();
+
+  // Codex session plan-progress scanning (backported from upstream v0.2.3).
+  // Reads the tail of ~/.codex/sessions/*-<threadId>.jsonl to derive plan step
+  // completion. Returns null for non-codex threads (claude/omp have no such
+  // session files), so it is safe to call for any thread id.
+  const codexSessionSearches = new Map();
+  const codexSessionStateCache = new Map();
+  const codexSessionsDirectory = path.join(path.dirname(resolved.codexStatePath), "sessions");
+  let hostRuntime = null;
+
+  async function findCodexSession(threadId) {
+    const cached = codexSessionSearches.get(threadId);
+    if (cached && (cached.path || Date.now() - cached.checkedAt < 5_000)) return cached.path;
+
+    const suffix = `-${threadId}.jsonl`;
+    const directories = [codexSessionsDirectory];
+    while (directories.length > 0) {
+      const directory = directories.pop();
+      let entries;
+      try {
+        entries = await readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      for (const entry of entries) {
+        const entryPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          directories.push(entryPath);
+        } else if (entry.isFile() && entry.name.endsWith(suffix)) {
+          codexSessionSearches.set(threadId, { path: entryPath, checkedAt: Date.now() });
+          return entryPath;
+        }
+      }
+    }
+
+    codexSessionSearches.set(threadId, { path: null, checkedAt: Date.now() });
+    return null;
+  }
+
+  async function readCodexSessionState(threadId) {
+    const sessionPath = await findCodexSession(threadId);
+    if (!sessionPath) return null;
+
+    const sessionStat = await stat(sessionPath);
+    const cached = codexSessionStateCache.get(sessionPath);
+    if (cached?.size === sessionStat.size && cached.mtimeMs === sessionStat.mtimeMs) {
+      return cached.state;
+    }
+
+    const length = Math.min(sessionStat.size, CODEX_PLAN_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const handle = await open(sessionPath, "r");
+    try {
+      await handle.read(buffer, 0, length, sessionStat.size - length);
+    } finally {
+      await handle.close();
+    }
+
+    const lines = buffer.toString("utf8").split("\n");
+    if (length < sessionStat.size) lines.shift();
+    const records = [];
+    for (const line of lines) {
+      try {
+        records.push(JSON.parse(line));
+      } catch {}
+    }
+
+    let runningTurnId = null;
+    for (const record of records) {
+      const payload = record?.payload;
+      if (record?.type !== "event_msg" || typeof payload?.turn_id !== "string") continue;
+      if (payload.type === "task_started") runningTurnId = payload.turn_id;
+      if (
+        (payload.type === "task_complete" || payload.type === "turn_aborted")
+        && payload.turn_id === runningTurnId
+      ) {
+        runningTurnId = null;
+      }
+    }
+
+    let progress = null;
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const record = records[index];
+      const payload = record?.payload;
+      if (payload?.type !== "custom_tool_call" || typeof payload.input !== "string") continue;
+
+      let statuses = [];
+      if (payload.name === "update_plan") {
+        try {
+          const input = JSON.parse(payload.input);
+          statuses = Array.isArray(input.plan)
+            ? input.plan.map((item) => item?.status).filter(Boolean)
+            : [];
+        } catch {}
+      } else if (payload.name === "exec") {
+        const callIndex = payload.input.lastIndexOf("tools.update_plan(");
+        if (callIndex < 0) continue;
+        statuses = [...payload.input.slice(callIndex).matchAll(
+          /["']?status["']?\s*:\s*["'](completed|in_progress|pending)["']/g,
+        )].map((match) => match[1]);
+      }
+
+      if (statuses.length > 0) {
+        progress = {
+          completed: statuses.filter((status) => status === "completed").length,
+          total: statuses.length,
+        };
+        break;
+      }
+    }
+
+    const state = {
+      completed: progress?.completed ?? null,
+      total: progress?.total ?? null,
+      running: runningTurnId !== null,
+    };
+    codexSessionStateCache.set(sessionPath, {
+      size: sessionStat.size,
+      mtimeMs: sessionStat.mtimeMs,
+      state,
+    });
+    return state;
+  }
 
   function knowledgeRun(runId, token) {
     const run = knowledgeRuns.get(runId);
@@ -1695,11 +1949,67 @@ export function createTaskboardServer(options = {}) {
           ),
           claudeRuntime: claudeLauncher.supportedPlatform,
           ompRuntime: ompLauncher.supportedPlatform,
+          connectors: database.listConnectors(),
           capabilities: {
             localAiChat: isLoopbackAddress(request.socket.remoteAddress),
             localKnowledge: isLoopbackAddress(request.socket.remoteAddress),
           },
         });
+      }
+
+      if (pathname === "/api/local/codex-thread-progress") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        if ([...url.searchParams.keys()].some((key) => key !== "threadId")) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Only 'threadId' is supported");
+        }
+        const threadIds = [...new Set(
+          url.searchParams.getAll("threadId")
+            .map((value) => normalizeCodexThreadId(value))
+            .filter((value) => value !== null),
+        )];
+        if (threadIds.length > 64) {
+          throw new ApiError(400, "INVALID_FIELD", "'threadId' must contain valid Codex thread IDs");
+        }
+        const entries = await Promise.all(threadIds.map(async (threadId) => (
+          [threadId, await readCodexSessionState(threadId)]
+        )));
+        return sendJson(response, 200, { progress: Object.fromEntries(entries) });
+      }
+
+      if (pathname === "/api/local/host-runtime") {
+        if (request.method === "GET") {
+          const runtime = hostRuntime && Date.now() - hostRuntime.updatedAt <= HOST_RUNTIME_TTL_MS
+            ? hostRuntime
+            : null;
+          return sendJson(response, 200, { runtime });
+        }
+        if (request.method === "PUT") {
+          const body = await readJson(request);
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["threadId", "threadRunning", "threadTodoProgress"]));
+          const threadId = stringField(body.threadId, "threadId", { required: true, maxLength: 256 });
+          if (typeof body.threadRunning !== "boolean") {
+            throw new ApiError(400, "INVALID_FIELD", "'threadRunning' must be a boolean");
+          }
+          let threadTodoProgress = null;
+          if (body.threadTodoProgress != null) {
+            assertPlainObject(body.threadTodoProgress);
+            assertAllowedKeys(body.threadTodoProgress, new Set(["completed", "total"]));
+            const { completed, total } = body.threadTodoProgress;
+            if (!Number.isInteger(completed) || !Number.isInteger(total) || completed < 0 || total < 1) {
+              throw new ApiError(400, "INVALID_FIELD", "'threadTodoProgress' is invalid");
+            }
+            threadTodoProgress = { completed: Math.min(completed, total), total };
+          }
+          hostRuntime = {
+            threadId,
+            threadRunning: body.threadRunning,
+            threadTodoProgress,
+            updatedAt: Date.now(),
+          };
+          return sendJson(response, 200, { runtime: hostRuntime });
+        }
+        return methodNotAllowed(response, ["GET", "PUT"]);
       }
 
       if (pathname === "/api/local/ai/catalog") {
@@ -1917,8 +2227,9 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "UNSUPPORTED", "Claude runtime is only supported on macOS (Terminal.app).");
         }
         const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
+        const connector = database.getDefaultConnector("claude");
         try {
-          claudeLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt });
+          claudeLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt, connector });
         } catch (error) {
           throw new ApiError(500, "CLAUDE_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch Claude session");
         }
@@ -1950,8 +2261,9 @@ export function createTaskboardServer(options = {}) {
         if (!claudeLauncher.supportedPlatform) {
           throw new ApiError(400, "UNSUPPORTED", "Claude runtime is only supported on macOS (Terminal.app).");
         }
+        const connector = database.getDefaultConnector("claude");
         try {
-          claudeLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp });
+          claudeLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp, connector });
         } catch (error) {
           throw new ApiError(500, "CLAUDE_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to resume Claude session");
         }
@@ -1991,8 +2303,9 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "UNSUPPORTED", "OMP runtime is only supported on macOS (Terminal.app).");
         }
         const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
+        const connector = database.getDefaultConnector("omp");
         try {
-          ompLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt });
+          ompLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt, connector });
         } catch (error) {
           throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch OMP session");
         }
@@ -2024,8 +2337,9 @@ export function createTaskboardServer(options = {}) {
         if (!ompLauncher.supportedPlatform) {
           throw new ApiError(400, "UNSUPPORTED", "OMP runtime is only supported on macOS (Terminal.app).");
         }
+        const connector = database.getDefaultConnector("omp");
         try {
-          ompLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp });
+          ompLauncher.resumeSession({ workspacePath: resolvedWorkspace, sessionId: threadId, followUp, connector });
         } catch (error) {
           throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to resume OMP session");
         }
@@ -2073,6 +2387,56 @@ export function createTaskboardServer(options = {}) {
           200,
           await discoverWorkflowCapabilities(resolved, workspacePath ?? PROJECT_ROOT),
         );
+      }
+
+      if (pathname === "/api/connectors") {
+        if (request.method === "GET") {
+          if ([...url.searchParams.keys()].length > 0) {
+            throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/connectors does not accept query parameters");
+          }
+          return sendJson(response, 200, { connectors: database.listConnectors() });
+        }
+        if (request.method === "POST") {
+          const connector = database.createConnector(parseConnectorCreate(await readJson(request)));
+          events.emit("connector.changed", { connector });
+          return sendJson(response, 201, { connector });
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const connectorDefaultRoute = pathname.match(/^\/api\/connectors\/([^/]+)\/default$/);
+      if (connectorDefaultRoute) {
+        const id = decodeRouteSegment(connectorDefaultRoute[1], "Connector id");
+        assertNoQuery(url.searchParams, "POST /api/connectors/:id/default");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const { version } = parseConnectorVersionBody(await readJson(request));
+        const connector = database.setDefaultConnector(id, version);
+        events.emit("connector.changed", { connector });
+        return sendJson(response, 200, { connector });
+      }
+
+      const connectorItemRoute = pathname.match(/^\/api\/connectors\/([^/]+)$/);
+      if (connectorItemRoute) {
+        const id = decodeRouteSegment(connectorItemRoute[1], "Connector id");
+        assertNoQuery(url.searchParams, "/api/connectors/:id");
+        if (request.method === "GET") {
+          const connector = database.getConnector(id);
+          if (!connector) throw new ApiError(404, "CONNECTOR_NOT_FOUND", `Connector '${id}' does not exist`);
+          return sendJson(response, 200, { connector });
+        }
+        if (request.method === "PATCH") {
+          const { version, changes } = parseConnectorPatch(await readJson(request));
+          const connector = database.updateConnector(id, version, changes);
+          events.emit("connector.changed", { connector });
+          return sendJson(response, 200, { connector });
+        }
+        if (request.method === "DELETE") {
+          const { version } = parseConnectorVersionBody(await readJson(request));
+          database.deleteConnector(id, version);
+          events.emit("connector.changed", { id });
+          return sendJson(response, 200, { id });
+        }
+        return methodNotAllowed(response, ["GET", "PATCH", "DELETE"]);
       }
 
       if (pathname === "/api/projects") {

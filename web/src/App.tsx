@@ -2063,10 +2063,10 @@ export function App() {
     return Object.fromEntries(
       TASK_STATUSES.map((status) => [
         status,
-        filteredTasks
-          .filter((task) => task.status === status)
-          .slice()
-          .sort(compareTasksByStatusChangedAt),
+        // Board issues view honors user drag order (sortOrder); time grouping by
+        // statusChangedAt is applied inside BoardColumn, so groups still read
+        // recent-activity while column order stays manual.
+        sortTasks(filteredTasks.filter((task) => task.status === status)),
       ]),
     ) as Record<TaskStatus, Task[]>;
   }, [filteredTasks]);
