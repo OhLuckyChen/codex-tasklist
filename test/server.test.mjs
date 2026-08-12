@@ -179,8 +179,9 @@ test("project knowledge proposals preserve review state and publish only through
 });
 
 test("knowledge questionnaires require gap evidence and only accepted answers create reviewable proposals", async () => {
-  const baseUrl = await startServer();
-  await request(baseUrl, "/api/projects", { method: "POST", body: { id: "survey", name: "Survey" } });
+  let workspacePath;
+  const baseUrl = await startServer(async (directory) => { workspacePath = path.join(directory, "workspace"); await mkdir(workspacePath, { recursive: true }); return {}; });
+  await request(baseUrl, "/api/projects", { method: "POST", body: { id: "survey", name: "Survey", workspacePath } });
   const invalid = await request(baseUrl, "/api/projects/survey/knowledge-questionnaires", { method: "POST", body: { scopeType: "project", title: "Bad", questions: [{ context: "c", prompt: "p", gapReason: "", checkedSources: [], targetRole: "r", answerFormat: "f", knowledgeTarget: "docs/knowledge/index.md" }] } });
   assert.equal(invalid.response.status, 400);
   const created = await request(baseUrl, "/api/projects/survey/knowledge-questionnaires", { method: "POST", body: { scopeType: "project", title: "Business gap", questions: [{ context: "订单取消", prompt: "实际取消规则是什么？", gapReason: "现有源码只有状态枚举，未说明业务口径。", checkedSources: ["docs/knowledge/architecture.md", "server/orders.ts"], targetRole: "订单负责人", answerFormat: "规则和例外", knowledgeTarget: "docs/knowledge/index.md" }] } });
@@ -197,6 +198,10 @@ test("knowledge questionnaires require gap evidence and only accepted answers cr
   assert.equal(review.response.status, 200);
   assert.equal(review.body.proposal.status, "ready");
   assert.match(review.body.proposal.changes[0].afterContent, /财务确认/);
+  assert.equal(review.body.proposal.changes[0].operation, "create");
+  const receipt = await request(baseUrl, "/api/local/projects/survey/knowledge/publish", { method: "POST", body: { workspacePath, proposal: { id: review.body.proposal.id, version: review.body.proposal.version, changes: review.body.proposal.changes } } });
+  assert.equal(receipt.response.status, 200);
+  assert.match(await readFile(path.join(workspacePath, review.body.proposal.changes[0].targetPath), "utf8"), /人工确认回答/);
   const duplicateReview = await request(baseUrl, `/api/knowledge-answers/${answer.body.answerId}/review`, { method: "POST", body: { status: "accepted" } });
   assert.equal(duplicateReview.response.status, 409);
   const proposals = await request(baseUrl, "/api/projects/survey/knowledge-proposals?status=ready");
