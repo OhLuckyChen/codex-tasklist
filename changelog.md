@@ -1,14 +1,19 @@
 # Changelog
 
-## 2026-08-12 — release/qa 历史会话恢复与多视图回退
+## 2026-08-12 — release/qa 运行时、上游能力整合与视图回退
 
-- 回退上游 v0.2.3 的 Dashboard / List / Gantt 三个项目视图，不再在项目页暴露“仪表盘 / 列表 / 甘特图”切换。
-- 删除 `DashboardView.tsx`、`IssueListView.tsx`、`GanttView.tsx`，清理对应 `dashboard-*`、`issue-list-*`、`gantt-*` 样式和三视图专用 presentation 聚合代码。
-- 移除 `dhtmlx-gantt` 依赖，`package.json` 与 `package-lock.json` 同步更新。
-- 保留普通看板卡片的 Codex 进度条能力；该能力仍由现有 `BoardColumn` 使用，不依赖被回退的三视图。
+- 看板排序改为按状态变更时间分组展示，任务卡片在“今日 / 昨日 / 上周 / 更早”内保持连续；普通 issues 看板仍保留用户拖拽排序语义。
+- 新增运行时连接器配置层，支持 Claude 与 Oh My Pi 按运行时维护默认连接器；Claude 启动器可注入 `ANTHROPIC_*` 环境变量和模型参数，OMP 启动器支持 `.env` 覆盖与 provider/model 路由。
+- 项目首页新增连接器入口，便于从 Taskboard 内直接管理本机运行时连接配置。
+- 文件级整合上游 v0.2.3 的重叠能力：补齐 `startDate` 字段的数据库、API、编辑器和详情页链路；保留本地多运行时、项目知识和连接器主干。
+- 回填 Codex 会话计划进度读取能力，普通看板卡片可展示运行中会话的 plan progress；该能力独立于后来回退的 Dashboard/List/Gantt 三视图。
+- 精简本地 AI Chat 面板相关 API、前端组件和测试文件，保留通用 Codex 子进程执行基础设施给项目知识提案使用。
 - 调整 Codex/Claude/OMP 会话运行时识别与跳转逻辑，历史会话会按线程归属推断运行时，避免非 Codex 会话误走 Codex 原生打开路径。
 - Codex 注入脚本在打开已有线程前会展开原生侧栏任务区，提升已关联历史会话跳转成功率。
 - 议题详情补充当前会话与历史相关会话的说明，降低用户误判当前会话和历史会话含义的概率。
+- 最终回退上游 v0.2.3 的 Dashboard / List / Gantt 三个项目视图，不再暴露“仪表盘 / 列表 / 甘特图”项目级切换；删除 `DashboardView.tsx`、`IssueListView.tsx`、`GanttView.tsx`、三视图专用 presentation 聚合代码和 `dashboard-*`、`issue-list-*`、`gantt-*` 样式。
+- 移除 `dhtmlx-gantt` 依赖，`package.json` 与 `package-lock.json` 同步更新。
+- 更新 `docs/comparative-eval.md`、`docs/integration-v0.2.3.md` 和项目知识索引，记录 v0.2.3 整合取舍、保留项、回退项和验证结果。
 - 验证：`npm run typecheck`、`node --test test/board-interactions.test.mjs test/inject.test.mjs`、`npm run build`、`npm test` 均通过；`npm run build` 已刷新当前 Codex 注入页。
 
 ## 2026-08-11 — 设计方案与文档目录整理
