@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "taskboard": {
+      "command": "node",
+      "args": ["./server/taskboard-mcp.mjs"],
+      "cwd": ".",
+      "env_vars": ["TASKBOARD_MCP_URL"]
+    }
+  }
+}

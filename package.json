@@ -21,6 +21,7 @@
     "build:web": "vite build --config web/vite.config.ts",
     "typecheck": "tsc -p web/tsconfig.json --noEmit",
     "start": "node server/index.mjs",
+    "start:mcp": "node server/taskboard-mcp.mjs",
     "taskctl": "node cli/taskctl.mjs",
     "test": "node --test",
     "check": "npm run typecheck && npm run build && npm test"
