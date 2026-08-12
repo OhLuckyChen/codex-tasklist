@@ -1277,6 +1277,9 @@ export function TaskDetail({
                 )}
                 {linkedThreadIds.length > 0 && (
                   <div className="issue-conversation-list" aria-label="处理此议题的对话">
+                    <p className="issue-conversation-help">
+                      当前会话是最近一次直接处理议题的对话；历史相关会话是此前处理过此议题或关联过评论的其他对话。
+                    </p>
                     {currentTask.threadId && (
                       <div className="comment-conversation-link issue-conversation-item">
                         <ConversationLink

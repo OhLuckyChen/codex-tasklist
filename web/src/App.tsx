@@ -63,12 +63,9 @@ import {
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
 import { ConnectorsPanel } from "./components/ConnectorsPanel";
-import { DashboardView } from "./components/DashboardView";
 import { DraftBox } from "./components/DraftBox";
 import { FavoriteTaskList } from "./components/FavoriteTaskList";
-import { GanttView, type GanttZoom } from "./components/GanttView";
 import { HiddenColumns } from "./components/HiddenColumns";
-import { IssueListView } from "./components/IssueListView";
 import { KnowledgeCenter } from "./components/KnowledgeCenter";
 import {
   resolveInlineMediaMarkdown,
@@ -92,9 +89,7 @@ import {
   writeTaskFilters,
 } from "./taskFilters";
 import {
-  taskCardPresentation,
   taskThreadRuntime,
-  type TaskConversationItem,
 } from "./taskConversations";
 import {
   TASK_STATUSES,
@@ -125,7 +120,7 @@ import {
 } from "./workflowStore";
 type ConnectionState = "connecting" | "live" | "reconnecting";
 type Theme = "light" | "dark";
-type BoardView = "dashboard" | "issues" | "list" | "gantt" | "drafts" | "knowledge" | "workflow";
+type BoardView = "issues" | "drafts" | "knowledge" | "workflow";
 const SHOW_WORKFLOW_BOARD_ENTRY = false;
 const GLOBAL_PROJECT_ID = "__all_projects__";
 const GLOBAL_VIEW_QUERY_PARAM = "view";
@@ -637,10 +632,7 @@ function sortTasks(tasks: Task[]): Task[] {
 }
 
 function isProjectBoardView(value: string | null): value is BoardView {
-  return value === "dashboard"
-    || value === "issues"
-    || value === "list"
-    || value === "gantt"
+  return value === "issues"
     || value === "drafts"
     || value === "knowledge"
     || value === "workflow";
@@ -846,9 +838,6 @@ export function App() {
   const [boardView, setBoardView] = useState<BoardView>(() => (
     selectedProjectId ? readProjectBoardView(selectedProjectId) : "issues"
   ));
-  const [ganttZoom, setGanttZoom] = useState<GanttZoom>("week");
-  const [ganttHideCompleted, setGanttHideCompleted] = useState(false);
-  const [ganttTodayRequest, setGanttTodayRequest] = useState(0);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [issueDrafts, setIssueDrafts] = useState(readIssueDrafts);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
@@ -904,7 +893,6 @@ export function App() {
   const undoStackRef = useRef<UndoOperation[]>([]);
   const undoInFlightRef = useRef(false);
   const dragRegionRef = useRef<HTMLDivElement>(null);
-  const issueListScrollRef = useRef<HTMLDivElement | null>(null);
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
 
@@ -2151,13 +2139,6 @@ export function App() {
     return map;
   }, [codexThreadProgress, tasks]);
 
-  const taskPresentations = useMemo(() => Object.fromEntries(
-    filteredTasks.map((task) => [
-      task.id,
-      taskCardPresentation(task, false, progressByTaskId.get(task.id) ?? null),
-    ]),
-  ), [filteredTasks, progressByTaskId]);
-
   const tasksByStatus = useMemo(() => {
     return Object.fromEntries(
       TASK_STATUSES.map((status) => [
@@ -2790,10 +2771,6 @@ export function App() {
     }
 
     window.location.assign(`codex://threads/${encodeURIComponent(normalizedThreadId)}`);
-  }
-
-  function openTaskConversation(task: Task, conversation: TaskConversationItem) {
-    if (conversation.nativeThreadId) openThread(conversation.nativeThreadId, task);
   }
 
   function expandCodexSidebar() {
@@ -3686,17 +3663,6 @@ export function App() {
         {selectedProjectId && !detailTask && <div className="board-toolbar">
           <div className="view-tabs" aria-label="看板视图">
             <button
-              className={`view-tab${boardView === "dashboard" ? " active" : ""}`}
-              type="button"
-              aria-pressed={boardView === "dashboard"}
-              onClick={() => {
-                setFavoriteTasksOnly(false);
-                selectBoardView("dashboard");
-              }}
-            >
-              仪表盘
-            </button>
-            <button
               className={`view-tab${boardView === "issues" && !favoriteTasksOnly ? " active" : ""}`}
               type="button"
               aria-pressed={boardView === "issues" && !favoriteTasksOnly}
@@ -3706,28 +3672,6 @@ export function App() {
               }}
             >
               议题看板
-            </button>
-            <button
-              className={`view-tab${boardView === "list" ? " active" : ""}`}
-              type="button"
-              aria-pressed={boardView === "list"}
-              onClick={() => {
-                setFavoriteTasksOnly(false);
-                selectBoardView("list");
-              }}
-            >
-              列表
-            </button>
-            <button
-              className={`view-tab${boardView === "gantt" ? " active" : ""}`}
-              type="button"
-              aria-pressed={boardView === "gantt"}
-              onClick={() => {
-                setFavoriteTasksOnly(false);
-                selectBoardView("gantt");
-              }}
-            >
-              甘特图
             </button>
             <button
               className={`view-tab favorite-view-tab${boardView === "issues" && favoriteTasksOnly ? " active" : ""}`}
@@ -3846,37 +3790,6 @@ export function App() {
               </button>
             )}
           </div>}
-          {boardView === "gantt" && (
-            <div className="toolbar-tools gantt-toolbar-tools">
-              <div className="favorite-view-mode-switch" role="group" aria-label="甘特图缩放">
-                {(["day", "week", "month"] as const).map((zoom) => (
-                  <button
-                    type="button"
-                    aria-pressed={ganttZoom === zoom}
-                    onClick={() => setGanttZoom(zoom)}
-                    key={zoom}
-                  >
-                    <span>{zoom === "day" ? "日" : zoom === "week" ? "周" : "月"}</span>
-                  </button>
-                ))}
-              </div>
-              <label className="gantt-hide-completed">
-                <input
-                  type="checkbox"
-                  checked={ganttHideCompleted}
-                  onChange={(event) => setGanttHideCompleted(event.target.checked)}
-                />
-                <span>隐藏已完成</span>
-              </label>
-              <button
-                className="button secondary"
-                type="button"
-                onClick={() => setGanttTodayRequest((current) => current + 1)}
-              >
-                今天
-              </button>
-            </div>
-          )}
         </div>}
 
         {(loadError || actionError) && (
@@ -4040,37 +3953,6 @@ export function App() {
               </div>
             )}
           </section>
-        ) : !detailTask && boardView === "dashboard" && selectedProject ? (
-          <DashboardView
-            projectCreatedAt={selectedProject.createdAt}
-            tasks={filteredTasks}
-            presentations={taskPresentations}
-            currentUser={currentUser}
-            onOpenTask={openTaskDetail}
-            onOpenThread={openThread}
-          />
-        ) : !detailTask && boardView === "list" ? (
-          <IssueListView
-            scrollRef={issueListScrollRef}
-            tasks={filteredTasks}
-            presentations={taskPresentations}
-            currentUser={currentUser}
-            hasActiveFilters={Boolean(search || activeFilterCount > 0)}
-            onOpenTask={openTaskDetail}
-            onOpenConversation={openTaskConversation}
-            onUpdate={(task, changes) => updateTaskProperties(task, changes)}
-          />
-        ) : !detailTask && boardView === "gantt" ? (
-          <GanttView
-            tasks={filteredTasks}
-            presentations={taskPresentations}
-            hasActiveFilters={Boolean(search || activeFilterCount > 0)}
-            zoom={ganttZoom}
-            hideCompleted={ganttHideCompleted}
-            todayRequest={ganttTodayRequest}
-            onOpenTask={openTaskDetail}
-            onUpdate={(task, changes) => updateTaskProperties(task, changes)}
-          />
         ) : !detailTask && boardView === "drafts" ? (
           <DraftBox
             drafts={visibleIssueDrafts}
