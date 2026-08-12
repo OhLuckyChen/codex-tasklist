@@ -238,6 +238,83 @@ test("a persistent project knowledge run stores its callback as a ready proposal
   );
 });
 
+test("project WeCom bots keep secrets encrypted and route isolated sessions to project knowledge", async () => {
+  let workspacePath;
+  const asked = [];
+  const knowledgeService = {
+    ask: async (workspace, question) => {
+      asked.push({ workspace, question });
+      return {
+        answer: `answer ${asked.length}`,
+        citations: [{ type: "file", ref: "server/app.mjs", label: "server app" }],
+      };
+    },
+  };
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    return { knowledgeService, botSecretKey: "test-secret-key" };
+  });
+  await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "wecom", name: "WeCom", workspacePath },
+  });
+
+  const created = await request(baseUrl, "/api/projects/wecom/bots", {
+    method: "POST",
+    body: {
+      botId: "bot-alpha",
+      secret: "plain-secret-value",
+      enabled: true,
+      runtime: "codex",
+      workspacePath,
+      knowledgeEnabled: true,
+      codeSearchEnabled: true,
+    },
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.bot.hasSecret, true);
+  assert.equal("secret" in created.body.bot, false);
+  assert.equal(JSON.stringify(created.body).includes("plain-secret-value"), false);
+
+  const listed = await request(baseUrl, "/api/projects/wecom/bots");
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.bots.length, 1);
+  assert.equal(JSON.stringify(listed.body).includes("plain-secret-value"), false);
+
+  const first = await request(baseUrl, "/api/wecom/bots/bot-alpha/messages", {
+    method: "POST",
+    body: {
+      conversationId: "single-user-a",
+      messageType: "text",
+      text: "调用链在哪里？",
+    },
+  });
+  assert.equal(first.response.status, 200);
+  assert.equal(first.body.answer.answer, "answer 1");
+  assert.equal(first.body.session.wecomConversationId, "single-user-a");
+
+  const second = await request(baseUrl, "/api/wecom/bots/bot-alpha/messages", {
+    method: "POST",
+    body: {
+      conversationId: "room-b",
+      messageType: "text",
+      text: "排障怎么查？",
+    },
+  });
+  assert.equal(second.response.status, 200);
+  assert.notEqual(second.body.session.id, first.body.session.id);
+  assert.equal(asked.length, 2);
+  assert.equal(asked[0].workspace, workspacePath);
+  assert.match(asked[0].question, /只读回答/);
+
+  const audit = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+  assert.equal(audit.response.status, 200);
+  assert.equal(audit.body.events.length, 4);
+  const answered = audit.body.events.find((event) => event.direction === "outbound" && event.status === "answered");
+  assert.deepEqual(answered.citations, [{ type: "file", ref: "server/app.mjs", label: "server app" }]);
+});
+
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {
   const baseUrl = await startServer();
   const initial = await request(baseUrl, "/api/projects/local/workflow-workspace");
