@@ -1,16 +1,15 @@
 # Changelog
 
-## 2026-08-12 — release/qa 运行时与多视图发布
+## 2026-08-12 — release/qa 历史会话恢复与多视图回退
 
-- 将上游 v0.2.3 的 Dashboard / List / Gantt 视图按文件级迁移到本地 `release/qa`：项目页顶部新增“仪表盘 / 议题看板 / 列表 / 甘特图”切换，并保留草稿箱、项目知识和节点模式入口。
-- 新增 `dhtmlx-gantt` 甘特图依赖；甘特图支持日/周/月缩放、隐藏已完成、定位今天，并通过现有任务更新接口回写 `startDate` / `dueDate`。
-- 新增 `taskConversations.ts` 作为任务卡片 presentation 聚合层，统一给 Dashboard、List、Gantt 提供会话、运行状态和进度展示数据。
-- Dashboard 采用本地实时统计展示项目完成度、优先级、标签、关注项、运行中任务、到期任务、角色贡献和活动热度；暂不启用 `ProjectSummaryService` / `project_summaries` 后端缓存。
-- 视图选择按项目记忆；从项目入口或路由切回项目时恢复上次视图，全局任务和收藏入口仍保持原有 issues 语义。
-- 精简本地 AI Chat 面板相关 API、前端组件和测试文件，保留通用 Codex 子进程执行基础设施给项目知识提案使用。
+- 回退上游 v0.2.3 的 Dashboard / List / Gantt 三个项目视图，不再在项目页暴露“仪表盘 / 列表 / 甘特图”切换。
+- 删除 `DashboardView.tsx`、`IssueListView.tsx`、`GanttView.tsx`，清理对应 `dashboard-*`、`issue-list-*`、`gantt-*` 样式和三视图专用 presentation 聚合代码。
+- 移除 `dhtmlx-gantt` 依赖，`package.json` 与 `package-lock.json` 同步更新。
+- 保留普通看板卡片的 Codex 进度条能力；该能力仍由现有 `BoardColumn` 使用，不依赖被回退的三视图。
 - 调整 Codex/Claude/OMP 会话运行时识别与跳转逻辑，历史会话会按线程归属推断运行时，避免非 Codex 会话误走 Codex 原生打开路径。
-- Codex 注入脚本在打开已有线程前会展开原生侧栏任务区，提升已关联会话跳转成功率。
-- 验证：`npm run typecheck`、`npm run build:web`、`npm test` 均通过；`npm run build` 已刷新当前 Codex 注入页。
+- Codex 注入脚本在打开已有线程前会展开原生侧栏任务区，提升已关联历史会话跳转成功率。
+- 议题详情补充当前会话与历史相关会话的说明，降低用户误判当前会话和历史会话含义的概率。
+- 验证：`npm run typecheck`、`node --test test/board-interactions.test.mjs test/inject.test.mjs`、`npm run build`、`npm test` 均通过；`npm run build` 已刷新当前 Codex 注入页。
 
 ## 2026-08-11 — 设计方案与文档目录整理
 

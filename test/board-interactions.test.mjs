@@ -29,7 +29,7 @@ test("published comments can explicitly remove an incorrect conversation associa
 });
 
 test("project knowledge keeps confirmed files separate from reviewable issue and comment proposals", () => {
-  assert.match(appSource, /type BoardView = "dashboard" \| "issues" \| "list" \| "gantt" \| "drafts" \| "knowledge"/);
+  assert.match(appSource, /type BoardView = "issues" \| "drafts" \| "knowledge"/);
   assert.match(appSource, />\s*项目知识\{knowledgeProposalCount/);
   assert.match(appSource, /queueAutomaticKnowledgeReview/);
   assert.match(appSource, /moved\.status === "in_review" \|\| moved\.status === "done"/);
@@ -47,15 +47,20 @@ test("project knowledge keeps confirmed files separate from reviewable issue and
   assert.match(styles, /\.comment-knowledge-toolbar/);
 });
 
-test("dashboard, list, and gantt views share the issue task model", () => {
-  assert.match(appSource, /import \{ DashboardView \}/);
-  assert.match(appSource, /import \{ GanttView, type GanttZoom \}/);
-  assert.match(appSource, /import \{ IssueListView \}/);
-  assert.match(appSource, /taskCardPresentation\(task, false, progressByTaskId\.get\(task\.id\) \?\? null\)/);
-  assert.match(appSource, /selectBoardView\("dashboard"\)/);
-  assert.match(appSource, /selectBoardView\("list"\)/);
-  assert.match(appSource, /selectBoardView\("gantt"\)/);
-  assert.match(appSource, /onUpdate=\{\(task, changes\) => updateTaskProperties\(task, changes\)\}/);
+test("dashboard, list, and gantt views are not part of the issue board", () => {
+  assert.doesNotMatch(appSource, /import \{ DashboardView \}/);
+  assert.doesNotMatch(appSource, /import \{ GanttView/);
+  assert.doesNotMatch(appSource, /import \{ IssueListView \}/);
+  assert.doesNotMatch(appSource, /taskCardPresentation/);
+  assert.doesNotMatch(appSource, /selectBoardView\("dashboard"\)/);
+  assert.doesNotMatch(appSource, /selectBoardView\("list"\)/);
+  assert.doesNotMatch(appSource, /selectBoardView\("gantt"\)/);
+  assert.doesNotMatch(appSource, /boardView === "dashboard"/);
+  assert.doesNotMatch(appSource, /boardView === "list"/);
+  assert.doesNotMatch(appSource, /boardView === "gantt"/);
+  assert.doesNotMatch(styles, /\.dashboard-view/);
+  assert.doesNotMatch(styles, /\.issue-list-view/);
+  assert.doesNotMatch(styles, /\.gantt-view/);
 });
 
 function workflowStatuses() {
@@ -197,6 +202,9 @@ test("issues expose a current conversation and expandable conversation history",
   assert.match(detailSource, /taskThreadRuntime\(currentTask, threadId\)/);
   assert.match(detailSource, /onOpen=\{\(threadId\) => onOpenThread\(threadId, currentTask\)\}/);
   assert.match(detailSource, /历史相关会话/);
+  assert.match(detailSource, /当前会话是最近一次直接处理议题的对话/);
+  assert.match(detailSource, /历史相关会话是此前处理过此议题或关联过评论的其他对话/);
+  assert.match(styles, /\.issue-conversation-help/);
   assert.match(detailSource, /label="当前会话"/);
   assert.match(detailSource, /className="conversation-thread-id">\{threadId\}/);
   assert.doesNotMatch(detailSource, /shortThreadId/);
