@@ -17,6 +17,8 @@ import type {
   KnowledgeProposalStatus,
   KnowledgeSearchResult,
   KnowledgeSourceType,
+  ProjectBotConfig,
+  ProjectBotDraft,
   Project,
   Task,
   TaskboardMetadata,
@@ -230,6 +232,68 @@ export async function createProject(input: {
     body: JSON.stringify(input),
   });
   return data.project;
+}
+
+export async function listProjectBots(projectId: string, signal?: AbortSignal): Promise<ProjectBotConfig[]> {
+  const data = await request<{ bots: ProjectBotConfig[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/bots`,
+    { signal },
+  );
+  return data.bots;
+}
+
+export async function createProjectBot(projectId: string, draft: ProjectBotDraft): Promise<ProjectBotConfig> {
+  const data = await request<{ bot: ProjectBotConfig }>(
+    `/api/projects/${encodeURIComponent(projectId)}/bots`,
+    {
+      method: "POST",
+      body: JSON.stringify(draft),
+    },
+  );
+  return data.bot;
+}
+
+export async function updateProjectBot(
+  bot: ProjectBotConfig,
+  changes: Partial<ProjectBotDraft>,
+): Promise<ProjectBotConfig> {
+  const data = await request<{ bot: ProjectBotConfig }>(
+    `/api/project-bots/${encodeURIComponent(bot.id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ version: bot.version, ...changes }),
+    },
+  );
+  return data.bot;
+}
+
+export async function deleteProjectBot(bot: ProjectBotConfig): Promise<void> {
+  await request<{ bot: ProjectBotConfig }>(`/api/project-bots/${encodeURIComponent(bot.id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ version: bot.version }),
+  });
+}
+
+export async function connectProjectBot(bot: ProjectBotConfig): Promise<ProjectBotConfig> {
+  const data = await request<{ bot: ProjectBotConfig }>(
+    `/api/project-bots/${encodeURIComponent(bot.id)}/connect`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version: bot.version }),
+    },
+  );
+  return data.bot;
+}
+
+export async function disconnectProjectBot(bot: ProjectBotConfig): Promise<ProjectBotConfig> {
+  const data = await request<{ bot: ProjectBotConfig }>(
+    `/api/project-bots/${encodeURIComponent(bot.id)}/disconnect`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version: bot.version }),
+    },
+  );
+  return data.bot;
 }
 
 export async function listDevelopmentContexts(
