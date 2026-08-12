@@ -47,6 +47,16 @@ test("project knowledge keeps confirmed files separate from reviewable issue and
   assert.match(styles, /\.comment-knowledge-toolbar/);
 });
 
+test("knowledge questionnaires are generated only from evidenced knowledge gaps", () => {
+  assert.match(knowledgeSource, /QUESTIONNAIRE_HEALTH_REASONS/);
+  assert.match(knowledgeSource, /candidate\.health !== "fresh"/);
+  assert.match(knowledgeSource, /没有生成问卷：当前范围内没有可由健康检查证明的知识缺口/);
+  assert.match(knowledgeSource, /limitedGapPages\.map/);
+  assert.match(knowledgeSource, /candidate\.sources\.map/);
+  assert.doesNotMatch(knowledgeSource, /请说明该业务规则在实际工作中的判断标准与例外情况。/);
+  assert.doesNotMatch(knowledgeSource, /项目源码\/配置\/测试", "已确认知识库"/);
+});
+
 test("dashboard, list, and gantt views are not part of the issue board", () => {
   assert.doesNotMatch(appSource, /import \{ DashboardView \}/);
   assert.doesNotMatch(appSource, /import \{ GanttView/);
