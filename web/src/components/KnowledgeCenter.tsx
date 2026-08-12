@@ -443,9 +443,11 @@ export function KnowledgeCenter({
 
   async function refreshQuestionnaires() { setQuestionnaires(await listKnowledgeQuestionnaires(project.id)); }
   async function createQuestionnaire() {
-    if (!questionnaireTitle.trim()) return;
     setBusy("questionnaire"); setError(null);
-    try { await createKnowledgeQuestionnaire(project.id, { scopeType: questionnaireScope, scopeRef: questionnaireScope === "page" ? page?.path ?? null : null, title: questionnaireTitle, questions: [{ context: page?.title ?? "项目知识缺口", prompt: "请说明该业务规则在实际工作中的判断标准与例外情况。", gapReason: "已检索当前知识页与相关代码，但未找到该规则的业务口径或例外处理说明。", checkedSources: [page?.path ?? "当前项目知识与源码检索"], targetRole: "熟悉该业务流程的负责人", answerFormat: "请给出规则、适用条件、例外和一个真实示例。", knowledgeTarget: page?.path ?? "项目知识" }] }); await refreshQuestionnaires(); setQuestionnaireTitle(""); setNotice("候选题已保存为草稿；请确认后发布问卷。"); } catch (e) { setError(messageFor(e)); } finally { setBusy(null); }
+    const focus = questionnaireTitle.trim();
+    const scopeLabel = questionnaireScope === "project" ? "全项目" : questionnaireScope === "gap" ? "指定知识缺口" : page?.title ?? "当前知识主题";
+    const generatedTitle = focus || `${scopeLabel}待确认业务事实`;
+    try { await createKnowledgeQuestionnaire(project.id, { scopeType: questionnaireScope, scopeRef: questionnaireScope === "page" ? page?.path ?? null : null, title: generatedTitle, questions: [{ context: focus || page?.title || "项目知识缺口", prompt: focus ? `请补充「${focus}」的实际业务规则、判断标准与例外情况。` : "请说明该业务规则在实际工作中的判断标准与例外情况。", gapReason: "已检索当前知识页、项目文档、源码和已确认知识，但未找到可可靠推出该事实的业务口径或例外处理说明。", checkedSources: [page?.path ?? "当前项目知识", "项目源码/配置/测试", "已确认知识库"], targetRole: "熟悉该业务流程的负责人", answerFormat: "请给出规则、适用条件、例外和一个真实示例。", knowledgeTarget: page?.path ?? "项目知识" }] }); await refreshQuestionnaires(); setQuestionnaireTitle(""); setNotice("候选题已保存为草稿；请确认后发布问卷。"); } catch (e) { setError(messageFor(e)); } finally { setBusy(null); }
   }
 
   return (
@@ -689,8 +691,8 @@ export function KnowledgeCenter({
           <header><h3>缺口问卷</h3><p>只收集当前源码、文档和已确认知识无法可靠推断的业务事实。</p></header>
           <div className="knowledge-questionnaire-create">
             <select value={questionnaireScope} onChange={(event) => setQuestionnaireScope(event.target.value as typeof questionnaireScope)}><option value="page">知识主题/页面</option><option value="project">全项目</option><option value="gap">指定知识缺口</option></select>
-            <input value={questionnaireTitle} onChange={(event) => setQuestionnaireTitle(event.target.value)} placeholder="例如：订单取消规则待确认" />
-            <button type="button" disabled={Boolean(busy) || !questionnaireTitle.trim()} onClick={() => void createQuestionnaire()}>生成候选题</button>
+            <input value={questionnaireTitle} onChange={(event) => setQuestionnaireTitle(event.target.value)} placeholder="可选：输入要聚焦的主题，例如订单取消规则" />
+            <button type="button" disabled={Boolean(busy)} onClick={() => void createQuestionnaire()}>{busy === "questionnaire" ? "生成中…" : "生成候选题"}</button>
           </div>
           {questionnaires.map((questionnaire) => <article className="knowledge-questionnaire" key={questionnaire.id}>
             <header><div><h3>{questionnaire.title}</h3><p>{questionnaire.scopeType} · {questionnaire.status}</p></div>{questionnaire.status === "draft" && <button type="button" onClick={() => void updateKnowledgeQuestionnaire(project.id, questionnaire.id, "open").then(setQuestionnaires)}>确认并发布</button>}</header>
