@@ -122,7 +122,7 @@ import {
 } from "./workflowStore";
 type ConnectionState = "connecting" | "live" | "reconnecting";
 type Theme = "light" | "dark";
-type BoardView = "issues" | "drafts" | "knowledge" | "workflow";
+type BoardView = "issues" | "drafts" | "knowledge" | "bots" | "workflow";
 const SHOW_WORKFLOW_BOARD_ENTRY = false;
 const GLOBAL_PROJECT_ID = "__all_projects__";
 const GLOBAL_VIEW_QUERY_PARAM = "view";
@@ -637,6 +637,7 @@ function isProjectBoardView(value: string | null): value is BoardView {
   return value === "issues"
     || value === "drafts"
     || value === "knowledge"
+    || value === "bots"
     || value === "workflow";
 }
 
@@ -818,7 +819,6 @@ export function App() {
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [showConnectorsPanel, setShowConnectorsPanel] = useState(false);
-  const [showProjectBotsPanel, setShowProjectBotsPanel] = useState(false);
   const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -3705,14 +3705,24 @@ export function App() {
               草稿箱{visibleIssueDrafts.length > 0 ? ` ${visibleIssueDrafts.length}` : ""}
             </button>
             {!isGlobalBoard && (
-              <button
-                className={`view-tab${boardView === "knowledge" ? " active" : ""}`}
-                type="button"
-                aria-pressed={boardView === "knowledge"}
-                onClick={() => selectBoardView("knowledge")}
-              >
-                项目知识{knowledgeProposalCount > 0 ? ` ${knowledgeProposalCount}` : ""}
-              </button>
+              <>
+                <button
+                  className={`view-tab${boardView === "knowledge" ? " active" : ""}`}
+                  type="button"
+                  aria-pressed={boardView === "knowledge"}
+                  onClick={() => selectBoardView("knowledge")}
+                >
+                  项目知识{knowledgeProposalCount > 0 ? ` ${knowledgeProposalCount}` : ""}
+                </button>
+                <button
+                  className={`view-tab${boardView === "bots" ? " active" : ""}`}
+                  type="button"
+                  aria-pressed={boardView === "bots"}
+                  onClick={() => selectBoardView("bots")}
+                >
+                  企微机器人
+                </button>
+              </>
             )}
             {SHOW_WORKFLOW_BOARD_ENTRY && (
               <button
@@ -3779,26 +3789,12 @@ export function App() {
               onStatusVisibilityChange={updateColumnVisibility}
               onApplyToAllProjectsChange={updateGlobalColumnVisibility}
               onOpenConnectors={() => setShowConnectorsPanel(true)}
-              onOpenProjectBots={!isGlobalBoard && selectedProject ? () => setShowProjectBotsPanel(true) : undefined}
             />
             {showConnectorsPanel && (
               <ConnectorsPanel
                 connectors={connectors}
                 onChanged={() => { void listConnectors().then(setConnectors); }}
                 onClose={() => setShowConnectorsPanel(false)}
-              />
-            )}
-            {showProjectBotsPanel && selectedProject && (
-              <ProjectBotsPanel
-                projectId={selectedProject.id}
-                projectName={projectNames[selectedProject.id] ?? selectedProject.name}
-                workspacePath={
-                  selectedDeviceWorkspacePath
-                  ?? selectedProject.workspacePath
-                  ?? developmentScan.workspacePath
-                  ?? ""
-                }
-                onClose={() => setShowProjectBotsPanel(false)}
               />
             )}
             {(search || activeFilterCount > 0 || favoriteTasksOnly) && (
@@ -3995,6 +3991,17 @@ export function App() {
             onProposalCountChange={setKnowledgeProposalCount}
             onInitialize={openKnowledgeInitializationIssue}
             onGenerateProposal={runKnowledgeAnalysisInCodex}
+          />
+        ) : !detailTask && boardView === "bots" && selectedProject ? (
+          <ProjectBotsPanel
+            projectId={selectedProject.id}
+            projectName={projectNames[selectedProject.id] ?? selectedProject.name}
+            workspacePath={
+              selectedDeviceWorkspacePath
+              ?? selectedProject.workspacePath
+              ?? developmentScan.workspacePath
+              ?? ""
+            }
           />
         ) : detailTask && selectedProject ? (
           <TaskDetail
