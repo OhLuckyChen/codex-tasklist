@@ -29,7 +29,7 @@ test("published comments can explicitly remove an incorrect conversation associa
 });
 
 test("project knowledge keeps confirmed files separate from reviewable issue and comment proposals", () => {
-  assert.match(appSource, /type BoardView = "issues" \| "drafts" \| "knowledge"/);
+  assert.match(appSource, /type BoardView = "dashboard" \| "issues" \| "list" \| "gantt" \| "drafts" \| "knowledge"/);
   assert.match(appSource, />\s*项目知识\{knowledgeProposalCount/);
   assert.match(appSource, /queueAutomaticKnowledgeReview/);
   assert.match(appSource, /moved\.status === "in_review" \|\| moved\.status === "done"/);
@@ -45,6 +45,17 @@ test("project knowledge keeps confirmed files separate from reviewable issue and
   assert.match(typesSource, /type KnowledgeProposalStatus = "generating" \| "ready" \| "published"/);
   assert.match(styles, /\.knowledge-published-layout/);
   assert.match(styles, /\.comment-knowledge-toolbar/);
+});
+
+test("dashboard, list, and gantt views share the issue task model", () => {
+  assert.match(appSource, /import \{ DashboardView \}/);
+  assert.match(appSource, /import \{ GanttView, type GanttZoom \}/);
+  assert.match(appSource, /import \{ IssueListView \}/);
+  assert.match(appSource, /taskCardPresentation\(task, false, progressByTaskId\.get\(task\.id\) \?\? null\)/);
+  assert.match(appSource, /selectBoardView\("dashboard"\)/);
+  assert.match(appSource, /selectBoardView\("list"\)/);
+  assert.match(appSource, /selectBoardView\("gantt"\)/);
+  assert.match(appSource, /onUpdate=\{\(task, changes\) => updateTaskProperties\(task, changes\)\}/);
 });
 
 function workflowStatuses() {
@@ -70,6 +81,16 @@ test("dragging previews the insertion rank before committing it", () => {
   assert.match(appSource, /setTasks\(\(current\) => sortTasks\(current\.map/);
   assert.match(appSource, /setSettlingTaskId\(task\.id\)/);
   assert.match(styles, /\.task-card\.is-settling \{[\s\S]*?task-card-settle 200ms/);
+});
+
+test("status change date groups stay contiguous before card rendering", () => {
+  assert.match(boardColumnSource, /const STATUS_CHANGED_GROUPS = \["今日", "昨日", "上周", "更早"\] as const/);
+  assert.match(boardColumnSource, /function compareTasksByStatusGroup/);
+  assert.match(boardColumnSource, /if \(leftGroup !== rightGroup\) return leftGroup - rightGroup/);
+  assert.match(boardColumnSource, /const updatedDelta = updatedTime\(right\) - updatedTime\(left\)/);
+  assert.match(boardColumnSource, /const sortedTasks = tasks\.slice\(\)\.sort/);
+  assert.match(boardColumnSource, /sortedTasks\.map\(\(task, index\) =>/);
+  assert.match(boardColumnSource, /statusChangedGroup\(sortedTasks\[index - 1\], groupingNow\)/);
 });
 
 test("text selection is reserved for editable fields", () => {
@@ -173,6 +194,8 @@ test("issues expose a current conversation and expandable conversation history",
   assert.doesNotMatch(editorSource, /对话 ID|linkedThreadId/);
   assert.match(detailSource, /currentTask\.threadId/);
   assert.match(detailSource, /currentTask\.threadIds/);
+  assert.match(detailSource, /taskThreadRuntime\(currentTask, threadId\)/);
+  assert.match(detailSource, /onOpen=\{\(threadId\) => onOpenThread\(threadId, currentTask\)\}/);
   assert.match(detailSource, /历史相关会话/);
   assert.match(detailSource, /label="当前会话"/);
   assert.match(detailSource, /className="conversation-thread-id">\{threadId\}/);

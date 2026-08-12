@@ -16,8 +16,6 @@ import {
 } from "../shared/domain.mjs";
 import { normalizeCodexThreadId } from "../shared/codex-thread-id.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
-import { AiChatService } from "./ai-chat.mjs";
-import { resolveAiWorkspace } from "./ai-chat-catalog.mjs";
 import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createClaudeLauncher } from "./claude-launcher.mjs";
@@ -28,10 +26,7 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const execFileAsync = promisify(execFile);
 const JSON_BODY_LIMIT = 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
-const AI_CHAT_TURN_BODY_LIMIT = 25 * 1024 * 1024;
 const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
-const AI_CHAT_ATTACHMENT_LIMIT = 10;
-const AI_CHAT_SKILL_MARKER = "\uFFFC";
 const HOST_RUNTIME_TTL_MS = 3_000;
 const CODEX_PLAN_TAIL_BYTES = 16 * 1024 * 1024;
 const INLINE_ATTACHMENT_TYPES = new Set([
@@ -874,163 +869,6 @@ function parseTaskFilters(searchParams) {
   return { projectId, status: statusValue ?? undefined, archived };
 }
 
-function parseAiSandbox(value) {
-  if (value === undefined) return undefined;
-  if (!["read-only", "workspace-write", "danger-full-access"].includes(value)) {
-    throw new ApiError(
-      400,
-      "INVALID_SANDBOX",
-      "'sandbox' must be read-only, workspace-write, or danger-full-access",
-    );
-  }
-  return value;
-}
-
-function parseAiSetting(value, name, maxLength) {
-  const setting = stringField(value, name, { maxLength });
-  if (setting === "") {
-    throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot be empty`);
-  }
-  return setting;
-}
-
-function parseAiThreadCreate(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set([
-    "projectId",
-    "issueId",
-    "title",
-    "model",
-    "reasoningEffort",
-    "sandbox",
-  ]));
-  return {
-    projectId: validateProjectId(body.projectId),
-    issueId: parseAiSetting(body.issueId, "issueId", 128),
-    title: parseAiSetting(body.title, "title", 160),
-    model: parseAiSetting(body.model, "model", 128),
-    reasoningEffort: parseAiSetting(body.reasoningEffort, "reasoningEffort", 64),
-    sandbox: parseAiSandbox(body.sandbox),
-  };
-}
-
-function parseAiThreadPatch(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set(["title", "model", "reasoningEffort", "sandbox"]));
-  const input = {};
-  if (body.title !== undefined) input.title = parseAiSetting(body.title, "title", 160);
-  if (body.model !== undefined) input.model = parseAiSetting(body.model, "model", 128);
-  if (body.reasoningEffort !== undefined) {
-    input.reasoningEffort = parseAiSetting(body.reasoningEffort, "reasoningEffort", 64);
-  }
-  if (body.sandbox !== undefined) input.sandbox = parseAiSandbox(body.sandbox);
-  if (Object.keys(input).length === 0) {
-    throw new ApiError(400, "INVALID_BODY", "PATCH requires at least one thread setting");
-  }
-  return input;
-}
-
-function parseAiSkillIds(value) {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 20) {
-    throw new ApiError(400, "INVALID_FIELD", "'skillIds' must be an array with at most 20 entries");
-  }
-  const skillIds = value.map((skillId, index) => (
-    stringField(skillId, `skillIds[${index}]`, { required: true, maxLength: 256 })
-  ));
-  return skillIds;
-}
-
-function parseAiAttachments(value) {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > AI_CHAT_ATTACHMENT_LIMIT) {
-    throw new ApiError(
-      400,
-      "INVALID_ATTACHMENT",
-      `'attachments' must be an array with at most ${AI_CHAT_ATTACHMENT_LIMIT} files`,
-    );
-  }
-  return value.map((attachment, index) => {
-    assertPlainObject(attachment);
-    assertAllowedKeys(attachment, new Set(["filename", "contentType", "dataBase64"]));
-    const filename = stringField(attachment.filename, `attachments[${index}].filename`, {
-      required: true,
-      maxLength: 240,
-    });
-    if (/[\u0000-\u001f\u007f/\\]/.test(filename)) {
-      throw new ApiError(
-        400,
-        "INVALID_ATTACHMENT",
-        `'attachments[${index}].filename' is invalid`,
-      );
-    }
-    const contentType = stringField(
-      attachment.contentType,
-      `attachments[${index}].contentType`,
-      { required: true, maxLength: 256 },
-    ).toLowerCase();
-    const dataBase64 = stringField(
-      attachment.dataBase64,
-      `attachments[${index}].dataBase64`,
-      { required: true, maxLength: AI_CHAT_TURN_BODY_LIMIT },
-    );
-    if (
-      dataBase64.length % 4 !== 0
-      || !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)
-    ) {
-      throw new ApiError(
-        400,
-        "INVALID_ATTACHMENT",
-        `'attachments[${index}].dataBase64' must contain valid base64`,
-      );
-    }
-    const data = Buffer.from(dataBase64, "base64");
-    if (data.length === 0 || data.toString("base64") !== dataBase64) {
-      throw new ApiError(
-        400,
-        "INVALID_ATTACHMENT",
-        `'attachments[${index}].dataBase64' must contain valid base64`,
-      );
-    }
-    return { filename, contentType, data, size: data.length };
-  });
-}
-
-function parseAiTurn(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set([
-    "message",
-    "skillIds",
-    "dangerFullAccessConfirmed",
-    "attachments",
-  ]));
-  if (
-    body.dangerFullAccessConfirmed !== undefined
-    && typeof body.dangerFullAccessConfirmed !== "boolean"
-  ) {
-    throw new ApiError(400, "INVALID_FIELD", "'dangerFullAccessConfirmed' must be a boolean");
-  }
-  const message = stringField(body.message ?? "", "message", { maxLength: 100_000 });
-  const skillIds = parseAiSkillIds(body.skillIds) ?? [];
-  if (message.split(AI_CHAT_SKILL_MARKER).length - 1 !== skillIds.length) {
-    throw new ApiError(400, "INVALID_FIELD", "'skillIds' must match the Skill markers in 'message'");
-  }
-  const attachments = parseAiAttachments(body.attachments);
-  if (message === "" && attachments.length === 0) {
-    throw new ApiError(
-      400,
-      "INVALID_MESSAGE",
-      "A message or at least one attachment is required",
-    );
-  }
-  return {
-    message,
-    skillIds,
-    dangerFullAccessConfirmed: body.dangerFullAccessConfirmed,
-    attachments,
-  };
-}
-
 function parseKnowledgeContext(value) {
   if (value === undefined || value === null) return null;
   assertPlainObject(value);
@@ -1536,54 +1374,6 @@ export function createTaskboardServer(options = {}) {
     options.processEnv ?? process.env,
   );
 
-  // Local-only AI chat context resolver: resolves the project workspace via the
-  // codex state path, falling back to PROJECT_ROOT for the default project, and
-  // attaches the active issue when an issueId is given. Mirrors the local branch
-  // of upstream's resolver without the cloud-companion path (not applicable here).
-  async function resolveAiChatContext(projectId, issueId) {
-    let resolvedWorkspace;
-    try {
-      resolvedWorkspace = await resolveAiWorkspace(
-        projectId,
-        resolved.codexStatePath,
-        database,
-      );
-    } catch (error) {
-      if (
-        !(error instanceof ApiError)
-        || error.code !== "PROJECT_WORKSPACE_UNAVAILABLE"
-        || projectId !== DEFAULT_PROJECT_ID
-      ) {
-        throw error;
-      }
-      resolvedWorkspace = {
-        workspacePath: PROJECT_ROOT,
-        addDirectories: [],
-        project: database.getProject(projectId),
-      };
-    }
-    let issue;
-    if (issueId !== undefined) {
-      issue = database.getTask(issueId);
-      if (!issue || issue.projectId !== projectId || issue.archivedAt != null) {
-        throw new ApiError(
-          404,
-          "AI_CHAT_ISSUE_NOT_FOUND",
-          `Task '${issueId}' is not an active task in project '${projectId}'`,
-        );
-      }
-    }
-    return { ...resolvedWorkspace, issue };
-  }
-
-  const aiChat = new AiChatService({
-    database,
-    codexExecutable: resolved.codexExecutable,
-    codexStatePath: resolved.codexStatePath,
-    manageTaskboardSkillPath: resolved.skillPath,
-    processEnv: codexProcessEnvironment,
-    resolveContext: resolveAiChatContext,
-  });
   const knowledge = options.knowledgeService ?? new KnowledgeService({
     codexExecutable: resolved.codexExecutable,
     processEnv: options.processEnv ?? process.env,
@@ -1602,7 +1392,6 @@ export function createTaskboardServer(options = {}) {
     dataDirectory: resolved.dataDirectory,
     ompExecutable: resolved.ompExecutable,
   });
-  const aiEventResponses = new Set();
   const knowledgeRuns = new Map();
 
   // Codex session plan-progress scanning (backported from upstream v0.2.3).
@@ -1642,6 +1431,39 @@ export function createTaskboardServer(options = {}) {
 
     codexSessionSearches.set(threadId, { path: null, checkedAt: Date.now() });
     return null;
+  }
+
+  async function runtimeForThread(threadId, fallback = "codex") {
+    if (await findCodexSession(threadId)) return "codex";
+    for (const runtime of ["claude", "omp"]) {
+      const scriptPath = path.join(resolved.dataDirectory, `${runtime}-runs`, `resume-${threadId}.sh`);
+      try {
+        const source = await readFile(scriptPath, "utf8");
+        if (source.includes(`TASKBOARD_AGENT_RUNTIME='${runtime}'`)) return runtime;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    return fallback;
+  }
+
+  async function reconcileTaskThreadRuntimes(records) {
+    for (const record of records) {
+      const runtime = await runtimeForThread(record.thread_id, record.runtime ?? "codex");
+      if (runtime !== record.runtime || record.thread_id === record.current_thread_id) {
+        database.updateTaskThreadRuntime(record.task_id, record.thread_id, runtime);
+      }
+    }
+  }
+
+  async function listTasksWithResolvedRuntimes(filters) {
+    await reconcileTaskThreadRuntimes(database.listTaskThreadRuntimeRecords(filters));
+    return database.listTasks(filters);
+  }
+
+  async function getTaskWithResolvedRuntimes(id) {
+    await reconcileTaskThreadRuntimes(database.getTaskThreadRuntimeRecords(id));
+    return database.getTask(id);
   }
 
   async function readCodexSessionState(threadId) {
@@ -1787,10 +1609,7 @@ export function createTaskboardServer(options = {}) {
       assertTrustedNetworkRequest(request);
       const url = new URL(request.url, "http://127.0.0.1");
       const pathname = url.pathname;
-      const isLocalAiRoute = pathname === "/api/local/ai" || pathname.startsWith("/api/local/ai/");
-      if (isLocalAiRoute) {
-        assertAiLoopbackRequest(request);
-      } else if (pathname.startsWith("/api/local/")) {
+      if (pathname.startsWith("/api/local/")) {
         assertLoopbackRequest(request);
       }
       if (pathname === "/health") {
@@ -1951,7 +1770,6 @@ export function createTaskboardServer(options = {}) {
           ompRuntime: ompLauncher.supportedPlatform,
           connectors: database.listConnectors(),
           capabilities: {
-            localAiChat: isLoopbackAddress(request.socket.remoteAddress),
             localKnowledge: isLoopbackAddress(request.socket.remoteAddress),
           },
         });
@@ -2010,99 +1828,6 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 200, { runtime: hostRuntime });
         }
         return methodNotAllowed(response, ["GET", "PUT"]);
-      }
-
-      if (pathname === "/api/local/ai/catalog") {
-        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
-        assertAllowedQuery(url.searchParams, new Set(["projectId"]), "GET /api/local/ai/catalog");
-        const projectId = validateProjectId(url.searchParams.get("projectId") ?? undefined);
-        return sendJson(response, 200, await aiChat.getCatalog(projectId));
-      }
-
-      if (pathname === "/api/local/ai/threads") {
-        assertNoQuery(url.searchParams, "/api/local/ai/threads");
-        if (request.method === "GET") {
-          return sendJson(response, 200, { threads: await aiChat.listThreads() });
-        }
-        if (request.method === "POST") {
-          const thread = await aiChat.createThread(parseAiThreadCreate(await readJson(request)));
-          return sendJson(response, 201, { thread });
-        }
-        return methodNotAllowed(response, ["GET", "POST"]);
-      }
-
-      const aiThreadEventsRoute = pathname.match(/^\/api\/local\/ai\/threads\/([^/]+)\/events$/);
-      if (aiThreadEventsRoute) {
-        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
-        assertNoQuery(url.searchParams, "GET /api/local/ai/threads/:id/events");
-        const threadId = decodeRouteSegment(aiThreadEventsRoute[1], "Thread id");
-        await aiChat.getThreadSnapshot(threadId);
-        response.writeHead(200, {
-          connection: "keep-alive",
-          "cache-control": "no-cache, no-transform",
-          "content-type": "text/event-stream; charset=utf-8",
-          "x-accel-buffering": "no",
-        });
-        aiEventResponses.add(response);
-        const unsubscribe = aiChat.subscribe(threadId, (event) => {
-          const type = event?.type === "ai.run" ? "ai.run" : "ai.event";
-          response.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
-        });
-        response.write(": connected\n\n");
-        response.write('event: ai.event\ndata: {"type":"ai.event"}\n\n');
-        const keepAlive = setInterval(() => response.write(": keep-alive\n\n"), 20_000);
-        keepAlive.unref();
-        request.once("close", () => {
-          clearInterval(keepAlive);
-          unsubscribe();
-          aiEventResponses.delete(response);
-        });
-        return;
-      }
-
-      const aiThreadTurnRoute = pathname.match(/^\/api\/local\/ai\/threads\/([^/]+)\/turns$/);
-      if (aiThreadTurnRoute) {
-        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
-        assertNoQuery(url.searchParams, "POST /api/local/ai/threads/:id/turns");
-        const threadId = decodeRouteSegment(aiThreadTurnRoute[1], "Thread id");
-        const run = await aiChat.startTurn(
-          threadId,
-          parseAiTurn(await readJson(
-            request,
-            AI_CHAT_TURN_BODY_LIMIT,
-            "AI chat turn body cannot exceed 25 MiB",
-          )),
-        );
-        return sendJson(response, 202, { run });
-      }
-
-      const aiThreadRoute = pathname.match(/^\/api\/local\/ai\/threads\/([^/]+)$/);
-      if (aiThreadRoute) {
-        assertNoQuery(url.searchParams, "/api/local/ai/threads/:id");
-        const threadId = decodeRouteSegment(aiThreadRoute[1], "Thread id");
-        if (request.method === "GET") {
-          return sendJson(response, 200, await aiChat.getThreadSnapshot(threadId));
-        }
-        if (request.method === "PATCH") {
-          const thread = await aiChat.updateThread(threadId, parseAiThreadPatch(await readJson(request)));
-          return sendJson(response, 200, { thread });
-        }
-        if (request.method === "DELETE") {
-          await assertEmptyRequestBody(request, "DELETE /api/local/ai/threads/:id");
-          await aiChat.deleteThread(threadId);
-          return sendEmpty(response, 204);
-        }
-        return methodNotAllowed(response, ["GET", "PATCH", "DELETE"]);
-      }
-
-      const aiInterruptRoute = pathname.match(/^\/api\/local\/ai\/runs\/([^/]+)\/interrupt$/);
-      if (aiInterruptRoute) {
-        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
-        assertNoQuery(url.searchParams, "POST /api/local/ai/runs/:id/interrupt");
-        const runId = decodeRouteSegment(aiInterruptRoute[1], "Run id");
-        await assertEmptyRequestBody(request, "POST /api/local/ai/runs/:id/interrupt");
-        const run = await aiChat.interrupt(runId);
-        return sendJson(response, 200, { run });
       }
 
       const localKnowledgeRoute = pathname.match(
@@ -2601,7 +2326,7 @@ export function createTaskboardServer(options = {}) {
 
       if (pathname === "/api/tasks") {
         if (request.method === "GET") {
-          return sendJson(response, 200, { tasks: database.listTasks(parseTaskFilters(url.searchParams)) });
+          return sendJson(response, 200, { tasks: await listTasksWithResolvedRuntimes(parseTaskFilters(url.searchParams)) });
         }
         if (request.method === "POST") {
           const actor = actorFromRequest(request);
@@ -2614,11 +2339,12 @@ export function createTaskboardServer(options = {}) {
           if (input.runtime === "codex" && actor.id === "omp-agent") {
             input.runtime = "omp";
           }
-          const task = database.createTask({
+          const createdTask = database.createTask({
             ...input,
             actor,
             assignee: resolveAssignee(assigneeTarget, actor),
           });
+          const task = await getTaskWithResolvedRuntimes(createdTask.id);
           events.emit("task.created", { task });
           return sendJson(response, 201, { task });
         }
@@ -2709,7 +2435,7 @@ export function createTaskboardServer(options = {}) {
             ...parseCommentCreate(await readJson(request)),
             actor: actorFromRequest(request),
           });
-          const task = database.getTask(taskId);
+          const task = await getTaskWithResolvedRuntimes(taskId);
           events.emit("comment.created", { comment, task });
           return sendJson(response, 201, { comment });
         }
@@ -2733,7 +2459,7 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "PATCH") {
           const patch = parseCommentPatch(await readJson(request));
           const comment = database.updateComment(id, patch.version, patch.body, patch.threadId);
-          const task = database.getTask(comment.taskId);
+          const task = await getTaskWithResolvedRuntimes(comment.taskId);
           events.emit("comment.updated", { comment, task });
           return sendJson(response, 200, { comment });
         }
@@ -2747,7 +2473,7 @@ export function createTaskboardServer(options = {}) {
               if (error.code !== "ENOENT") throw error;
             }
           }
-          const task = database.getTask(comment.taskId);
+          const task = await getTaskWithResolvedRuntimes(comment.taskId);
           events.emit("comment.deleted", { comment, task });
           return sendEmpty(response, 204);
         }
@@ -2787,7 +2513,7 @@ export function createTaskboardServer(options = {}) {
             await unlink(storagePath);
             throw error;
           }
-          const task = database.getTask(comment.taskId);
+          const task = await getTaskWithResolvedRuntimes(comment.taskId);
           events.emit("attachment.created", { attachment, comment: database.getComment(commentId), task });
           return sendJson(response, 201, { attachment });
         }
@@ -2815,7 +2541,8 @@ export function createTaskboardServer(options = {}) {
         }
         if (request.method !== "DELETE") return methodNotAllowed(response, ["DELETE"]);
         const { version } = parseTaskThreadDelete(await readJson(request));
-        const task = database.unlinkTaskThread(taskId, version, threadId);
+        const unlinkedTask = database.unlinkTaskThread(taskId, version, threadId);
+        const task = await getTaskWithResolvedRuntimes(unlinkedTask.id);
         events.emit("task.updated", { task });
         return sendJson(response, 200, { task });
       }
@@ -2917,7 +2644,7 @@ export function createTaskboardServer(options = {}) {
           if (error.code !== "ENOENT") throw error;
         }
         database.deleteAttachment(id);
-        const task = database.getTask(attachment.taskId);
+        const task = await getTaskWithResolvedRuntimes(attachment.taskId);
         events.emit("attachment.deleted", { attachment, task });
         return sendEmpty(response, 204);
       }
@@ -2940,20 +2667,22 @@ export function createTaskboardServer(options = {}) {
           }
           const task = database.getTask(id);
           if (!task) throw new ApiError(404, "TASK_NOT_FOUND", `Task '${id}' does not exist`);
-          return sendJson(response, 200, { task });
+          return sendJson(response, 200, { task: await getTaskWithResolvedRuntimes(id) });
         }
         if (!action && request.method === "PATCH") {
           const { version, changes, threadId, assigneeTarget } = parseTaskPatch(await readJson(request));
           if (assigneeTarget !== undefined) {
             changes.assignee = resolveAssignee(assigneeTarget, actorFromRequest(request));
           }
-          const task = database.updateTask(id, version, changes, threadId);
+          const updatedTask = database.updateTask(id, version, changes, threadId);
+          const task = await getTaskWithResolvedRuntimes(updatedTask.id);
           events.emit("task.updated", { task });
           return sendJson(response, 200, { task });
         }
         if (action === "move" && request.method === "POST") {
           const move = parseMove(await readJson(request));
-          const task = database.moveTask(id, move.version, move.status, move.sortOrder, move.threadId);
+          const movedTask = database.moveTask(id, move.version, move.status, move.sortOrder, move.threadId);
+          const task = await getTaskWithResolvedRuntimes(movedTask.id);
           events.emit("task.moved", { task });
           return sendJson(response, 200, { task });
         }
@@ -2970,13 +2699,15 @@ export function createTaskboardServer(options = {}) {
         }
         if (action === "archive" && request.method === "POST") {
           const { version, threadId } = parseArchive(await readJson(request));
-          const task = database.archiveTask(id, version, threadId);
+          const archivedTask = database.archiveTask(id, version, threadId);
+          const task = await getTaskWithResolvedRuntimes(archivedTask.id);
           events.emit("task.archived", { task });
           return sendJson(response, 200, { task });
         }
         if (action === "restore" && request.method === "POST") {
           const { version, threadId } = parseArchive(await readJson(request));
-          const task = database.restoreTask(id, version, threadId);
+          const restoredTask = database.restoreTask(id, version, threadId);
+          const task = await getTaskWithResolvedRuntimes(restoredTask.id);
           events.emit("task.restored", { task });
           return sendJson(response, 200, { task });
         }
@@ -3007,7 +2738,6 @@ export function createTaskboardServer(options = {}) {
   let listening = false;
   return {
     database,
-    aiChat,
     server,
     options: resolved,
     async listen({ host = "127.0.0.1", port = resolvePort() } = {}) {
@@ -3037,9 +2767,6 @@ export function createTaskboardServer(options = {}) {
           })
         : Promise.resolve();
       events.close();
-      for (const response of aiEventResponses) response.end();
-      aiEventResponses.clear();
-      await aiChat.close();
       await serverClosed;
       listening = false;
       database.close();

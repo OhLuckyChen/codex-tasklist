@@ -795,6 +795,10 @@
     return `/local/${encodeURIComponent(threadId)}`;
   }
 
+  function appUrlForThread(threadId) {
+    return `codex://threads/${encodeURIComponent(threadId)}`;
+  }
+
   function waitForNativePaint() {
     return new Promise((resolve) => {
       window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
@@ -819,6 +823,22 @@
     return false;
   }
 
+  async function ensureThreadRowsVisible() {
+    expandNativeSidebar();
+    let section = findTasksSection();
+    const deadline = Date.now() + 1_200;
+    while (!section && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 40));
+      section = findTasksSection();
+    }
+    if (section?.getAttribute("data-app-action-sidebar-section-collapsed") === "true") {
+      section.querySelector("[data-app-action-sidebar-section-toggle]")?.click();
+    }
+    while (readCodexThreads().length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 40));
+    }
+  }
+
   async function openThread(threadId) {
     if (typeof threadId !== "string" || !threadId.trim()) return;
     const normalizedThreadId = normalizeThreadId(threadId);
@@ -826,6 +846,7 @@
     lastNativeThreadId = normalizedThreadId;
     closeTaskboard(false);
     await waitForNativePaint();
+    await ensureThreadRowsVisible();
 
     const row = findThreadRow(normalizedThreadId);
     if (row?.isConnected) {
@@ -840,6 +861,10 @@
         path: routeForThread(normalizedThreadId),
       });
     } catch (_) {}
+    if (await waitForActiveThread(normalizedThreadId, 2_000)) return;
+
+    window.location.assign(appUrlForThread(normalizedThreadId));
+    await waitForActiveThread(normalizedThreadId, 3_000);
   }
 
   function projectRowById(projectId) {

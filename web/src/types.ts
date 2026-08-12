@@ -84,7 +84,6 @@ export type ConnectorDraft = {
 };
 
 export interface TaskboardCapabilities {
-  localAiChat: boolean;
   localKnowledge?: boolean;
 }
 
@@ -195,88 +194,6 @@ export interface KnowledgeAnswer {
   }>;
 }
 
-export type AiChatSandbox = "read-only" | "workspace-write" | "danger-full-access";
-export type AiChatThreadStatus = "idle" | "running" | "failed";
-export type AiChatRunStatus = "running" | "completed" | "failed" | "interrupted";
-
-export interface AiChatModel {
-  slug: string;
-  displayName: string;
-  description: string;
-  defaultReasoningEffort: string;
-  supportedReasoningEfforts: string[];
-  serviceTiers: Array<{ id: string; name: string }>;
-}
-
-export interface AiChatSkill {
-  id: string;
-  label: string;
-  description: string;
-  path: string;
-  scope: "user" | "repo" | "system" | "admin";
-}
-
-export interface AiChatAttachmentInput {
-  filename: string;
-  contentType: string;
-  dataBase64: string;
-}
-
-export interface AiChatCatalog {
-  models: AiChatModel[];
-  skills: AiChatSkill[];
-  sandboxes: string[];
-}
-
-export interface AiChatOrigin {
-  projectId: string;
-  projectName: string;
-  workspacePath: string;
-  issueId?: string;
-  issueIdentifier?: string;
-}
-
-export interface AiChatRun {
-  id: string;
-  threadId: string;
-  status: AiChatRunStatus;
-  exitCode?: number | null;
-  error?: string | null;
-  startedAt?: string;
-  finishedAt?: string | null;
-}
-
-export interface AiChatThread {
-  id: string;
-  title: string;
-  status: AiChatThreadStatus;
-  origin: AiChatOrigin;
-  codexThreadId: string | null;
-  model: string;
-  reasoningEffort: string;
-  sandbox: AiChatSandbox;
-  createdAt: string;
-  updatedAt: string;
-  currentRun?: AiChatRun | null;
-}
-
-export interface AiChatEvent {
-  id: string;
-  threadId?: string;
-  runId?: string | null;
-  type: string;
-  role: "user" | "assistant" | "activity" | "error";
-  content: string;
-  data?: Record<string, unknown> | null;
-  createdAt?: string;
-}
-
-export interface AiChatThreadSnapshot {
-  thread: AiChatThread;
-  events: AiChatEvent[];
-  runs: AiChatRun[];
-}
-
 export interface WorkflowCapabilityOption {
   id: string;
   label: string;
@@ -363,6 +280,7 @@ export interface Task {
   sortOrder: number;
   threadId: string | null;
   threadIds: string[];
+  threadRuntimes: Record<string, TaskRuntime>;
   runtime: TaskRuntime;
   creatorType: ActorType;
   creatorId: string;

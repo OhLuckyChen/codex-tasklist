@@ -43,6 +43,7 @@ import {
   actorKey,
   assigneeTargetForActor,
 } from "../actors";
+import { taskThreadRuntime } from "../taskConversations";
 import { ActorAvatar } from "./ActorAvatar";
 import { STATUS_DETAILS } from "./BoardColumn";
 import { LabelPicker } from "./LabelPicker";
@@ -68,6 +69,7 @@ import {
   IssueSubIssues,
   type RelationMutationResult,
 } from "./IssueRelations";
+import { RuntimeIcon, RUNTIME_LABELS } from "./RuntimeIcon";
 
 const PRIORITY_DETAILS: Record<TaskPriority, { label: string; bars: number }> = {
   none: { label: "无优先级", bars: 0 },
@@ -104,7 +106,7 @@ interface TaskDetailProps {
     type: IssueRelationType,
     relatedTaskId: string,
   ) => Promise<RelationMutationResult>;
-  onOpenThread: (threadId: string) => void;
+  onOpenThread: (threadId: string, task: Task) => void;
   currentCodexThreadId?: string;
   codexThreads: CodexThreadSummary[];
   onLinkThread: (task: Task, threadId: string) => Promise<Task>;
@@ -191,19 +193,22 @@ function ConversationLink({
   threadId,
   onOpen,
   label = "查看对话",
+  runtime = "codex",
 }: {
   threadId: string;
   onOpen: (threadId: string) => void;
   label?: string;
+  runtime?: TaskRuntime;
 }) {
+  const runtimeLabel = RUNTIME_LABELS[runtime];
   return (
     <button
       className="issue-conversation-link"
       type="button"
-      title={`查看对话 ${threadId}`}
+      title={`${runtimeLabel} · 查看对话 ${threadId}`}
       onClick={() => onOpen(threadId)}
     >
-      <LinearIcon name="conversation" />
+      <RuntimeIcon runtime={runtime} />
       <strong>{label}</strong>
       <span className="conversation-divider" aria-hidden="true" />
       <span className="conversation-thread-id">{threadId}</span>
@@ -442,6 +447,7 @@ export function TaskDetail({
       ? [currentTask.threadId]
       : [];
   const historicalThreadIds = linkedThreadIds.filter((threadId) => threadId !== currentTask.threadId);
+  const currentThreadRuntime = taskThreadRuntime(currentTask, currentTask.threadId);
   const commentThreadOptions = [
     ...codexThreads,
     ...linkedThreadIds
@@ -1275,8 +1281,9 @@ export function TaskDetail({
                       <div className="comment-conversation-link issue-conversation-item">
                         <ConversationLink
                           threadId={currentTask.threadId}
-                          onOpen={onOpenThread}
+                          onOpen={(threadId) => onOpenThread(threadId, currentTask)}
                           label="当前会话"
+                          runtime={currentThreadRuntime}
                         />
                         <button
                           className="comment-conversation-unlink"
@@ -1298,7 +1305,8 @@ export function TaskDetail({
                             <div className="comment-conversation-link issue-conversation-item" key={threadId}>
                               <ConversationLink
                                 threadId={threadId}
-                                onOpen={onOpenThread}
+                                onOpen={(threadId) => onOpenThread(threadId, currentTask)}
+                                runtime={taskThreadRuntime(currentTask, threadId)}
                               />
                               <button
                                 className="comment-conversation-unlink"
@@ -1639,7 +1647,11 @@ export function TaskDetail({
                       )}
                       {comment.threadId && (
                         <div className="comment-conversation-link">
-                          <ConversationLink threadId={comment.threadId} onOpen={onOpenThread} />
+                          <ConversationLink
+                            threadId={comment.threadId}
+                            onOpen={(threadId) => onOpenThread(threadId, currentTask)}
+                            runtime={taskThreadRuntime(currentTask, comment.threadId)}
+                          />
                           <button
                             className="comment-conversation-unlink"
                             type="button"
@@ -1664,7 +1676,7 @@ export function TaskDetail({
                               comment.body.trim() || "请查看这条评论及附件。",
                             )}
                           >
-                            <LinearIcon name="conversation" />
+                            <RuntimeIcon runtime={taskThreadRuntime(currentTask, comment.threadId)} />
                             {openingThread ? "正在发送…" : "在关联会话处理"}
                           </button>
                         )}
@@ -1674,7 +1686,7 @@ export function TaskDetail({
                           disabled={openingThread || Boolean(commentThreadActionId)}
                           onClick={() => openPublishedCommentInNewThread(comment)}
                         >
-                          <LinearIcon name="plus" />
+                          <RuntimeIcon runtime="codex" />
                           {openingThread ? "正在打开…" : "新建 Codex 会话"}
                         </button>
                         <button
@@ -1684,7 +1696,7 @@ export function TaskDetail({
                           title={claudeRuntimeSupported ? "用 Claude Code 新建会话" : "仅 macOS Terminal.app 支持 Claude"}
                           onClick={() => openPublishedCommentInNewThread(comment, "claude")}
                         >
-                          <LinearIcon name="plus" />
+                          <RuntimeIcon runtime="claude" />
                           {openingThread ? "正在打开…" : "新建 Claude 会话"}
                         </button>
                         <button
@@ -1694,7 +1706,7 @@ export function TaskDetail({
                           title={ompRuntimeSupported ? "用 Oh My Pi 新建会话" : "仅 macOS Terminal.app 支持 OMP"}
                           onClick={() => openPublishedCommentInNewThread(comment, "omp")}
                         >
-                          <LinearIcon name="plus" />
+                          <RuntimeIcon runtime="omp" />
                           {openingThread ? "正在打开…" : "新建 OMP 会话"}
                         </button>
                         <div
@@ -1709,10 +1721,10 @@ export function TaskDetail({
                             aria-label="关联已有会话"
                             aria-haspopup="listbox"
                             aria-expanded={commentThreadMenuId === comment.id}
-                            title={commentThreadOptions.length === 0 ? "当前议题没有可关联的 Codex 会话" : undefined}
+                            title={commentThreadOptions.length === 0 ? "当前议题没有可关联的 Codex 会话" : "Codex · 关联已有会话"}
                             onClick={() => setCommentThreadMenuId((current) => current === comment.id ? null : comment.id)}
                           >
-                            <LinearIcon name="conversation" />
+                            <RuntimeIcon runtime="codex" />
                             <span>{comment.threadId ? "更换关联会话" : "关联已有会话"}</span>
                             <LinearIcon className="comment-thread-picker-chevron" name="chevronDown" />
                           </button>
@@ -1748,7 +1760,7 @@ export function TaskDetail({
                                   title={thread.title}
                                   onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
                                 >
-                                  <span className="detail-thread-option-icon"><LinearIcon name="conversation" /></span>
+                                  <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
                                   <span className="comment-thread-option-copy">
                                     <strong>{thread.title}</strong>
                                     <small>{thread.id}</small>
@@ -1783,9 +1795,10 @@ export function TaskDetail({
                   || Boolean(linkingThreadId)
                   || currentTask.threadId === currentCodexThreadId
                 )}
+                title={currentTask.threadId === currentCodexThreadId ? "Codex · 已关联当前会话" : "Codex · 关联当前会话"}
                 onClick={() => currentCodexThreadId && void linkThread(currentCodexThreadId)}
               >
-                <LinearIcon name="conversation" />
+                <RuntimeIcon runtime="codex" />
                 <span>{currentTask.threadId === currentCodexThreadId ? "已关联当前会话" : "关联当前会话"}</span>
               </button>
               <div className="detail-thread-picker" ref={threadMenuRef}>
@@ -1797,6 +1810,7 @@ export function TaskDetail({
                   aria-label="选择已有会话"
                   aria-haspopup="listbox"
                   aria-expanded={threadMenuOpen}
+                  title={selectableCodexThreads.length > 0 ? "Codex · 选择已有会话" : "暂无可选会话"}
                   onClick={() => setThreadMenuOpen((open) => !open)}
                   onKeyDown={(event) => {
                     if (event.key !== "Escape" || !threadMenuOpen) return;
@@ -1805,7 +1819,7 @@ export function TaskDetail({
                     setThreadMenuOpen(false);
                   }}
                 >
-                  <LinearIcon name="conversation" />
+                  <RuntimeIcon runtime="codex" />
                   <span>
                     {linkingThreadId
                       ? "正在关联…"
@@ -1831,7 +1845,7 @@ export function TaskDetail({
                         title={thread.title}
                         onClick={() => void linkThread(thread.id)}
                       >
-                        <span className="detail-thread-option-icon"><LinearIcon name="conversation" /></span>
+                        <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
                         <span className="detail-thread-option-title">{thread.title}</span>
                       </button>
                     ))}
@@ -1843,9 +1857,10 @@ export function TaskDetail({
                   className="detail-open-thread-action"
                   type="button"
                   disabled={openingThread}
-                  onClick={() => onFollowUpInThread(currentTask, currentTask.threadId as string, "")}
+                  title={`${RUNTIME_LABELS[currentThreadRuntime]} · 在当前会话处理`}
+                  onClick={() => onFollowUpInThread(currentTask, currentTask.threadId as string, "", currentThreadRuntime)}
                 >
-                  <LinearIcon name="conversation" />
+                  <RuntimeIcon runtime={currentThreadRuntime} />
                   <span>{openingThread ? "正在发送…" : "在当前会话处理"}</span>
                 </button>
               )}
@@ -1853,9 +1868,10 @@ export function TaskDetail({
                 className="detail-open-thread-action"
                 type="button"
                 disabled={openingThread}
+                title="Codex · 新建会话"
                 onClick={() => onOpenInThread(currentTask)}
               >
-                <LinearIcon name="conversation" />
+                <RuntimeIcon runtime="codex" />
                 <span>{openingThread ? "正在打开…" : "新建 Codex 会话"}</span>
               </button>
               <button
@@ -1865,6 +1881,7 @@ export function TaskDetail({
                 title={claudeRuntimeSupported ? "用 Claude Code 新建会话" : "仅 macOS Terminal.app 支持 Claude"}
                 onClick={() => onOpenInThread(currentTask, undefined, undefined, "claude")}
               >
+                <RuntimeIcon runtime="claude" />
                 <span>{openingThread ? "正在打开…" : "新建 Claude 会话"}</span>
               </button>
               <button
@@ -1874,6 +1891,7 @@ export function TaskDetail({
                 title={ompRuntimeSupported ? "用 Oh My Pi 新建会话" : "仅 macOS Terminal.app 支持 OMP"}
                 onClick={() => onOpenInThread(currentTask, undefined, undefined, "omp")}
               >
+                <RuntimeIcon runtime="omp" />
                 <span>{openingThread ? "正在打开…" : "新建 OMP 会话"}</span>
               </button>
             </div>

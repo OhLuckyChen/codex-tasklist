@@ -61,12 +61,14 @@ import {
   assigneeTargetForActor,
 } from "./actors";
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
-import { AiChat } from "./components/AiChat";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
 import { ConnectorsPanel } from "./components/ConnectorsPanel";
+import { DashboardView } from "./components/DashboardView";
 import { DraftBox } from "./components/DraftBox";
 import { FavoriteTaskList } from "./components/FavoriteTaskList";
+import { GanttView, type GanttZoom } from "./components/GanttView";
 import { HiddenColumns } from "./components/HiddenColumns";
+import { IssueListView } from "./components/IssueListView";
 import { KnowledgeCenter } from "./components/KnowledgeCenter";
 import {
   resolveInlineMediaMarkdown,
@@ -89,6 +91,11 @@ import {
   taskFilterCount,
   writeTaskFilters,
 } from "./taskFilters";
+import {
+  taskCardPresentation,
+  taskThreadRuntime,
+  type TaskConversationItem,
+} from "./taskConversations";
 import {
   TASK_STATUSES,
   type ActorIdentity,
@@ -118,7 +125,7 @@ import {
 } from "./workflowStore";
 type ConnectionState = "connecting" | "live" | "reconnecting";
 type Theme = "light" | "dark";
-type BoardView = "issues" | "drafts" | "knowledge" | "workflow";
+type BoardView = "dashboard" | "issues" | "list" | "gantt" | "drafts" | "knowledge" | "workflow";
 const SHOW_WORKFLOW_BOARD_ENTRY = false;
 const GLOBAL_PROJECT_ID = "__all_projects__";
 const GLOBAL_VIEW_QUERY_PARAM = "view";
@@ -271,6 +278,7 @@ const SHOW_EMPTY_COLUMNS_KEY = "taskboard.showEmptyColumns.v1";
 const COLUMN_VISIBILITY_KEY = "taskboard.columnVisibility.v1";
 const GLOBAL_COLUMN_VISIBILITY_KEY = "taskboard.globalColumnVisibility.v1";
 const COLUMN_ORDER_KEY = "taskboard.columnOrder.v1";
+const PROJECT_BOARD_VIEW_KEY = "taskboard.projectBoardView.v1";
 const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
 const ISSUE_DRAFTS_KEY = "taskboard.issueDrafts.v1";
 const DEFAULT_AUTOMATION_OPTIONS = {
@@ -280,18 +288,6 @@ const DEFAULT_AUTOMATION_OPTIONS = {
   model: "gpt-5.5",
   reasoningEffort: "high",
 } as const;
-
-function taskStatusChangedTime(task: Task): number {
-  return Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt) || 0;
-}
-
-function compareTasksByStatusChangedAt(left: Task, right: Task): number {
-  const statusDelta = taskStatusChangedTime(right) - taskStatusChangedTime(left);
-  if (statusDelta !== 0) return statusDelta;
-  const updateDelta = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
-  if (updateDelta !== 0) return updateDelta;
-  return left.identifier.localeCompare(right.identifier);
-}
 
 const EVENT_NAMES = [
   "task.created",
@@ -640,6 +636,38 @@ function sortTasks(tasks: Task[]): Task[] {
   );
 }
 
+function isProjectBoardView(value: string | null): value is BoardView {
+  return value === "dashboard"
+    || value === "issues"
+    || value === "list"
+    || value === "gantt"
+    || value === "drafts"
+    || value === "knowledge"
+    || value === "workflow";
+}
+
+function readProjectBoardViews(): Record<string, BoardView> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(PROJECT_BOARD_VIEW_KEY) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, BoardView] => (
+      typeof entry[0] === "string" && isProjectBoardView(typeof entry[1] === "string" ? entry[1] : null)
+    )));
+  } catch {
+    return {};
+  }
+}
+
+function readProjectBoardView(projectId: string): BoardView {
+  return readProjectBoardViews()[projectId] ?? "issues";
+}
+
+function writeProjectBoardView(projectId: string, view: BoardView) {
+  if (!projectId || projectId === GLOBAL_PROJECT_ID) return;
+  const next = { ...readProjectBoardViews(), [projectId]: view };
+  window.localStorage.setItem(PROJECT_BOARD_VIEW_KEY, JSON.stringify(next));
+}
+
 function taskToDraft(task: Task): TaskDraft {
   return {
     title: task.title,
@@ -796,7 +824,6 @@ export function App() {
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [showConnectorsPanel, setShowConnectorsPanel] = useState(false);
-  const [localAiChatAvailable, setLocalAiChatAvailable] = useState(false);
   const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -816,7 +843,12 @@ export function App() {
   const [columnVisibilityByProject, setColumnVisibilityByProject] = useState(readColumnVisibilityByProject);
   const [globalColumnVisibility, setGlobalColumnVisibility] = useState(readGlobalColumnVisibility);
   const [columnOrder, setColumnOrder] = useState(readColumnOrder);
-  const [boardView, setBoardView] = useState<BoardView>("issues");
+  const [boardView, setBoardView] = useState<BoardView>(() => (
+    selectedProjectId ? readProjectBoardView(selectedProjectId) : "issues"
+  ));
+  const [ganttZoom, setGanttZoom] = useState<GanttZoom>("week");
+  const [ganttHideCompleted, setGanttHideCompleted] = useState(false);
+  const [ganttTodayRequest, setGanttTodayRequest] = useState(0);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [issueDrafts, setIssueDrafts] = useState(readIssueDrafts);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
@@ -872,6 +904,7 @@ export function App() {
   const undoStackRef = useRef<UndoOperation[]>([]);
   const undoInFlightRef = useRef(false);
   const dragRegionRef = useRef<HTMLDivElement>(null);
+  const issueListScrollRef = useRef<HTMLDivElement | null>(null);
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
 
@@ -1536,7 +1569,7 @@ export function App() {
         : url.searchParams.get("project") ?? "";
       setDetailTaskIdentifier(routeIssueIdentifier);
       if (routeProjectId === selectedProjectId) return;
-      setBoardView("issues");
+      setBoardView(routeProjectId === GLOBAL_PROJECT_ID ? "issues" : readProjectBoardView(routeProjectId));
       setSelectedProjectId(routeProjectId);
       if (routeProjectId) window.localStorage.setItem(LAST_PROJECT_KEY, routeProjectId);
       else window.localStorage.removeItem(LAST_PROJECT_KEY);
@@ -1837,7 +1870,6 @@ export function App() {
       setProjectKnowledgeSkillPath(metadata.projectKnowledgeSkillPath ?? "");
       setClaudeRuntimeSupported(metadata.claudeRuntime === true);
       setOmpRuntimeSupported(metadata.ompRuntime === true);
-      setLocalAiChatAvailable(metadata.capabilities?.localAiChat === true);
       setLocalKnowledgeAvailable(metadata.capabilities?.localKnowledge === true);
       setConnectors(metadata.connectors ?? []);
       setDeviceWorkspacePaths((current) => {
@@ -2119,6 +2151,13 @@ export function App() {
     return map;
   }, [codexThreadProgress, tasks]);
 
+  const taskPresentations = useMemo(() => Object.fromEntries(
+    filteredTasks.map((task) => [
+      task.id,
+      taskCardPresentation(task, false, progressByTaskId.get(task.id) ?? null),
+    ]),
+  ), [filteredTasks, progressByTaskId]);
+
   const tasksByStatus = useMemo(() => {
     return Object.fromEntries(
       TASK_STATUSES.map((status) => [
@@ -2203,6 +2242,7 @@ export function App() {
   function selectBoardView(view: BoardView) {
     closeContextMenu();
     setBoardView(view);
+    writeProjectBoardView(selectedProjectId, view);
   }
 
   function openNewIssue(status: TaskStatus = "todo", projectId?: string) {
@@ -2586,7 +2626,7 @@ export function App() {
         }
         return project;
       }));
-      setBoardView("issues");
+      setBoardView(readProjectBoardView(projectId));
       setSelectedProjectId(projectId);
       setTasks([result.task]);
       setDetailTaskIdentifier(result.task.identifier);
@@ -2708,8 +2748,18 @@ export function App() {
       setActionError("该任务关联的是旧版临时会话 ID，尚未形成可打开的会话。");
       return;
     }
-    const resolvedTask = task ?? tasks.find((candidate) => candidate.threadId === normalizedThreadId);
-    if (resolvedTask?.runtime === "claude") {
+    const resolvedTask = task ?? tasks.find((candidate) => (
+      normalizeCodexThreadId(candidate.threadId) === normalizedThreadId
+      || candidate.threadIds?.some((candidateThreadId) => (
+        normalizeCodexThreadId(candidateThreadId) === normalizedThreadId
+      ))
+    ));
+    if (!resolvedTask) {
+      setActionError("没有找到该会话关联的议题，无法判断会话运行时。");
+      return;
+    }
+    const resolvedRuntime = taskThreadRuntime(resolvedTask, normalizedThreadId);
+    if (resolvedRuntime === "claude") {
       const workspacePath = resolveTaskWorkspacePath(resolvedTask);
       if (!workspacePath) {
         setActionError("该任务所属项目尚未映射本地目录，无法打开 Claude 会话。");
@@ -2720,7 +2770,7 @@ export function App() {
       });
       return;
     }
-    if (resolvedTask?.runtime === "omp") {
+    if (resolvedRuntime === "omp") {
       const workspacePath = resolveTaskWorkspacePath(resolvedTask);
       if (!workspacePath) {
         setActionError("该任务所属项目尚未映射本地目录，无法打开 Oh My Pi 会话。");
@@ -2740,6 +2790,10 @@ export function App() {
     }
 
     window.location.assign(`codex://threads/${encodeURIComponent(normalizedThreadId)}`);
+  }
+
+  function openTaskConversation(task: Task, conversation: TaskConversationItem) {
+    if (conversation.nativeThreadId) openThread(conversation.nativeThreadId, task);
   }
 
   function expandCodexSidebar() {
@@ -3079,7 +3133,7 @@ export function App() {
     closeContextMenu();
     setProjectMenuOpen(false);
     setDetailTaskIdentifier(null);
-    setBoardView("issues");
+    setBoardView(readProjectBoardView(projectId));
     setSelectedProjectId(projectId);
     window.localStorage.setItem(LAST_PROJECT_KEY, projectId);
     setSearch("");
@@ -3632,6 +3686,17 @@ export function App() {
         {selectedProjectId && !detailTask && <div className="board-toolbar">
           <div className="view-tabs" aria-label="看板视图">
             <button
+              className={`view-tab${boardView === "dashboard" ? " active" : ""}`}
+              type="button"
+              aria-pressed={boardView === "dashboard"}
+              onClick={() => {
+                setFavoriteTasksOnly(false);
+                selectBoardView("dashboard");
+              }}
+            >
+              仪表盘
+            </button>
+            <button
               className={`view-tab${boardView === "issues" && !favoriteTasksOnly ? " active" : ""}`}
               type="button"
               aria-pressed={boardView === "issues" && !favoriteTasksOnly}
@@ -3641,6 +3706,42 @@ export function App() {
               }}
             >
               议题看板
+            </button>
+            <button
+              className={`view-tab${boardView === "list" ? " active" : ""}`}
+              type="button"
+              aria-pressed={boardView === "list"}
+              onClick={() => {
+                setFavoriteTasksOnly(false);
+                selectBoardView("list");
+              }}
+            >
+              列表
+            </button>
+            <button
+              className={`view-tab${boardView === "gantt" ? " active" : ""}`}
+              type="button"
+              aria-pressed={boardView === "gantt"}
+              onClick={() => {
+                setFavoriteTasksOnly(false);
+                selectBoardView("gantt");
+              }}
+            >
+              甘特图
+            </button>
+            <button
+              className={`view-tab favorite-view-tab${boardView === "issues" && favoriteTasksOnly ? " active" : ""}`}
+              type="button"
+              aria-label="收藏议题"
+              aria-pressed={boardView === "issues" && favoriteTasksOnly}
+              onClick={() => {
+                if (!isGlobalBoard) openGlobalBoard("issues");
+                setFavoriteTasksOnly(true);
+                selectBoardView("issues");
+              }}
+            >
+              <LinearIcon name="favorite" />
+              收藏{favoriteTaskCount > 0 ? ` ${favoriteTaskCount}` : ""}
             </button>
             <button
               className={`view-tab${boardView === "drafts" ? " active" : ""}`}
@@ -3660,20 +3761,6 @@ export function App() {
                 项目知识{knowledgeProposalCount > 0 ? ` ${knowledgeProposalCount}` : ""}
               </button>
             )}
-            <button
-              className={`view-tab favorite-view-tab${boardView === "issues" && favoriteTasksOnly ? " active" : ""}`}
-              type="button"
-              aria-label="收藏议题"
-              aria-pressed={boardView === "issues" && favoriteTasksOnly}
-              onClick={() => {
-                if (!isGlobalBoard) openGlobalBoard("issues");
-                setFavoriteTasksOnly(true);
-                selectBoardView("issues");
-              }}
-            >
-              <LinearIcon name="favorite" />
-              收藏{favoriteTaskCount > 0 ? ` ${favoriteTaskCount}` : ""}
-            </button>
             {SHOW_WORKFLOW_BOARD_ENTRY && (
               <button
                 className={`view-tab${boardView === "workflow" ? " active" : ""}`}
@@ -3759,6 +3846,37 @@ export function App() {
               </button>
             )}
           </div>}
+          {boardView === "gantt" && (
+            <div className="toolbar-tools gantt-toolbar-tools">
+              <div className="favorite-view-mode-switch" role="group" aria-label="甘特图缩放">
+                {(["day", "week", "month"] as const).map((zoom) => (
+                  <button
+                    type="button"
+                    aria-pressed={ganttZoom === zoom}
+                    onClick={() => setGanttZoom(zoom)}
+                    key={zoom}
+                  >
+                    <span>{zoom === "day" ? "日" : zoom === "week" ? "周" : "月"}</span>
+                  </button>
+                ))}
+              </div>
+              <label className="gantt-hide-completed">
+                <input
+                  type="checkbox"
+                  checked={ganttHideCompleted}
+                  onChange={(event) => setGanttHideCompleted(event.target.checked)}
+                />
+                <span>隐藏已完成</span>
+              </label>
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => setGanttTodayRequest((current) => current + 1)}
+              >
+                今天
+              </button>
+            </div>
+          )}
         </div>}
 
         {(loadError || actionError) && (
@@ -3922,7 +4040,38 @@ export function App() {
               </div>
             )}
           </section>
-        ) : boardView === "drafts" ? (
+        ) : !detailTask && boardView === "dashboard" && selectedProject ? (
+          <DashboardView
+            projectCreatedAt={selectedProject.createdAt}
+            tasks={filteredTasks}
+            presentations={taskPresentations}
+            currentUser={currentUser}
+            onOpenTask={openTaskDetail}
+            onOpenThread={openThread}
+          />
+        ) : !detailTask && boardView === "list" ? (
+          <IssueListView
+            scrollRef={issueListScrollRef}
+            tasks={filteredTasks}
+            presentations={taskPresentations}
+            currentUser={currentUser}
+            hasActiveFilters={Boolean(search || activeFilterCount > 0)}
+            onOpenTask={openTaskDetail}
+            onOpenConversation={openTaskConversation}
+            onUpdate={(task, changes) => updateTaskProperties(task, changes)}
+          />
+        ) : !detailTask && boardView === "gantt" ? (
+          <GanttView
+            tasks={filteredTasks}
+            presentations={taskPresentations}
+            hasActiveFilters={Boolean(search || activeFilterCount > 0)}
+            zoom={ganttZoom}
+            hideCompleted={ganttHideCompleted}
+            todayRequest={ganttTodayRequest}
+            onOpenTask={openTaskDetail}
+            onUpdate={(task, changes) => updateTaskProperties(task, changes)}
+          />
+        ) : !detailTask && boardView === "drafts" ? (
           <DraftBox
             drafts={visibleIssueDrafts}
             projectNames={projectNames}
@@ -3931,7 +4080,7 @@ export function App() {
             onEdit={editIssueDraft}
             onDelete={deleteIssueDraft}
           />
-        ) : boardView === "knowledge" && selectedProject ? (
+        ) : !detailTask && boardView === "knowledge" && selectedProject ? (
           <KnowledgeCenter
             project={selectedProject}
             workspacePath={selectedDeviceWorkspacePath ?? developmentScan.workspacePath}
@@ -4164,12 +4313,6 @@ export function App() {
           onArchive={(task) => void archiveTask(task)}
         />
       )}
-
-      <AiChat
-        available={localAiChatAvailable}
-        projectId={selectedProject?.id ?? null}
-        issueId={detailTaskId}
-      />
 
       <div className="sr-only" role="status" aria-live="polite">{announcement}</div>
       {undoNotice && (

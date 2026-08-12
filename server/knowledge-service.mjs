@@ -18,7 +18,7 @@ import { ApiError } from "./database.mjs";
 import {
   normalizeCodexEvent,
   spawnCodexTurn,
-} from "./ai-chat-process.mjs";
+} from "./codex-process.mjs";
 
 const execFileAsync = promisify(execFile);
 const KNOWLEDGE_DIRECTORY = path.join("docs", "knowledge");

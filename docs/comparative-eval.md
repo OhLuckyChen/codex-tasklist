@@ -11,7 +11,7 @@
 | C1 | Codex/Claude/OMP 启动器（进程级） | **hybrid** | 保留本地 Claude/OMP 启动器+connectors；Codex 回移植上游 `--cdp-pipe`+generation-guarded 重启；Tauri 延后 |
 | C2 | `server/app.mjs` 路由/中间件/线程归属 | **hybrid** | 以本地多 runtime 骨架为基座，回填上游 Codex 会话进度扫描；不采纳 cloud-proxy/项目摘要/物理删除 |
 | C3 | `server/database.mjs` 数据层/Schema | **hybrid** | 本地 schema 是超集，保留；补 `start_date` 列；可选 `task_activities`/`project_summaries`；加 `PRAGMA user_version` |
-| C4 | AI Chat（ai-chat*.mjs） | **upstream** | 本地是更旧简化版且有退化（重复解析）；直接采纳上游 3 文件+新增 `ai-turn-owner.mjs`+`shared/codex-environment.mjs`，适配 app.mjs 调用点 |
+| C4 | 本地对话面板（codex-process.mjs） | **upstream** | 本地是更旧简化版且有退化（重复解析）；直接采纳上游 3 文件+新增 `codex-turn-owner.mjs`+`shared/codex-environment.mjs`，适配 app.mjs 调用点 |
 | C5 | 任务卡片状态变更排序 | **hybrid** | 保留 `status_changed_at` 列+迁移；看板 issues 视图恢复 `sortOrder` 拖拽；Dashboard/List（视图集成后）用 statusChangedAt；Gantt 保持时间轴 |
 | C6 | knowledge/runtime 集成 | **local** | **前提纠正**：上游 v0.2.3 无 knowledge；保留本地 `knowledge-service.mjs`；内容不入 D1/R2；云协作从 `b46cfef` 恢复 |
 
@@ -47,13 +47,9 @@
 - **风险**：上游 status CHECK 不含 archived，套用上游建表会让本地已归档任务迁移失败；无 schema versioning，表重建迁移不可重放。
 - **落地**：保留本地基座；补 `start_date TEXT`（建表+taskFromRow+ALTER 探测）；选择性引入 `task_activities`+`project_summaries` 纯新表；**不**引入 `attachTaskActivity` 派生模型；在 `#migrate` 开头加 `PRAGMA user_version` 阶梯式升级。
 
-### C4 AI Chat — upstream
+### C4 本地对话面板 — canceled
 
-- **本地**：`ai-chat.mjs`(584)/`ai-chat-process.mjs`(465)/`ai-chat-catalog.mjs`(256)，无 `ai-turn-owner.mjs`。
-- **上游**：同 3 文件(591/471/273) 更新版 + 新增 `ai-turn-owner.mjs`(31) + `shared/codex-environment.mjs`。
-- **选优**：本地无独有增强，是更旧简化版且有退化——`discoverAiCatalog` 把 catalog 发现与 workspace 解析揉进一函数；`getCatalog(projectId)` 每次发消息重复调用 `loadDeviceWorkspaces` 两次；`spawnCodexTurn` 直接 spawn 无中介，codex 派生子进程时漏杀成为孤儿；`processEnv` 直接透传污染。上游 turn-owner 中介+fd3 控制通道+`withoutTaskboardLauncherEnvironment` 过滤+catalog/workspace 解耦全面领先。
-- **落地**：用上游覆盖 3 文件；新增 `server/ai-turn-owner.mjs`+`shared/codex-environment.mjs`；修正 app.mjs 调用点 `getCatalog(projectId)`→`getCatalog(projectId, resolvedContext)`、`discoverAiCatalog` 改传 workspacePath。
-- **交叉点**：与 C2（保留本地 app.mjs）协调——不替换 app.mjs，只调整 app.mjs 内 AI Chat 接线调用点以匹配上游 ai-chat 签名；`withoutTaskboardLauncherEnvironment` 是子进程环境过滤（非 launcher HMAC 模式），与 C2 保留本地单进程模型不冲突。
+本地对话面板已从产品中裁撤。保留的只有 `server/codex-process.mjs` 与 `server/codex-turn-owner.mjs` 这组通用 Codex JSON 子进程执行基础设施，供 `knowledge-service.mjs` 生成知识提案使用；不再保留独立面板、本地对话 API、会话表或前端组件。
 
 ### C5 任务卡片状态变更排序 — hybrid
 
@@ -75,7 +71,7 @@
 ## Phase 3 实施计划（按依赖与风险排序）
 
 1. **C3 database 增量**（低风险）：补 `start_date` 列+迁移；加 `PRAGMA user_version`；可选 `task_activities`/`project_summaries` 新表。
-2. **C4 AI Chat 采纳上游**（中风险，需适配）：覆盖 3 文件+新增 2 文件；调整本地 app.mjs 的 AI Chat 调用点（getCatalog 签名、resolveContext、discoverAiCatalog workspacePath）。
+2. **C4 本地对话面板 采纳上游**（中风险，需适配）：覆盖 3 文件+新增 2 文件；调整本地 app.mjs 的 本地对话面板 调用点（getCatalog 签名、resolveContext、discoverAiCatalog workspacePath）。
 3. **C2 app.mjs 回填 Codex 进度**（中风险）：移植 `findCodexSession`/`readCodexSessionState`+`/api/local/codex-thread-progress`+`PUT /api/local/host-runtime`，适配本地 threadId 可空/多 runtime 语义。
 4. **C5 看板排序修复**（低风险）：恢复 issues 视图 sortOrder，statusChangedAt 分组共存。
 5. **C1 Codex 启动器补强**（中高风险）：提交 connector diff；回移植 `--cdp-pipe`+`CdpPipeBrowser`；9229 降级 fallback；generation-guarded 重启。

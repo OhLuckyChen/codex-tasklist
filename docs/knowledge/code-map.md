@@ -22,7 +22,7 @@ sources:
 - `server/app.mjs`：HTTP 路由、输入边界、本地能力、会话启动和 SSE 事件。
 - `server/database.mjs`：SQLite schema、行映射、事务和业务数据读写。
 - `server/knowledge-service.mjs`：知识页面读取、来源健康检查、分析、问答和安全发布。
-- `server/ai-chat-process.mjs`：Codex 子进程参数、事件归一化和会话执行基础设施。
+- `server/codex-process.mjs`：Codex 子进程事件归一化和受控执行基础设施。
 - `server/claude-launcher.mjs` 与 `server/omp-launcher.mjs`：Claude Code 和 Oh My Pi 会话启动/恢复。
 
 ## Web

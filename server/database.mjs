@@ -145,53 +145,6 @@ function connectorFromRow(row) {
   };
 }
 
-function aiChatRunFromRow(row) {
-  return {
-    id: row.id,
-    threadId: row.thread_id,
-    status: row.status,
-    exitCode: row.exit_code,
-    error: row.error,
-    startedAt: row.started_at,
-    finishedAt: row.finished_at,
-  };
-}
-
-function aiChatThreadFromRow(row) {
-  return {
-    id: row.id,
-    title: row.title,
-    status: row.status,
-    origin: {
-      projectId: row.origin_project_id,
-      projectName: row.origin_project_name,
-      workspacePath: row.origin_workspace_path,
-      ...(row.origin_issue_id ? { issueId: row.origin_issue_id } : {}),
-      ...(row.origin_issue_identifier ? { issueIdentifier: row.origin_issue_identifier } : {}),
-    },
-    codexThreadId: row.codex_thread_id,
-    model: row.model,
-    reasoningEffort: row.reasoning_effort,
-    sandbox: row.sandbox,
-    currentRun: null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function aiChatEventFromRow(row) {
-  return {
-    id: row.id,
-    threadId: row.thread_id,
-    runId: row.run_id,
-    type: row.type,
-    role: row.role,
-    content: row.content,
-    data: row.data === null ? null : JSON.parse(row.data),
-    createdAt: row.created_at,
-  };
-}
-
 function knowledgeChangeFromRow(row) {
   return {
     id: row.id,
@@ -251,7 +204,6 @@ export class TaskboardDatabase {
     this.database = new DatabaseSync(filename);
     this.database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     this.#migrate();
-    this.interruptAbandonedAiChatRuns();
   }
 
   #migrate() {
@@ -308,6 +260,7 @@ export class TaskboardDatabase {
       CREATE TABLE IF NOT EXISTS task_threads (
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         thread_id TEXT NOT NULL,
+        runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
         linked_at TEXT NOT NULL,
         PRIMARY KEY (task_id, thread_id)
       );
@@ -348,61 +301,6 @@ export class TaskboardDatabase {
         version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
         updated_at TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS ai_chat_threads (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('idle', 'running', 'failed')),
-        origin_project_id TEXT NOT NULL,
-        origin_project_name TEXT NOT NULL,
-        origin_workspace_path TEXT NOT NULL,
-        origin_issue_id TEXT,
-        origin_issue_identifier TEXT,
-        codex_thread_id TEXT,
-        model TEXT NOT NULL,
-        reasoning_effort TEXT NOT NULL,
-        sandbox TEXT NOT NULL CHECK (sandbox IN (
-          'read-only', 'workspace-write', 'danger-full-access'
-        )),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS ai_chat_threads_updated
-        ON ai_chat_threads(updated_at DESC, id);
-
-      CREATE TABLE IF NOT EXISTS ai_chat_runs (
-        id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL REFERENCES ai_chat_threads(id) ON DELETE CASCADE,
-        status TEXT NOT NULL CHECK (status IN (
-          'running', 'completed', 'failed', 'interrupted'
-        )),
-        exit_code INTEGER,
-        error TEXT,
-        started_at TEXT NOT NULL,
-        finished_at TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS ai_chat_runs_thread_started
-        ON ai_chat_runs(thread_id, started_at, id);
-
-      CREATE UNIQUE INDEX IF NOT EXISTS ai_chat_runs_one_active
-        ON ai_chat_runs(thread_id)
-        WHERE status = 'running';
-
-      CREATE TABLE IF NOT EXISTS ai_chat_events (
-        id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL REFERENCES ai_chat_threads(id) ON DELETE CASCADE,
-        run_id TEXT REFERENCES ai_chat_runs(id) ON DELETE CASCADE,
-        type TEXT NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'activity', 'error')),
-        content TEXT NOT NULL,
-        data TEXT,
-        created_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS ai_chat_events_thread_created
-        ON ai_chat_events(thread_id, created_at, id);
 
       CREATE TABLE IF NOT EXISTS knowledge_proposals (
         id TEXT PRIMARY KEY,
@@ -642,21 +540,45 @@ export class TaskboardDatabase {
         CREATE TABLE task_threads (
           task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
           thread_id TEXT NOT NULL,
+          runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
           linked_at TEXT NOT NULL,
           PRIMARY KEY (task_id, thread_id)
         );
-        INSERT INTO task_threads (task_id, thread_id, linked_at)
-        SELECT task_id, thread_id, created_at FROM legacy_task_threads;
+        INSERT INTO task_threads (task_id, thread_id, runtime, linked_at)
+        SELECT
+          legacy_task_threads.task_id,
+          legacy_task_threads.thread_id,
+          CASE WHEN legacy_task_threads.thread_id = tasks.thread_id THEN tasks.runtime ELSE 'codex' END,
+          legacy_task_threads.created_at
+        FROM legacy_task_threads
+        JOIN tasks ON tasks.id = legacy_task_threads.task_id;
         DROP TABLE legacy_task_threads;
+      `);
+    }
+    const migratedTaskThreadColumns = this.database.prepare("PRAGMA table_info(task_threads)").all();
+    if (!migratedTaskThreadColumns.some((column) => column.name === "runtime")) {
+      this.database.exec("ALTER TABLE task_threads ADD COLUMN runtime TEXT NOT NULL DEFAULT 'codex'");
+      this.database.exec(`
+        UPDATE task_threads
+        SET runtime = (
+          SELECT tasks.runtime FROM tasks
+          WHERE tasks.id = task_threads.task_id
+            AND tasks.thread_id = task_threads.thread_id
+        )
+        WHERE EXISTS (
+          SELECT 1 FROM tasks
+          WHERE tasks.id = task_threads.task_id
+            AND tasks.thread_id = task_threads.thread_id
+        )
       `);
     }
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS task_threads_task_linked
         ON task_threads(task_id, linked_at DESC, thread_id);
-      INSERT OR IGNORE INTO task_threads (task_id, thread_id, linked_at)
-      SELECT id, thread_id, updated_at FROM tasks WHERE thread_id IS NOT NULL;
-      INSERT OR IGNORE INTO task_threads (task_id, thread_id, linked_at)
-      SELECT task_id, thread_id, updated_at FROM comments WHERE thread_id IS NOT NULL;
+      INSERT OR IGNORE INTO task_threads (task_id, thread_id, runtime, linked_at)
+      SELECT id, thread_id, runtime, updated_at FROM tasks WHERE thread_id IS NOT NULL;
+      INSERT OR IGNORE INTO task_threads (task_id, thread_id, runtime, linked_at)
+      SELECT task_id, thread_id, 'codex', updated_at FROM comments WHERE thread_id IS NOT NULL;
     `);
 
     const attachmentColumns = this.database.prepare("PRAGMA table_info(attachments)").all();
@@ -1216,240 +1138,6 @@ export class TaskboardDatabase {
     return { id };
   }
 
-  listAiChatThreads() {
-    return this.database.prepare(`
-      SELECT * FROM ai_chat_threads
-      ORDER BY updated_at DESC, id
-    `).all().map((row) => this.#aiChatThreadWithCurrentRun(row));
-  }
-
-  getAiChatThread(id) {
-    const row = this.database.prepare("SELECT * FROM ai_chat_threads WHERE id = ?").get(id);
-    return row ? this.#aiChatThreadWithCurrentRun(row) : null;
-  }
-
-  createAiChatThread(input) {
-    const id = input.id ?? randomUUID();
-    const timestamp = input.createdAt ?? now();
-    this.database.prepare(`
-      INSERT INTO ai_chat_threads (
-        id, title, status,
-        origin_project_id, origin_project_name, origin_workspace_path,
-        origin_issue_id, origin_issue_identifier,
-        codex_thread_id, model, reasoning_effort, sandbox,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      input.title,
-      input.status ?? "idle",
-      input.origin.projectId,
-      input.origin.projectName,
-      input.origin.workspacePath,
-      input.origin.issueId ?? null,
-      input.origin.issueIdentifier ?? null,
-      input.codexThreadId ?? null,
-      input.model,
-      input.reasoningEffort,
-      input.sandbox,
-      timestamp,
-      input.updatedAt ?? timestamp,
-    );
-    return this.getAiChatThread(id);
-  }
-
-  updateAiChatThread(id, changes) {
-    const current = this.getAiChatThread(id);
-    if (!current) {
-      throw new ApiError(404, "AI_CHAT_THREAD_NOT_FOUND", `AI chat thread '${id}' does not exist`);
-    }
-    const columns = {
-      title: "title",
-      status: "status",
-      codexThreadId: "codex_thread_id",
-      model: "model",
-      reasoningEffort: "reasoning_effort",
-      sandbox: "sandbox",
-    };
-    const assignments = [];
-    const values = [];
-    for (const [key, column] of Object.entries(columns)) {
-      if (!Object.hasOwn(changes, key)) continue;
-      assignments.push(`${column} = ?`);
-      values.push(changes[key]);
-    }
-    if (assignments.length === 0) return current;
-    assignments.push("updated_at = ?");
-    values.push(changes.updatedAt ?? now(), id);
-    this.database.prepare(`
-      UPDATE ai_chat_threads SET ${assignments.join(", ")} WHERE id = ?
-    `).run(...values);
-    return this.getAiChatThread(id);
-  }
-
-  deleteAiChatThread(id) {
-    const current = this.getAiChatThread(id);
-    if (!current) {
-      throw new ApiError(404, "AI_CHAT_THREAD_NOT_FOUND", `AI chat thread '${id}' does not exist`);
-    }
-    this.database.prepare("DELETE FROM ai_chat_threads WHERE id = ?").run(id);
-    return current;
-  }
-
-  listAiChatRuns(threadId) {
-    return this.database.prepare(`
-      SELECT * FROM ai_chat_runs
-      WHERE thread_id = ?
-      ORDER BY started_at, id
-    `).all(threadId).map(aiChatRunFromRow);
-  }
-
-  getAiChatRun(id) {
-    const row = this.database.prepare("SELECT * FROM ai_chat_runs WHERE id = ?").get(id);
-    return row ? aiChatRunFromRow(row) : null;
-  }
-
-  createAiChatRun(input) {
-    const id = input.id ?? randomUUID();
-    const timestamp = input.startedAt ?? now();
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.prepare(`
-        INSERT INTO ai_chat_runs (
-          id, thread_id, status, exit_code, error, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        id,
-        input.threadId,
-        input.status ?? "running",
-        input.exitCode ?? null,
-        input.error ?? null,
-        timestamp,
-        input.finishedAt ?? null,
-      );
-      if ((input.status ?? "running") === "running") {
-        this.database.prepare(`
-          UPDATE ai_chat_threads
-          SET status = 'running', updated_at = ?
-          WHERE id = ?
-        `).run(timestamp, input.threadId);
-      }
-      this.database.exec("COMMIT");
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getAiChatRun(id);
-  }
-
-  updateAiChatRun(id, changes) {
-    const current = this.getAiChatRun(id);
-    if (!current) {
-      throw new ApiError(404, "AI_CHAT_RUN_NOT_FOUND", `AI chat run '${id}' does not exist`);
-    }
-    const columns = {
-      status: "status",
-      exitCode: "exit_code",
-      error: "error",
-      finishedAt: "finished_at",
-    };
-    const assignments = [];
-    const values = [];
-    for (const [key, column] of Object.entries(columns)) {
-      if (!Object.hasOwn(changes, key)) continue;
-      assignments.push(`${column} = ?`);
-      values.push(changes[key]);
-    }
-    if (assignments.length === 0) return current;
-
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      values.push(id);
-      this.database.prepare(`
-        UPDATE ai_chat_runs SET ${assignments.join(", ")} WHERE id = ?
-      `).run(...values);
-      const status = changes.status ?? current.status;
-      if (status !== "running") {
-        const threadStatus = status === "failed" ? "failed" : "idle";
-        this.database.prepare(`
-          UPDATE ai_chat_threads
-          SET status = ?, updated_at = ?
-          WHERE id = ?
-            AND NOT EXISTS (
-              SELECT 1 FROM ai_chat_runs
-              WHERE thread_id = ? AND status = 'running'
-            )
-        `).run(threadStatus, changes.finishedAt ?? now(), current.threadId, current.threadId);
-      }
-      this.database.exec("COMMIT");
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getAiChatRun(id);
-  }
-
-  insertAiChatEvent(input) {
-    const id = input.id ?? randomUUID();
-    const timestamp = input.createdAt ?? now();
-    this.database.prepare(`
-      INSERT INTO ai_chat_events (
-        id, thread_id, run_id, type, role, content, data, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      input.threadId,
-      input.runId ?? null,
-      input.type,
-      input.role,
-      input.content,
-      input.data === undefined || input.data === null ? null : JSON.stringify(input.data),
-      timestamp,
-    );
-    const row = this.database.prepare("SELECT * FROM ai_chat_events WHERE id = ?").get(id);
-    return aiChatEventFromRow(row);
-  }
-
-  listAiChatEvents(threadId) {
-    return this.database.prepare(`
-      SELECT * FROM ai_chat_events
-      WHERE thread_id = ?
-      ORDER BY created_at, rowid
-    `).all(threadId).map(aiChatEventFromRow);
-  }
-
-  interruptAbandonedAiChatRuns() {
-    const timestamp = now();
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const result = this.database.prepare(`
-        UPDATE ai_chat_runs
-        SET
-          status = 'interrupted',
-          error = COALESCE(error, 'Taskboard service restarted'),
-          finished_at = COALESCE(finished_at, ?)
-        WHERE status = 'running'
-      `).run(timestamp);
-      if (result.changes > 0) {
-        this.database.prepare(`
-          UPDATE ai_chat_threads
-          SET status = 'idle', updated_at = ?
-          WHERE status = 'running'
-            AND NOT EXISTS (
-              SELECT 1 FROM ai_chat_runs
-              WHERE ai_chat_runs.thread_id = ai_chat_threads.id
-                AND ai_chat_runs.status = 'running'
-            )
-        `).run(timestamp);
-      }
-      this.database.exec("COMMIT");
-      return Number(result.changes);
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
   listKnowledgeProposals(projectId, status) {
     const rows = this.database.prepare(`
       SELECT * FROM knowledge_proposals
@@ -1640,6 +1328,53 @@ export class TaskboardDatabase {
     return row ? this.#taskWithRelations(row) : null;
   }
 
+  listTaskThreadRuntimeRecords(filters) {
+    const where = [];
+    const values = [];
+    if (filters.projectId) {
+      where.push("tasks.project_id = ?");
+      values.push(filters.projectId);
+    }
+    if (filters.status) {
+      where.push("tasks.status = ?");
+      values.push(filters.status);
+    }
+    if (filters.archived === "false") {
+      where.push("tasks.archived_at IS NULL");
+    } else if (filters.archived === "true") {
+      where.push("tasks.archived_at IS NOT NULL");
+    }
+
+    return this.database.prepare(`
+      SELECT task_threads.task_id, task_threads.thread_id, task_threads.runtime, tasks.thread_id AS current_thread_id
+      FROM task_threads
+      JOIN tasks ON tasks.id = task_threads.task_id
+      ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+    `).all(...values);
+  }
+
+  getTaskThreadRuntimeRecords(id) {
+    return this.database.prepare(`
+      SELECT task_threads.task_id, task_threads.thread_id, task_threads.runtime, tasks.thread_id AS current_thread_id
+      FROM task_threads
+      JOIN tasks ON tasks.id = task_threads.task_id
+      WHERE tasks.id = ? OR tasks.identifier = ?
+    `).all(id, id);
+  }
+
+  updateTaskThreadRuntime(taskId, threadId, runtime) {
+    this.database.prepare(`
+      UPDATE task_threads
+      SET runtime = ?
+      WHERE task_id = ? AND thread_id = ?
+    `).run(runtime, taskId, threadId);
+    this.database.prepare(`
+      UPDATE tasks
+      SET runtime = ?
+      WHERE id = ? AND thread_id = ?
+    `).run(runtime, taskId, threadId);
+  }
+
   createTask(input) {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -1709,7 +1444,7 @@ export class TaskboardDatabase {
         timestamp,
         input.startDate ?? null,
       );
-      this.#linkTaskThread(id, input.threadId, timestamp);
+      this.#linkTaskThread(id, input.threadId, timestamp, input.runtime ?? "codex");
       this.database.exec("COMMIT");
       return this.getTask(id);
     } catch (error) {
@@ -1792,7 +1527,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
-      this.#linkTaskThread(current.id, threadId, timestamp);
+      this.#linkTaskThread(current.id, threadId, timestamp, changes.runtime ?? current.runtime);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -2270,18 +2005,6 @@ export class TaskboardDatabase {
     return comment;
   }
 
-  #aiChatThreadWithCurrentRun(row) {
-    const thread = aiChatThreadFromRow(row);
-    const currentRun = this.database.prepare(`
-      SELECT * FROM ai_chat_runs
-      WHERE thread_id = ? AND status = 'running'
-      ORDER BY started_at DESC, id DESC
-      LIMIT 1
-    `).get(thread.id);
-    thread.currentRun = currentRun ? aiChatRunFromRow(currentRun) : null;
-    return thread;
-  }
-
   #attachmentsForComment(commentId) {
     return this.database.prepare(`
       SELECT * FROM attachments
@@ -2292,12 +2015,16 @@ export class TaskboardDatabase {
 
   #taskWithRelations(row) {
     const task = taskFromRow(row);
-    task.threadIds = this.database.prepare(`
-      SELECT thread_id
+    const threadRows = this.database.prepare(`
+      SELECT thread_id, runtime
       FROM task_threads
       WHERE task_id = ?
       ORDER BY CASE WHEN thread_id = ? THEN 0 ELSE 1 END, linked_at DESC, thread_id DESC
-    `).all(task.id, task.threadId).map((item) => item.thread_id);
+    `).all(task.id, task.threadId);
+    task.threadIds = threadRows.map((item) => item.thread_id);
+    task.threadRuntimes = Object.fromEntries(
+      threadRows.map((item) => [item.thread_id, item.runtime ?? "codex"]),
+    );
     const parent = this.database.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -2420,13 +2147,15 @@ export class TaskboardDatabase {
     this.#linkTaskThread(id, threadId, timestamp);
   }
 
-  #linkTaskThread(taskId, threadId, linkedAt) {
+  #linkTaskThread(taskId, threadId, linkedAt, runtime = "codex") {
     if (threadId === undefined || threadId === null) return;
     this.database.prepare(`
-      INSERT INTO task_threads (task_id, thread_id, linked_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(task_id, thread_id) DO UPDATE SET linked_at = excluded.linked_at
-    `).run(taskId, threadId, linkedAt);
+      INSERT INTO task_threads (task_id, thread_id, runtime, linked_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(task_id, thread_id) DO UPDATE SET
+        runtime = excluded.runtime,
+        linked_at = excluded.linked_at
+    `).run(taskId, threadId, runtime, linkedAt);
   }
 
   #requireTask(id) {
