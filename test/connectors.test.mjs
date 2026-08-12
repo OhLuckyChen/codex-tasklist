@@ -177,32 +177,31 @@ test("runtime must be claude or omp", async () => {
   assert.equal(bad.response.status, 400);
 });
 
-test("omp launcher injects connector env and model flag", async () => {
+test("omp launcher uses provider/model flag without ANTHROPIC env", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "omp-launch-"));
   try {
     const launcher = createOmpLauncher({ dataDirectory: directory, ompExecutable: "omp" });
     const sessionId = "11111111-1111-1111-1111-111111111111";
+    // launchSession computes model via ompModelArg (provider/model) and passes it in.
     const { scriptPath } = launcher.writeSessionFiles(sessionId, {
       workspacePath: directory,
       prompt: "hi",
-      connector: {
-        baseUrl: "https://gw.example.com",
-        apiKey: "secret-key",
-        model: "glm-5.2",
-        customHeaders: { "user-id": "bob" },
-      },
+      connector: { apiKey: "secret-key", model: "glm-5.2" },
+      model: "aliyun/glm-5.2",
     });
     const script = await readFile(scriptPath, "utf8");
-    assert.match(script, /export ANTHROPIC_BASE_URL='https:\/\/gw\.example\.com'/);
-    assert.match(script, /export ANTHROPIC_API_KEY='secret-key'/);
-    assert.match(script, /export ANTHROPIC_CUSTOM_HEADERS=/);
-    assert.match(script, /--model='glm-5\.2'/);
+    assert.match(script, /--model='aliyun\/glm-5\.2'/);
+    // omp credentials live in ~/.omp/agent/.env (overwritten at launch time),
+    // not in ANTHROPIC_* env vars injected into the script.
+    assert.doesNotMatch(script, /ANTHROPIC_BASE_URL/);
+    assert.doesNotMatch(script, /ANTHROPIC_API_KEY=/);
+    assert.doesNotMatch(script, /ANTHROPIC_CUSTOM_HEADERS/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("omp launcher omits env without connector (fallback)", async () => {
+test("omp launcher omits model without connector (fallback)", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "omp-fallback-"));
   try {
     const launcher = createOmpLauncher({ dataDirectory: directory, ompExecutable: "omp" });
@@ -212,9 +211,8 @@ test("omp launcher omits env without connector (fallback)", async () => {
       connector: null,
     });
     const script = await readFile(scriptPath, "utf8");
-    assert.doesNotMatch(script, /ANTHROPIC_BASE_URL/);
-    assert.doesNotMatch(script, /ANTHROPIC_API_KEY=/);
     assert.doesNotMatch(script, /--model=/);
+    assert.doesNotMatch(script, /ANTHROPIC/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
