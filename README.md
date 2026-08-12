@@ -265,6 +265,25 @@ The macOS Dock launcher also reads `.data/node-path` and `.data/codex-path`. Tho
 
 ## taskctl CLI
 
+## MCP server for agents
+
+The standalone Taskboard service also exposes a local MCP server for coding agents.
+It uses stdio JSON-RPC and delegates every operation to the existing Taskboard HTTP
+API, so the Web UI, `taskctl`, SSE events, and MCP tools share the same SQLite data
+and concurrency rules.
+
+```bash
+npm run start:mcp
+```
+
+By default the MCP server connects to `http://127.0.0.1:47823`. Set
+`TASKBOARD_MCP_URL` when the local Taskboard HTTP service uses another address.
+The included [`.mcp.json`](.mcp.json) is the corresponding local MCP server
+configuration. The initial tool set covers listing projects and issues, reading and
+creating issues, claiming an issue, adding a comment, and moving an issue between
+statuses. Agents should read an issue before claiming or moving it and pass its
+latest `version` to preserve optimistic concurrency.
+
 Run commands from the repository:
 
 ```bash
