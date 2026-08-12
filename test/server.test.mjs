@@ -197,6 +197,10 @@ test("knowledge questionnaires require gap evidence and only accepted answers cr
   assert.equal(review.response.status, 200);
   assert.equal(review.body.proposal.status, "ready");
   assert.match(review.body.proposal.changes[0].afterContent, /财务确认/);
+  const duplicateReview = await request(baseUrl, `/api/knowledge-answers/${answer.body.answerId}/review`, { method: "POST", body: { status: "accepted" } });
+  assert.equal(duplicateReview.response.status, 409);
+  const proposals = await request(baseUrl, "/api/projects/survey/knowledge-proposals?status=ready");
+  assert.equal(proposals.body.proposals.length, 1);
   const closed = await request(baseUrl, `/api/projects/survey/knowledge-questionnaires/${questionnaire.id}`, { method: "PATCH", body: { status: "closed" } });
   assert.equal(closed.response.status, 200);
 });

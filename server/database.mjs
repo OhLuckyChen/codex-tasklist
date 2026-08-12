@@ -1229,7 +1229,7 @@ export class TaskboardDatabase {
   }
 
   knowledgeAnswerContext(id) {
-    return this.database.prepare(`SELECT a.id, a.content, q.prompt, q.knowledge_target, questionnaire.project_id
+    return this.database.prepare(`SELECT a.id, a.content, a.status, q.prompt, q.knowledge_target, questionnaire.project_id
       FROM knowledge_answers a JOIN knowledge_questions q ON q.id = a.question_id
       JOIN knowledge_questionnaires questionnaire ON questionnaire.id = q.questionnaire_id WHERE a.id = ?`).get(id);
   }
