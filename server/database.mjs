@@ -908,6 +908,18 @@ export class TaskboardDatabase {
     return this.getProject(id);
   }
 
+  renameProject(id, name) {
+    const result = this.database.prepare(`
+      UPDATE projects
+      SET name = ?, updated_at = ?
+      WHERE id = ?
+    `).run(name, now(), id);
+    if (result.changes === 0) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${id}' does not exist`);
+    }
+    return this.getProject(id);
+  }
+
   getWorkflowWorkspace(projectId) {
     if (!this.database.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
       throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
