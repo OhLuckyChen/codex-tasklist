@@ -56,6 +56,7 @@ function taskFromRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     statusChangedAt: row.status_changed_at ?? row.updated_at,
+    startDate: row.start_date,
   };
 }
 
@@ -297,7 +298,8 @@ export class TaskboardDatabase {
         version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        status_changed_at TEXT NOT NULL
+        status_changed_at TEXT NOT NULL,
+        start_date TEXT
       );
 
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
@@ -542,6 +544,10 @@ export class TaskboardDatabase {
     if (!statusTimestampColumns.some((column) => column.name === "status_changed_at")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN status_changed_at TEXT");
       this.database.exec("UPDATE tasks SET status_changed_at = updated_at WHERE status_changed_at IS NULL");
+    }
+    const startDateColumns = this.database.prepare("PRAGMA table_info(tasks)").all();
+    if (!startDateColumns.some((column) => column.name === "start_date")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN start_date TEXT");
     }
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
@@ -1668,8 +1674,8 @@ export class TaskboardDatabase {
           assignee_type, assignee_id, assignee_name, assignee_avatar_url,
           workflow_id, git_branch, worktree_path, worktree_branch,
           due_date, recurrence_interval, recurrence_unit,
-          archived_at, version, created_at, updated_at, status_changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+          archived_at, version, created_at, updated_at, status_changed_at, start_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       `).run(
         id,
         identifier,
@@ -1701,6 +1707,7 @@ export class TaskboardDatabase {
         timestamp,
         timestamp,
         timestamp,
+        input.startDate ?? null,
       );
       this.#linkTaskThread(id, input.threadId, timestamp);
       this.database.exec("COMMIT");
@@ -1728,6 +1735,7 @@ export class TaskboardDatabase {
       labels: "labels",
       workflowId: "workflow_id",
       dueDate: "due_date",
+      startDate: "start_date",
       runtime: "runtime",
     };
     const assignments = [];
