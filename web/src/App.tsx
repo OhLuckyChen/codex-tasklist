@@ -276,6 +276,18 @@ const DEFAULT_AUTOMATION_OPTIONS = {
   reasoningEffort: "high",
 } as const;
 
+function taskStatusChangedTime(task: Task): number {
+  return Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt) || 0;
+}
+
+function compareTasksByStatusChangedAt(left: Task, right: Task): number {
+  const statusDelta = taskStatusChangedTime(right) - taskStatusChangedTime(left);
+  if (statusDelta !== 0) return statusDelta;
+  const updateDelta = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  if (updateDelta !== 0) return updateDelta;
+  return left.identifier.localeCompare(right.identifier);
+}
+
 const EVENT_NAMES = [
   "task.created",
   "task.updated",
@@ -2049,7 +2061,13 @@ export function App() {
 
   const tasksByStatus = useMemo(() => {
     return Object.fromEntries(
-      TASK_STATUSES.map((status) => [status, filteredTasks.filter((task) => task.status === status)]),
+      TASK_STATUSES.map((status) => [
+        status,
+        filteredTasks
+          .filter((task) => task.status === status)
+          .slice()
+          .sort(compareTasksByStatusChangedAt),
+      ]),
     ) as Record<TaskStatus, Task[]>;
   }, [filteredTasks]);
 

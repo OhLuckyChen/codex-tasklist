@@ -55,6 +55,7 @@ function taskFromRow(row) {
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    statusChangedAt: row.status_changed_at ?? row.updated_at,
   };
 }
 
@@ -277,7 +278,8 @@ export class TaskboardDatabase {
         archived_at TEXT,
         version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        status_changed_at TEXT NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
@@ -518,6 +520,11 @@ export class TaskboardDatabase {
       this.database.exec("ALTER TABLE tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'codex'");
     }
     this.#migrateRuntimeCheckConstraint();
+    const statusTimestampColumns = this.database.prepare("PRAGMA table_info(tasks)").all();
+    if (!statusTimestampColumns.some((column) => column.name === "status_changed_at")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN status_changed_at TEXT");
+      this.database.exec("UPDATE tasks SET status_changed_at = updated_at WHERE status_changed_at IS NULL");
+    }
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS tasks_project_status_sort
         ON tasks(project_id, archived_at, status, sort_order, created_at)
@@ -1440,8 +1447,8 @@ export class TaskboardDatabase {
           assignee_type, assignee_id, assignee_name, assignee_avatar_url,
           workflow_id, git_branch, worktree_path, worktree_branch,
           due_date, recurrence_interval, recurrence_unit,
-          archived_at, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+          archived_at, version, created_at, updated_at, status_changed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
       `).run(
         id,
         identifier,
@@ -1470,6 +1477,7 @@ export class TaskboardDatabase {
         input.recurrence?.interval ?? null,
         input.recurrence?.unit ?? null,
         input.status === "archived" ? timestamp : null,
+        timestamp,
         timestamp,
         timestamp,
       );
@@ -1535,6 +1543,10 @@ export class TaskboardDatabase {
     if (Object.hasOwn(changes, "status")) {
       assignments.push("archived_at = CASE WHEN ? = 'archived' THEN COALESCE(archived_at, ?) ELSE NULL END");
       values.push(changes.status, timestamp);
+      if (changes.status !== current.status) {
+        assignments.push("status_changed_at = ?");
+        values.push(timestamp);
+      }
     }
     if (threadId !== undefined) {
       assignments.push("thread_id = ?");
@@ -1619,9 +1631,10 @@ export class TaskboardDatabase {
         UPDATE tasks
         SET status = ?, sort_order = ?,
             archived_at = CASE WHEN ? = 'archived' THEN COALESCE(archived_at, ?) ELSE NULL END,
+            status_changed_at = CASE WHEN status != ? THEN ? ELSE status_changed_at END,
             thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(status, sortOrder, status, timestamp, threadId ?? null, timestamp, current.id, version);
+      `).run(status, sortOrder, status, timestamp, status, timestamp, threadId ?? null, timestamp, current.id, version);
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
@@ -1724,9 +1737,10 @@ export class TaskboardDatabase {
       const result = this.database.prepare(`
         UPDATE tasks
         SET status = 'archived', sort_order = ?, archived_at = COALESCE(archived_at, ?),
+            status_changed_at = CASE WHEN status != 'archived' THEN ? ELSE status_changed_at END,
             thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(sortOrder, timestamp, threadId ?? null, timestamp, current.id, version);
+      `).run(sortOrder, timestamp, timestamp, threadId ?? null, timestamp, current.id, version);
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
@@ -1755,9 +1769,10 @@ export class TaskboardDatabase {
       const result = this.database.prepare(`
         UPDATE tasks
         SET status = 'todo', sort_order = ?, archived_at = NULL,
+            status_changed_at = ?,
             thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
-      `).run(sortOrder, threadId ?? null, timestamp, current.id, version);
+      `).run(sortOrder, timestamp, threadId ?? null, timestamp, current.id, version);
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }

@@ -23,6 +23,22 @@ export function StatusIcon({ status }: { status: TaskStatus }) {
   return <LinearStatusIcon status={status} />;
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function startOfLocalDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function statusChangedGroup(task: Task, now = new Date()): string {
+  const changedAt = Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt);
+  const timestamp = Number.isFinite(changedAt) ? changedAt : 0;
+  const today = startOfLocalDay(now);
+  if (timestamp >= today) return "今日";
+  if (timestamp >= today - MS_PER_DAY) return "昨日";
+  if (timestamp >= today - 7 * MS_PER_DAY) return "上周";
+  return "更早";
+}
+
 interface BoardColumnProps {
   status: TaskStatus;
   statusIndex: number;
@@ -207,28 +223,34 @@ export function BoardColumn({
       </header>
 
       <div className="column-list">
-        {tasks.map((task) => {
+        {tasks.map((task, index) => {
           const dragShift = getTaskDragShift(task);
+          const group = statusChangedGroup(task);
+          const previousGroup = index > 0 ? statusChangedGroup(tasks[index - 1]) : null;
           return (
-            <TaskCard
-              key={task.id}
-              task={task}
-              projectName={projectNames?.[task.projectId]}
-              statusIndex={statusIndex}
-              isDragging={draggedTaskId === task.id}
-              dragShift={dragShift}
-              isMoving={movingTaskId === task.id}
-              isSettling={settlingTaskId === task.id}
-              isContextMenuOpen={contextMenuTaskId === task.id}
-              isFavorite={favoriteTaskIds.has(task.id)}
-              onEdit={onEdit}
-              onToggleFavorite={onToggleFavorite}
-              onContextMenu={onContextMenu}
-              onMove={onMove}
-              onDragStart={onDragStart}
-              onDragEnd={onDragEnd}
-              onOpenThread={onOpenThread}
-            />
+            <div className="task-group" key={task.id}>
+              {group !== previousGroup && (
+                <div className="task-group-heading">{group}</div>
+              )}
+              <TaskCard
+                task={task}
+                projectName={projectNames?.[task.projectId]}
+                statusIndex={statusIndex}
+                isDragging={draggedTaskId === task.id}
+                dragShift={dragShift}
+                isMoving={movingTaskId === task.id}
+                isSettling={settlingTaskId === task.id}
+                isContextMenuOpen={contextMenuTaskId === task.id}
+                isFavorite={favoriteTaskIds.has(task.id)}
+                onEdit={onEdit}
+                onToggleFavorite={onToggleFavorite}
+                onContextMenu={onContextMenu}
+                onMove={onMove}
+                onDragStart={onDragStart}
+                onDragEnd={onDragEnd}
+                onOpenThread={onOpenThread}
+              />
+            </div>
           );
         })}
       </div>

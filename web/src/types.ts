@@ -341,6 +341,7 @@ export interface Task {
   version: number;
   createdAt: string;
   updatedAt: string;
+  statusChangedAt: string;
 }
 
 export interface Comment {
