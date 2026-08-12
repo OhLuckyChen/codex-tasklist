@@ -293,6 +293,19 @@ test("the standalone web page opens linked Codex tasks through the app deep link
   assert.match(webApp, /window\.location\.assign\(`codex:\/\/threads\/\$\{encodeURIComponent\(normalizedThreadId\)\}`\)/);
 });
 
+test("the standalone web page resolves historical thread runtime from every linked conversation", () => {
+  const openThreadSource = webApp.slice(
+    webApp.indexOf("function openThread(threadId: string, task?: Task)"),
+    webApp.indexOf("function expandCodexSidebar"),
+  );
+  assert.match(openThreadSource, /candidate\.threadIds\?\.some\(\(candidateThreadId\) => \(/);
+  assert.match(openThreadSource, /normalizeCodexThreadId\(candidateThreadId\) === normalizedThreadId/);
+  assert.match(openThreadSource, /const resolvedRuntime = taskThreadRuntime\(resolvedTask, normalizedThreadId\)/);
+  assert.match(openThreadSource, /resolvedRuntime === "claude"/);
+  assert.match(openThreadSource, /resumeClaudeSession\(\{ threadId: normalizedThreadId, workspacePath \}\)/);
+  assert.match(openThreadSource, /resolvedRuntime === "omp"/);
+});
+
 test("the injected app opens an existing local Codex task instead of a new composer", () => {
   const openThreadSource = source.slice(
     source.indexOf("async function openThread"),
@@ -300,8 +313,15 @@ test("the injected app opens an existing local Codex task instead of a new compo
   );
   assert.match(openThreadSource, /if \(row\?\.isConnected\) \{[\s\S]*?row\.click\?\.\(\);[\s\S]*?if \(await waitForActiveThread\(normalizedThreadId\)\) return;/);
   assert.match(openThreadSource, /if \(!normalizedThreadId\) return/);
+  assert.match(openThreadSource, /await ensureThreadRowsVisible\(\)/);
+  assert.match(source, /async function ensureThreadRowsVisible\(\)[\s\S]*?expandNativeSidebar\(\)/);
+  assert.match(source, /section\?\.getAttribute\("data-app-action-sidebar-section-collapsed"\) === "true"[\s\S]*?data-app-action-sidebar-section-toggle/);
   assert.match(openThreadSource, /await dispatchHostMessage\(\{\s*type: "navigate-to-route",\s*path: routeForThread\(normalizedThreadId\)/);
+  assert.match(openThreadSource, /if \(await waitForActiveThread\(normalizedThreadId, 2_000\)\) return/);
+  assert.match(openThreadSource, /window\.location\.assign\(appUrlForThread\(normalizedThreadId\)\)/);
+  assert.match(openThreadSource, /await waitForActiveThread\(normalizedThreadId, 3_000\)/);
   assert.match(source, /return `\/local\/\$\{encodeURIComponent\(threadId\)\}`/);
+  assert.match(source, /return `codex:\/\/threads\/\$\{encodeURIComponent\(threadId\)\}`/);
   assert.doesNotMatch(source, /return `\/thread\/\$\{encodeURIComponent\(threadId\)\}`/);
   assert.doesNotMatch(openThreadSource, /focusComposerNonce/);
 });

@@ -1,13 +1,10 @@
 import type {
   ActorIdentity,
-  AiChatCatalog,
-  AiChatAttachmentInput,
-  AiChatRun,
-  AiChatSandbox,
-  AiChatThread,
-  AiChatThreadSnapshot,
   Attachment,
   Comment,
+  CodexThreadProgress,
+  Connector,
+  ConnectorDraft,
   DevelopmentScan,
   IssueRelationType,
   GeneratedKnowledgeProposal,
@@ -118,109 +115,61 @@ export async function getTaskboardMetadata(signal?: AbortSignal): Promise<Taskbo
   return request<TaskboardMetadata>("/api/meta", { signal });
 }
 
-export async function getAiChatCatalog(
-  projectId: string,
+export async function getCodexThreadProgress(
+  threadIds: string[],
   signal?: AbortSignal,
-): Promise<AiChatCatalog> {
-  return request<AiChatCatalog>(
-    `/api/local/ai/catalog?projectId=${encodeURIComponent(projectId)}`,
-    { signal },
-  );
+): Promise<Record<string, CodexThreadProgress | null>> {
+  const query = new URLSearchParams();
+  for (const threadId of threadIds) query.append("threadId", threadId);
+  const data = await request<{
+    progress: Record<string, CodexThreadProgress | null>;
+  }>(`/api/local/codex-thread-progress?${query}`, { signal });
+  return data.progress;
 }
 
-export async function listAiChatThreads(signal?: AbortSignal): Promise<AiChatThread[]> {
-  const data = await request<{ threads: AiChatThread[] }>("/api/local/ai/threads", { signal });
-  return data.threads;
+export async function listConnectors(signal?: AbortSignal): Promise<Connector[]> {
+  const data = await request<{ connectors: Connector[] }>("/api/connectors", { signal });
+  return data.connectors ?? [];
 }
 
-export async function createAiChatThread(input: {
-  projectId: string;
-  issueId?: string;
-  title?: string;
-  model?: string;
-  reasoningEffort?: string;
-  sandbox?: AiChatSandbox;
-}): Promise<AiChatThread> {
-  const data = await request<{ thread: AiChatThread }>("/api/local/ai/threads", {
+export async function createConnector(draft: ConnectorDraft): Promise<Connector> {
+  const data = await request<{ connector: Connector }>("/api/connectors", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify(draft),
   });
-  return data.thread;
+  return data.connector;
 }
 
-export async function getAiChatThread(
-  threadId: string,
-  signal?: AbortSignal,
-): Promise<AiChatThreadSnapshot> {
-  return request<AiChatThreadSnapshot>(
-    `/api/local/ai/threads/${encodeURIComponent(threadId)}`,
-    { signal },
-  );
-}
-
-export async function updateAiChatThread(
-  threadId: string,
-  input: {
-    title?: string;
-    model?: string;
-    reasoningEffort?: string;
-    sandbox?: AiChatSandbox;
-  },
-): Promise<AiChatThread> {
-  const data = await request<{ thread: AiChatThread }>(
-    `/api/local/ai/threads/${encodeURIComponent(threadId)}`,
+export async function updateConnector(
+  connector: Connector,
+  changes: Partial<ConnectorDraft>,
+): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(connector.id)}`,
     {
       method: "PATCH",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ version: connector.version, ...changes }),
     },
   );
-  return data.thread;
+  return data.connector;
 }
 
-export async function deleteAiChatThread(threadId: string): Promise<void> {
-  await request<void>(
-    `/api/local/ai/threads/${encodeURIComponent(threadId)}`,
-    { method: "DELETE" },
-  );
-}
-
-export async function startAiChatTurn(
-  threadId: string,
-  input: {
-    message: string;
-    skillIds?: string[];
-    attachments?: AiChatAttachmentInput[];
-    dangerFullAccessConfirmed?: boolean;
-  },
-): Promise<AiChatRun> {
-  const data = await request<{ run: AiChatRun }>(
-    `/api/local/ai/threads/${encodeURIComponent(threadId)}/turns`,
+export async function setDefaultConnector(connector: Connector): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(connector.id)}/default`,
     {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ version: connector.version }),
     },
   );
-  return data.run;
+  return data.connector;
 }
 
-export async function interruptAiChatRun(runId: string): Promise<AiChatRun> {
-  const data = await request<{ run: AiChatRun }>(
-    `/api/local/ai/runs/${encodeURIComponent(runId)}/interrupt`,
-    { method: "POST" },
-  );
-  return data.run;
-}
-
-export function subscribeAiChatThread(
-  threadId: string,
-  onHint: (type: "ai.event" | "ai.run") => void,
-  onError?: () => void,
-): () => void {
-  const source = new EventSource(`/api/local/ai/threads/${encodeURIComponent(threadId)}/events`);
-  source.addEventListener("ai.event", () => onHint("ai.event"));
-  source.addEventListener("ai.run", () => onHint("ai.run"));
-  if (onError) source.addEventListener("error", onError);
-  return () => source.close();
+export async function deleteConnector(connector: Connector): Promise<void> {
+  await request<{ id: string }>(`/api/connectors/${encodeURIComponent(connector.id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ version: connector.version }),
+  });
 }
 
 export async function listDeviceWorkspaces(signal?: AbortSignal): Promise<Record<string, string>> {
@@ -562,7 +511,7 @@ export async function updateTask(task: Task, draft: TaskDraft, threadId?: string
 export async function linkTaskThread(task: Task, threadId: string, runtime?: TaskRuntime): Promise<Task> {
   const data = await request<{ task: Task }>(`/api/tasks/${encodeURIComponent(task.id)}`, {
     method: "PATCH",
-    body: JSON.stringify({ version: task.version, threadId, ...(runtime ? { runtime } : {}) }),
+    body: JSON.stringify({ version: task.version, threadId, runtime: runtime ?? "codex" }),
   });
   return data.task;
 }

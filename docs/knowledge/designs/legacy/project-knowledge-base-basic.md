@@ -209,7 +209,7 @@ e-taskboard 已经具备可复用的基础：
 
 - `web/src/App.tsx` 已有项目视图切换区；
 - `server/app.mjs` 已能根据项目映射解析本地工作区；
-- `server/ai-chat.mjs` 和 `server/ai-chat-catalog.mjs` 已能在项目工作区内运行 Codex 会话。
+- `server/knowledge-service.mjs` 可通过 `server/codex-process.mjs` 在项目工作区内运行 Codex 流程。
 
 第一版只新增最小链路：
 

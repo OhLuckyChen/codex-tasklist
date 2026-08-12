@@ -5,3 +5,5 @@ dist/
 .playwright-cli/
 *.log
 .DS_Store
+.claude/
+.codex-attachments/

@@ -56,7 +56,7 @@ Karpathy 的 LLM Wiki 不是传统 RAG 的另一个包装，它的关键是把�
 
 ### 3.3 本地执行能力已存在
 
-`server/ai-chat.mjs` 和 `server/ai-chat-catalog.mjs` 已能在项目工作区内启动 Codex 会话并发现 Skill。第一版可复用该能力执行知识库初始化和更新，不需要再建一套模型调度层。
+`server/knowledge-service.mjs` 通过 `server/codex-process.mjs` 在项目工作区内执行 Codex JSON 流程，第一版复用这条受控执行链路。
 
 ## 4. 目标操作链路
 

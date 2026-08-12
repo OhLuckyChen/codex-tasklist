@@ -57,4 +57,7 @@ test("opening a linked conversation waits for native content and verifies naviga
   assert.match(injectionSource, /await waitForNativePaint\(\)/);
   assert.match(injectionSource, /if \(await waitForActiveThread\(normalizedThreadId\)\) return/);
   assert.match(injectionSource, /path: routeForThread\(normalizedThreadId\)/);
+  assert.match(injectionSource, /if \(await waitForActiveThread\(normalizedThreadId, 2_000\)\) return/);
+  assert.match(injectionSource, /window\.location\.assign\(appUrlForThread\(normalizedThreadId\)\)/);
+  assert.match(injectionSource, /await waitForActiveThread\(normalizedThreadId, 3_000\)/);
 });

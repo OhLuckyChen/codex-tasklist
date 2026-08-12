@@ -41,6 +41,25 @@ function resolveClaudeBinary(candidate) {
   return "claude";
 }
 
+function connectorEnvLines(connector, tokenEnvVar) {
+  if (!connector) return [];
+  const lines = [];
+  if (connector.baseUrl) {
+    lines.push(`export ANTHROPIC_BASE_URL=${shellSingleQuote(connector.baseUrl)}`);
+  }
+  if (connector.apiKey) {
+    lines.push(`export ${tokenEnvVar}=${shellSingleQuote(connector.apiKey)}`);
+  }
+  if (connector.customHeaders && Object.keys(connector.customHeaders).length > 0) {
+    lines.push(`export ANTHROPIC_CUSTOM_HEADERS=${shellSingleQuote(JSON.stringify(connector.customHeaders))}`);
+  }
+  return lines;
+}
+
+function connectorModelArg(connector) {
+  return connector?.model ? ["--model", shellSingleQuote(connector.model)] : null;
+}
+
 export function createClaudeLauncher(options = {}) {
   const dataDirectory = options.dataDirectory;
   if (!dataDirectory) throw new Error("createClaudeLauncher requires dataDirectory");
@@ -102,8 +121,9 @@ export function createClaudeLauncher(options = {}) {
       "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\" 2>/dev/null",
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='claude'`,
+      ...connectorEnvLines(payload.connector, "ANTHROPIC_AUTH_TOKEN"),
       `cd -- ${shellSingleQuote(payload.workspacePath)}`,
-      `${shellSingleQuote(claudeBinary)} ${payload.claudeArgs.join(" ")} "$(cat ${shellSingleQuote(promptPath)})"`,
+      `${shellSingleQuote(claudeBinary)} ${[...payload.claudeArgs, ...(connectorModelArg(payload.connector) ?? [])].join(" ")} "$(cat ${shellSingleQuote(promptPath)})"`,
       'echo "\\n[Claude Code 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -115,16 +135,18 @@ export function createClaudeLauncher(options = {}) {
    * Launch a brand-new Claude Code session in a fresh Terminal.app window.
    * The session id is fixed via --session-id, so the caller already knows it.
    */
-  function launchSession({ workspacePath, sessionId, prompt }) {
+  function launchSession({ workspacePath, sessionId, prompt, connector }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
     }
     if (!sessionId) throw new Error("sessionId is required");
+    const claudeArgs = ["--dangerously-skip-permissions", "--session-id", shellSingleQuote(sessionId)];
     const { scriptPath } = writeSessionFiles(sessionId, {
       workspacePath,
       prompt,
-      claudeArgs: ["--dangerously-skip-permissions", "--session-id", shellSingleQuote(sessionId)],
+      claudeArgs,
+      connector,
     });
     const appleScript = `tell application "Terminal"
   activate
@@ -142,7 +164,7 @@ end tell`;
    * Reopen (and optionally inject a follow-up instruction into) an existing
    * Claude Code session by id.
    */
-  function resumeSession({ workspacePath, sessionId, followUp }) {
+  function resumeSession({ workspacePath, sessionId, followUp, connector }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
@@ -158,6 +180,7 @@ end tell`;
     ensureRunsDirectory();
     const scriptPath = path.join(runsDirectory, `resume-${sessionId}.sh`);
     const promptArg = hasFollowUp ? ` "$(cat ${shellSingleQuote(writeFollowUpFile(sessionId, followUp))})"` : "";
+    const modelArg = connector?.model ? ` --model ${shellSingleQuote(connector.model)}` : "";
     const lines = [
       "#!/bin/zsh -l",
       "# taskboard-managed Claude Code resume launcher",
@@ -165,8 +188,9 @@ end tell`;
       "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\" 2>/dev/null",
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='claude'`,
+      ...connectorEnvLines(connector, "ANTHROPIC_AUTH_TOKEN"),
       `cd -- ${shellSingleQuote(workspacePath)}`,
-      `${shellSingleQuote(claudeBinary)} --dangerously-skip-permissions --resume ${shellSingleQuote(sessionId)}${promptArg}`,
+      `${shellSingleQuote(claudeBinary)} --dangerously-skip-permissions --resume ${shellSingleQuote(sessionId)}${modelArg}${promptArg}`,
       'echo "\\n[Claude Code 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -288,6 +312,7 @@ end tell`;
     resumeSession,
     isRunning,
     pruneSessionFiles,
+    writeSessionFiles,
     get supportedPlatform() { return supportedPlatform; },
   };
 }

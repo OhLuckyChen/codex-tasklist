@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { DragEvent } from "react";
-import type { Task, TaskStatus } from "../types";
+import type { CodexThreadProgress, Task, TaskStatus } from "../types";
 import { ColumnVisibilityMenu } from "./ColumnVisibilityMenu";
 import { LinearIcon, LinearStatusIcon } from "./LinearIcon";
 import { TaskCard } from "./TaskCard";
@@ -24,14 +24,25 @@ export function StatusIcon({ status }: { status: TaskStatus }) {
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const STATUS_CHANGED_GROUPS = ["今日", "昨日", "上周", "更早"] as const;
+type StatusChangedGroup = (typeof STATUS_CHANGED_GROUPS)[number];
 
 function startOfLocalDay(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
-function statusChangedGroup(task: Task, now = new Date()): string {
+function statusChangedTime(task: Task): number {
   const changedAt = Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt);
-  const timestamp = Number.isFinite(changedAt) ? changedAt : 0;
+  return Number.isFinite(changedAt) ? changedAt : 0;
+}
+
+function updatedTime(task: Task): number {
+  const updatedAt = Date.parse(task.updatedAt || task.statusChangedAt || task.createdAt);
+  return Number.isFinite(updatedAt) ? updatedAt : 0;
+}
+
+function statusChangedGroup(task: Task, now = new Date()): StatusChangedGroup {
+  const timestamp = statusChangedTime(task);
   const today = startOfLocalDay(now);
   if (timestamp >= today) return "今日";
   if (timestamp >= today - MS_PER_DAY) return "昨日";
@@ -39,10 +50,22 @@ function statusChangedGroup(task: Task, now = new Date()): string {
   return "更早";
 }
 
+function compareTasksByStatusGroup(left: Task, right: Task, now: Date): number {
+  const leftGroup = STATUS_CHANGED_GROUPS.indexOf(statusChangedGroup(left, now));
+  const rightGroup = STATUS_CHANGED_GROUPS.indexOf(statusChangedGroup(right, now));
+  if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+  const updatedDelta = updatedTime(right) - updatedTime(left);
+  if (updatedDelta !== 0) return updatedDelta;
+  const statusDelta = statusChangedTime(right) - statusChangedTime(left);
+  if (statusDelta !== 0) return statusDelta;
+  return left.identifier.localeCompare(right.identifier);
+}
+
 interface BoardColumnProps {
   status: TaskStatus;
   statusIndex: number;
   tasks: Task[];
+  progressByTaskId?: Map<string, CodexThreadProgress>;
   projectNames?: Record<string, string>;
   isDropTarget: boolean;
   isColumnDragging: boolean;
@@ -66,7 +89,7 @@ interface BoardColumnProps {
   onColumnDragOver: (status: TaskStatus, position: "before" | "after") => void;
   onColumnDrop: (source: TaskStatus, target: TaskStatus, position: "before" | "after") => void;
   onColumnDragEnd: () => void;
-  onOpenThread: (threadId: string) => void;
+  onOpenThread: (threadId: string, task: Task) => void;
   onHide: (status: TaskStatus) => void;
 }
 
@@ -74,6 +97,7 @@ export function BoardColumn({
   status,
   statusIndex,
   tasks,
+  progressByTaskId,
   projectNames,
   isDropTarget,
   isColumnDragging,
@@ -102,8 +126,10 @@ export function BoardColumn({
 }: BoardColumnProps) {
   const details = STATUS_DETAILS[status];
   const [dropBeforeTaskId, setDropBeforeTaskId] = useState<string | null | undefined>();
-  const taskIndexes = new Map(tasks.map((task, index) => [task.id, index]));
-  const remainingTasks = tasks.filter((task) => task.id !== draggedTaskId);
+  const groupingNow = new Date();
+  const sortedTasks = tasks.slice().sort((left, right) => compareTasksByStatusGroup(left, right, groupingNow));
+  const taskIndexes = new Map(sortedTasks.map((task, index) => [task.id, index]));
+  const remainingTasks = sortedTasks.filter((task) => task.id !== draggedTaskId);
   const remainingIndexes = new Map(remainingTasks.map((task, index) => [task.id, index]));
   const draggedTaskIndex = draggedTaskId ? taskIndexes.get(draggedTaskId) ?? -1 : -1;
   const beforeIndex = dropBeforeTaskId
@@ -223,10 +249,10 @@ export function BoardColumn({
       </header>
 
       <div className="column-list">
-        {tasks.map((task, index) => {
+        {sortedTasks.map((task, index) => {
           const dragShift = getTaskDragShift(task);
-          const group = statusChangedGroup(task);
-          const previousGroup = index > 0 ? statusChangedGroup(tasks[index - 1]) : null;
+          const group = statusChangedGroup(task, groupingNow);
+          const previousGroup = index > 0 ? statusChangedGroup(sortedTasks[index - 1], groupingNow) : null;
           return (
             <div className="task-group" key={task.id}>
               {group !== previousGroup && (
@@ -235,6 +261,7 @@ export function BoardColumn({
               <TaskCard
                 task={task}
                 projectName={projectNames?.[task.projectId]}
+                progress={progressByTaskId?.get(task.id)}
                 statusIndex={statusIndex}
                 isDragging={draggedTaskId === task.id}
                 dragShift={dragShift}

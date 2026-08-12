@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, existsSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -41,6 +41,66 @@ function resolveOmpBinary(candidate) {
   return "omp";
 }
 
+/**
+ * omp does NOT read ANTHROPIC_* env vars or the --api-key flag at runtime.
+ * Its provider credentials live in ~/.omp/agent/models.yml (provider baseUrl +
+ * apiKey env-var name) and ~/.omp/agent/.env (the actual key value). To drive
+ * omp from a taskboard connector we (1) read models.yml to find the provider id
+ * + the apiKey env-var name, (2) overwrite that env line in .env with the
+ * connector's apiKey, and (3) pass --model=<providerId>/<model> so omp routes
+ * to the user's custom provider instead of a fuzzy-matched built-in one.
+ */
+const OMP_AGENT_DIR = path.join(os.homedir(), ".omp", "agent");
+
+function readOmpProviderInfo() {
+  const modelsYml = path.join(OMP_AGENT_DIR, "models.yml");
+  if (!existsSync(modelsYml)) return null;
+  const text = readFileSync(modelsYml, "utf8");
+  const providerMatch = text.match(/^providers:\s*\n\s{2}([A-Za-z0-9_.\-]+):\s*$/m);
+  const keyMatch = text.match(/^\s{4}apiKey:\s*([A-Za-z0-9_]+)\s*$/m);
+  const providerId = providerMatch?.[1];
+  const apiKeyEnvVar = keyMatch?.[1];
+  return providerId && apiKeyEnvVar ? { providerId, apiKeyEnvVar } : null;
+}
+
+function updateOmpEnvFile(envName, value) {
+  if (!envName || !value) return false;
+  mkdirSync(OMP_AGENT_DIR, { recursive: true });
+  const envPath = path.join(OMP_AGENT_DIR, ".env");
+  let lines = existsSync(envPath) ? readFileSync(envPath, "utf8").split("\n") : [];
+  const prefix = `${envName}=`;
+  let found = false;
+  lines = lines.map((line) => {
+    if (line.startsWith(prefix)) {
+      found = true;
+      return `${prefix}${value}`;
+    }
+    return line;
+  });
+  if (!found) lines.push(`${prefix}${value}`);
+  writeFileSync(envPath, lines.join("\n"), { encoding: "utf8" });
+  return true;
+}
+
+/**
+ * Build the --model value. If the connector model already contains a provider
+ * prefix (e.g. "aliyun/glm-5.2"), use it as-is; otherwise prepend the provider
+ * id discovered from models.yml so omp does not fuzzy-match a built-in provider.
+ */
+function ompModelArg(connector, providerInfo) {
+  if (!connector?.model) return null;
+  if (connector.model.includes("/")) return connector.model;
+  if (providerInfo?.providerId) return `${providerInfo.providerId}/${connector.model}`;
+  return connector.model;
+}
+
+function resolveRuntimeBinary(connector, fallbackBinary) {
+  if (connector?.executable) {
+    return path.resolve(connector.executable);
+  }
+  return fallbackBinary;
+}
+
 export function createOmpLauncher(options = {}) {
   const dataDirectory = options.dataDirectory;
   if (!dataDirectory) throw new Error("createOmpLauncher requires dataDirectory");
@@ -69,6 +129,8 @@ export function createOmpLauncher(options = {}) {
     writeFileSync(promptPath, payload.prompt, { encoding: "utf8" });
     const sessionDir = sessionDirFor(sessionId);
     mkdirSync(sessionDir, { recursive: true });
+    const binary = resolveRuntimeBinary(payload.connector, ompBinary);
+    const modelFlag = payload.model ? ` --model=${shellSingleQuote(payload.model)}` : "";
 
     const lines = [
       "#!/bin/zsh -l",
@@ -78,7 +140,7 @@ export function createOmpLauncher(options = {}) {
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='omp'`,
       `cd -- ${shellSingleQuote(payload.workspacePath)}`,
-      `${shellSingleQuote(ompBinary)} --auto-approve --session-dir=${shellSingleQuote(sessionDir)} "$(cat ${shellSingleQuote(promptPath)})"`,
+      `${shellSingleQuote(binary)} --auto-approve${modelFlag} --session-dir=${shellSingleQuote(sessionDir)} "$(cat ${shellSingleQuote(promptPath)})"`,
       'echo "\\n[Oh My Pi 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -91,13 +153,18 @@ export function createOmpLauncher(options = {}) {
    * The session id is fixed via CODEX_THREAD_ID; OMP's own session state
    * is isolated into a per-session directory under the data runs folder.
    */
-  function launchSession({ workspacePath, sessionId, prompt }) {
+  function launchSession({ workspacePath, sessionId, prompt, connector }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
     }
     if (!sessionId) throw new Error("sessionId is required");
-    const { scriptPath } = writeSessionFiles(sessionId, { workspacePath, prompt });
+    const providerInfo = readOmpProviderInfo();
+    if (connector?.apiKey && providerInfo) {
+      updateOmpEnvFile(providerInfo.apiKeyEnvVar, connector.apiKey);
+    }
+    const model = ompModelArg(connector, providerInfo);
+    const { scriptPath } = writeSessionFiles(sessionId, { workspacePath, prompt, connector, model });
     const appleScript = `tell application "Terminal"
   activate
   do script ${appleScriptString(shellSingleQuote(scriptPath))}
@@ -115,7 +182,7 @@ end tell`;
    * Oh My Pi session by id. OMP uses --continue to resume the last session
    * stored in the per-session directory.
    */
-  function resumeSession({ workspacePath, sessionId, followUp }) {
+  function resumeSession({ workspacePath, sessionId, followUp, connector }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
@@ -133,6 +200,13 @@ end tell`;
     const sessionDir = sessionDirFor(sessionId);
     mkdirSync(sessionDir, { recursive: true });
     const promptArg = hasFollowUp ? ` "$(cat ${shellSingleQuote(writeFollowUpFile(sessionId, followUp))})"` : "";
+    const providerInfo = readOmpProviderInfo();
+    if (connector?.apiKey && providerInfo) {
+      updateOmpEnvFile(providerInfo.apiKeyEnvVar, connector.apiKey);
+    }
+    const model = ompModelArg(connector, providerInfo);
+    const binary = resolveRuntimeBinary(connector, ompBinary);
+    const modelFlag = model ? ` --model=${shellSingleQuote(model)}` : "";
     const lines = [
       "#!/bin/zsh -l",
       "# taskboard-managed Oh My Pi resume launcher",
@@ -141,7 +215,7 @@ end tell`;
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='omp'`,
       `cd -- ${shellSingleQuote(workspacePath)}`,
-      `${shellSingleQuote(ompBinary)} --auto-approve --session-dir=${shellSingleQuote(sessionDir)} --continue${promptArg}`,
+      `${shellSingleQuote(binary)} --auto-approve${modelFlag} --session-dir=${shellSingleQuote(sessionDir)} --continue${promptArg}`,
       'echo "\\n[Oh My Pi 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -259,6 +333,7 @@ end tell`;
     resumeSession,
     isRunning,
     pruneSessionFiles,
+    writeSessionFiles,
     get supportedPlatform() { return supportedPlatform; },
   };
 }

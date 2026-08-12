@@ -81,7 +81,8 @@ test("health and the default local project are available", async () => {
     projectKnowledgeSkillPath: path.resolve("skills/project-knowledge-builder/SKILL.md"),
     claudeRuntime: true,
     ompRuntime: true,
-    capabilities: { localAiChat: true, localKnowledge: true },
+    connectors: [],
+    capabilities: { localKnowledge: true },
   });
 
   const result = await request(baseUrl, "/api/projects");
@@ -1639,19 +1640,23 @@ test("issues retain multiple processing conversations while one remains current"
   const staleThread = "00000000-0000-4000-8000-000000000199";
   const created = await request(baseUrl, "/api/tasks", {
     method: "POST",
-    body: { title: "Multiple conversations", threadId: threadOne },
+    body: { title: "Multiple conversations", threadId: threadOne, runtime: "claude" },
   });
+  assert.equal(created.body.task.threadRuntimes[threadOne], "claude");
   const updated = await request(baseUrl, `/api/tasks/${created.body.task.id}`, {
     method: "PATCH",
     body: {
       version: created.body.task.version,
       title: "Handled again",
       threadId: threadTwo,
+      runtime: "omp",
     },
   });
   assert.equal(updated.body.task.threadId, threadTwo);
   assert.equal(updated.body.task.threadIds[0], threadTwo);
   assert.deepEqual(new Set(updated.body.task.threadIds), new Set([threadOne, threadTwo]));
+  assert.equal(updated.body.task.threadRuntimes[threadOne], "claude");
+  assert.equal(updated.body.task.threadRuntimes[threadTwo], "omp");
   const stale = await request(baseUrl, `/api/tasks/${created.body.task.id}`, {
     method: "PATCH",
     body: { version: created.body.task.version, threadId: staleThread },
@@ -1683,15 +1688,51 @@ test("issues retain multiple processing conversations while one remains current"
     new Set(afterComment.body.task.threadIds),
     new Set([threadOne, threadTwo, threadThree, threadFour, threadFive]),
   );
+  assert.equal(afterComment.body.task.threadRuntimes[threadThree], "codex");
+  assert.equal(afterComment.body.task.threadRuntimes[threadFour], "codex");
+  assert.equal(afterComment.body.task.threadRuntimes[threadFive], "codex");
 
   const relinked = await request(baseUrl, `/api/tasks/${created.body.task.id}`, {
     method: "PATCH",
-    body: { version: afterComment.body.task.version, threadId: threadOne },
+    body: { version: afterComment.body.task.version, threadId: threadOne, runtime: "claude" },
   });
   assert.equal(relinked.response.status, 200);
   assert.equal(relinked.body.task.threadId, threadOne);
   assert.equal(relinked.body.task.threadIds[0], threadOne);
   assert.equal(relinked.body.task.threadIds.length, 5);
+  assert.equal(relinked.body.task.threadRuntimes[threadOne], "claude");
+});
+
+test("task thread runtimes are reconciled from concrete local session evidence", async () => {
+  const threadId = "00000000-0000-4000-8000-000000000201";
+  const baseUrl = await startServer(async (directory) => {
+    const codexStatePath = path.join(directory, "codex-state.json");
+    const sessionsDirectory = path.join(directory, "sessions", "2026", "08", "12");
+    await mkdir(sessionsDirectory, { recursive: true });
+    await writeFile(codexStatePath, "{}");
+    await writeFile(
+      path.join(sessionsDirectory, `rollout-2026-08-12T15-35-11-${threadId}.jsonl`),
+      JSON.stringify({
+        timestamp: "2026-08-12T07:35:12.001Z",
+        type: "session_meta",
+        payload: { session_id: threadId },
+      }),
+    );
+    return { codexStatePath };
+  });
+  const created = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { title: "Wrong runtime", threadId, runtime: "claude" },
+  });
+  assert.equal(created.body.task.runtime, "codex");
+  assert.equal(created.body.task.threadRuntimes[threadId], "codex");
+
+  const listed = await request(baseUrl, "/api/tasks");
+  assert.equal(listed.body.tasks.find((task) => task.id === created.body.task.id).runtime, "codex");
+  assert.equal(
+    listed.body.tasks.find((task) => task.id === created.body.task.id).threadRuntimes[threadId],
+    "codex",
+  );
 });
 
 test("stale updates receive a version conflict", async () => {

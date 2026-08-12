@@ -9,6 +9,7 @@ interface BoardSettingsMenuProps {
   applyToAllProjects: boolean;
   onStatusVisibilityChange: (status: TaskStatus, visible: boolean) => void;
   onApplyToAllProjectsChange: (enabled: boolean) => void;
+  onOpenConnectors?: () => void;
 }
 
 export function BoardSettingsMenu({
@@ -16,6 +17,7 @@ export function BoardSettingsMenu({
   applyToAllProjects,
   onStatusVisibilityChange,
   onApplyToAllProjectsChange,
+  onOpenConnectors,
 }: BoardSettingsMenuProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -141,6 +143,20 @@ export function BoardSettingsMenu({
           </button>
         </div>
       </section>
+      {onOpenConnectors && (
+        <section className="board-settings-section">
+          <button
+            type="button"
+            className="board-setting-link"
+            onClick={() => {
+              setOpen(false);
+              onOpenConnectors();
+            }}
+          >
+            运行时连接器…
+          </button>
+        </section>
+      )}
     </div>,
     document.body,
   ) : null;

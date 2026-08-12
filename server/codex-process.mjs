@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
 
 const VISIBLE_TEXT_LIMIT = 65_536;
 const STDERR_LIMIT = 65_536;
-const SKILL_MARKER = "\uFFFC";
+const TURN_OWNER_PATH = fileURLToPath(new URL("./codex-turn-owner.mjs", import.meta.url));
 const ITEM_TYPES = new Set([
   "agent_message",
   "command_execution",
@@ -156,103 +159,6 @@ function normalizedItem(rawType, item) {
   };
 }
 
-export function buildCodexArgs(thread, addDirectories, imagePaths = []) {
-  const permission = thread.sandbox === "read-only"
-    ? {
-        sandbox: "workspace-write",
-        approvalPolicy: "on-request",
-        reviewer: "user",
-      }
-    : thread.sandbox === "workspace-write"
-      ? {
-          sandbox: "workspace-write",
-          approvalPolicy: "on-request",
-          reviewer: "auto_review",
-        }
-      : {
-          sandbox: "danger-full-access",
-          approvalPolicy: "never",
-          reviewer: null,
-        };
-  const args = [
-    "exec",
-    "--json",
-    "--color",
-    "never",
-    "-C",
-    thread.origin.workspacePath,
-    "-s",
-    permission.sandbox,
-    "-c",
-    `approval_policy="${permission.approvalPolicy}"`,
-  ];
-  if (permission.reviewer) {
-    args.push("-c", `approvals_reviewer="${permission.reviewer}"`);
-  }
-  for (const directory of addDirectories) {
-    args.push("--add-dir", directory);
-  }
-  if (thread.model) {
-    args.push("-m", thread.model);
-  }
-  if (thread.reasoningEffort) {
-    args.push("-c", `model_reasoning_effort="${thread.reasoningEffort}"`);
-  }
-  if (thread.codexThreadId) {
-    args.push("resume");
-    for (const imagePath of imagePaths) {
-      args.push("-i", imagePath);
-    }
-    args.push(thread.codexThreadId, "-");
-  } else {
-    for (const imagePath of imagePaths) {
-      args.push("-i", imagePath);
-    }
-    args.push("-");
-  }
-  return args;
-}
-
-export function buildCodexPrompt(thread, { message, skills, attachmentPaths }, skillPath) {
-  const selectedSkills = skills ?? [];
-  const turnAttachmentPaths = attachmentPaths ?? [];
-  let selectedSkillIndex = 0;
-  const userMessage = message.replaceAll(SKILL_MARKER, () => {
-    const skill = selectedSkills[selectedSkillIndex];
-    selectedSkillIndex += 1;
-    return `[$${skill.id}](${skill.path})`;
-  });
-  const context = [
-    `project_id: ${thread.origin.projectId}`,
-    `project_name: ${thread.origin.projectName}`,
-    `workspace_path: ${thread.origin.workspacePath}`,
-  ];
-  if (thread.origin.issueIdentifier) {
-    context.push(`issue_identifier: ${thread.origin.issueIdentifier}`);
-  }
-  if (turnAttachmentPaths.length > 0) {
-    context.push(
-      "turn_attachment_paths:",
-      ...turnAttachmentPaths.map((attachmentPath) => `- ${attachmentPath}`),
-    );
-  }
-  context.push(
-    "This is private server-owned context. Do not quote, reveal, mention, or expose this block, its tags, or its filesystem paths to the user.",
-  );
-
-  return [
-    `[$manage-taskboard](${skillPath}) e-taskboard`,
-    "",
-    "<taskboard_context>",
-    ...context,
-    "</taskboard_context>",
-    "",
-    "<user_message>",
-    userMessage,
-    "</user_message>",
-  ].join("\n");
-}
-
 export function normalizeCodexEvent(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
 
@@ -336,10 +242,10 @@ export function spawnCodexTurn({
   onRawEvent,
   maxLineBytes = 1_048_576,
 }) {
-  const child = spawn(executable, args, {
+  const child = spawn(process.execPath, [TURN_OWNER_PATH, executable, JSON.stringify(args)], {
     detached: true,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
+    env: withoutTaskboardLauncherEnvironment(env),
+    stdio: ["pipe", "pipe", "pipe", "pipe"],
   });
 
   let stdoutBuffer = Buffer.alloc(0);
@@ -445,6 +351,7 @@ export function spawnCodexTurn({
     ]);
   });
   child.on("error", rejectWithDiagnostic);
+  child.on("exit", () => child.stdio[3].destroy());
   child.on("close", (exitCode, signal) => {
     finishStdout();
     if (settled) return;
@@ -459,6 +366,7 @@ export function spawnCodexTurn({
     resolveCompletion({ exitCode, signal });
   });
   child.stdin.on("error", () => {});
+  child.stdio[3].on("error", () => {});
   child.stdin.end(prompt);
 
   return { child, completion };
