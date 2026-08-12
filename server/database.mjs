@@ -406,6 +406,33 @@ export class TaskboardDatabase {
       CREATE INDEX IF NOT EXISTS knowledge_proposal_changes_proposal
         ON knowledge_proposal_changes(proposal_id, sort_order, id);
 
+      CREATE TABLE IF NOT EXISTS knowledge_questionnaires (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        scope_type TEXT NOT NULL CHECK (scope_type IN ('project', 'page', 'gap')),
+        scope_ref TEXT,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('draft', 'open', 'closed')),
+        creator_type TEXT NOT NULL, creator_id TEXT NOT NULL, creator_name TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS knowledge_questions (
+        id TEXT PRIMARY KEY,
+        questionnaire_id TEXT NOT NULL REFERENCES knowledge_questionnaires(id) ON DELETE CASCADE,
+        context TEXT NOT NULL, prompt TEXT NOT NULL, gap_reason TEXT NOT NULL,
+        checked_sources TEXT NOT NULL, target_role TEXT NOT NULL, answer_format TEXT NOT NULL,
+        knowledge_target TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS knowledge_answers (
+        id TEXT PRIMARY KEY,
+        question_id TEXT NOT NULL REFERENCES knowledge_questions(id) ON DELETE CASCADE,
+        content TEXT NOT NULL, confidence TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low', 'unknown')),
+        status TEXT NOT NULL CHECK (status IN ('submitted', 'accepted', 'needs_revision', 'rejected')),
+        author_type TEXT NOT NULL, author_id TEXT NOT NULL, author_name TEXT NOT NULL,
+        reviewer_type TEXT, reviewer_id TEXT, reviewer_name TEXT, review_note TEXT,
+        proposal_id TEXT REFERENCES knowledge_proposals(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+
     `);
 
     const projectColumns = this.database.prepare("PRAGMA table_info(projects)").all();
@@ -1027,6 +1054,18 @@ export class TaskboardDatabase {
     return this.getProject(id);
   }
 
+  renameProject(id, name) {
+    const result = this.database.prepare(`
+      UPDATE projects
+      SET name = ?, updated_at = ?
+      WHERE id = ?
+    `).run(name, now(), id);
+    if (result.changes === 0) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${id}' does not exist`);
+    }
+    return this.getProject(id);
+  }
+
   getWorkflowWorkspace(projectId) {
     if (!this.database.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
       throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
@@ -1529,6 +1568,56 @@ export class TaskboardDatabase {
         id DESC
     `).all(projectId, status ?? null, status ?? null);
     return rows.map((row) => knowledgeProposalFromRow(row, this.#knowledgeChanges(row.id)));
+  }
+
+  listKnowledgeQuestionnaires(projectId) {
+    return this.database.prepare("SELECT * FROM knowledge_questionnaires WHERE project_id = ? ORDER BY updated_at DESC").all(projectId).map((row) => ({
+      id: row.id, projectId: row.project_id, scopeType: row.scope_type, scopeRef: row.scope_ref, title: row.title, status: row.status,
+      creator: { type: row.creator_type, id: row.creator_id, name: row.creator_name }, createdAt: row.created_at, updatedAt: row.updated_at,
+      questions: this.database.prepare("SELECT * FROM knowledge_questions WHERE questionnaire_id = ? ORDER BY sort_order, id").all(row.id).map((q) => ({
+        id: q.id, context: q.context, prompt: q.prompt, gapReason: q.gap_reason, checkedSources: JSON.parse(q.checked_sources), targetRole: q.target_role, answerFormat: q.answer_format, knowledgeTarget: q.knowledge_target,
+        answers: this.database.prepare("SELECT * FROM knowledge_answers WHERE question_id = ? ORDER BY created_at DESC").all(q.id).map((a) => ({ id: a.id, content: a.content, confidence: a.confidence, status: a.status, author: { type: a.author_type, id: a.author_id, name: a.author_name }, reviewNote: a.review_note, proposalId: a.proposal_id, createdAt: a.created_at, updatedAt: a.updated_at })),
+      })),
+    }));
+  }
+
+  createKnowledgeQuestionnaire(input) {
+    if (!this.getProject(input.projectId)) throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${input.projectId}' does not exist`);
+    const id = randomUUID(); const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("INSERT INTO knowledge_questionnaires VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)").run(id, input.projectId, input.scopeType, input.scopeRef ?? null, input.title, input.actor.type, input.actor.id, input.actor.name, timestamp, timestamp);
+      const insert = this.database.prepare("INSERT INTO knowledge_questions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      input.questions.forEach((q, index) => insert.run(randomUUID(), id, q.context, q.prompt, q.gapReason, JSON.stringify(q.checkedSources), q.targetRole, q.answerFormat, q.knowledgeTarget, index));
+      this.database.exec("COMMIT");
+    } catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    return this.listKnowledgeQuestionnaires(input.projectId).find((item) => item.id === id);
+  }
+
+  updateKnowledgeQuestionnaire(id, status) {
+    const result = this.database.prepare("UPDATE knowledge_questionnaires SET status = ?, updated_at = ? WHERE id = ? AND ((status = 'draft' AND ? = 'open') OR (status = 'open' AND ? = 'closed'))").run(status, now(), id, status, status);
+    if (result.changes !== 1) throw new ApiError(409, "INVALID_QUESTIONNAIRE_TRANSITION", "Questionnaires must move from draft to open, then open to closed");
+  }
+
+  submitKnowledgeAnswer(questionId, input) {
+    const q = this.database.prepare("SELECT questionnaire_id FROM knowledge_questions WHERE id = ?").get(questionId);
+    if (!q) throw new ApiError(404, "KNOWLEDGE_QUESTION_NOT_FOUND", "Knowledge question does not exist");
+    const questionnaire = this.database.prepare("SELECT * FROM knowledge_questionnaires WHERE id = ?").get(q.questionnaire_id);
+    if (questionnaire.status !== "open") throw new ApiError(409, "QUESTIONNAIRE_NOT_OPEN", "Only open questionnaires accept answers");
+    const timestamp = now(); const id = randomUUID();
+    this.database.prepare("INSERT INTO knowledge_answers VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)").run(id, questionId, input.content, input.confidence, input.actor.type, input.actor.id, input.actor.name, timestamp, timestamp);
+    return id;
+  }
+
+  reviewKnowledgeAnswer(id, status, reviewNote, actor, proposalId = null) {
+    const result = this.database.prepare("UPDATE knowledge_answers SET status=?, reviewer_type=?, reviewer_id=?, reviewer_name=?, review_note=?, proposal_id=?, updated_at=? WHERE id=? AND status='submitted'").run(status, actor.type, actor.id, actor.name, reviewNote, proposalId, now(), id);
+    if (result.changes !== 1) throw new ApiError(409, "INVALID_ANSWER_TRANSITION", "Only submitted answers can be reviewed");
+  }
+
+  knowledgeAnswerContext(id) {
+    return this.database.prepare(`SELECT a.id, a.content, a.status, q.prompt, q.knowledge_target, questionnaire.project_id
+      FROM knowledge_answers a JOIN knowledge_questions q ON q.id = a.question_id
+      JOIN knowledge_questionnaires questionnaire ON questionnaire.id = q.questionnaire_id WHERE a.id = ?`).get(id);
   }
 
   knowledgeSourceVersions(projectId) {

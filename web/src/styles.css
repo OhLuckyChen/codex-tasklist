@@ -8717,6 +8717,19 @@ kbd {
   padding: 6px 10px;
 }
 
+.knowledge-questionnaires { display: grid; gap: 16px; padding: 18px 0; }
+.knowledge-questionnaires > header h3, .knowledge-questionnaire h3, .knowledge-questionnaire h4 { margin: 0; }
+.knowledge-questionnaire-create { display: flex; gap: 8px; }
+.knowledge-questionnaire-create input { flex: 1; }
+.knowledge-questionnaire-create input, .knowledge-questionnaire-create select, .knowledge-questionnaire textarea { border: 1px solid var(--border); border-radius: 7px; padding: 8px; background: var(--surface); color: inherit; }
+.knowledge-questionnaire { border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: grid; gap: 14px; }
+.knowledge-questionnaire > header { display: flex; justify-content: space-between; gap: 12px; }
+.knowledge-questionnaire section { border-top: 1px solid var(--border); padding-top: 12px; }
+.knowledge-questionnaire p { margin: 7px 0; }
+.knowledge-questionnaire textarea { box-sizing: border-box; display: block; width: 100%; min-height: 80px; margin: 8px 0; }
+.knowledge-answer-review { background: var(--surface-hover); border-radius: 7px; padding: 10px; margin-top: 10px; }
+.knowledge-answer-review button { margin: 6px 6px 0 0; }
+
 .knowledge-header button:hover,
 .knowledge-sections button:hover,
 .knowledge-proposal-detail button:hover { background: var(--surface-hover); }

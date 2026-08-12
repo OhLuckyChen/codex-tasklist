@@ -94,6 +94,28 @@ test("health and the default local project are available", async () => {
   assert.equal(result.body.projects[0].issueCount, 0);
 });
 
+test("renaming a project preserves its ID, workspace mapping, and issues", async () => {
+  const baseUrl = await startServer();
+  const created = await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "runtime", name: "runtime", workspacePath: "/workspace/runtime" },
+  });
+  const task = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "runtime", title: "Existing issue" },
+  });
+  const renamed = await request(baseUrl, "/api/projects/runtime", {
+    method: "PATCH",
+    body: { name: "星枢" },
+  });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.body.project.id, created.body.project.id);
+  assert.equal(renamed.body.project.name, "星枢");
+  assert.equal(renamed.body.project.workspacePath, "/workspace/runtime");
+  const retained = await request(baseUrl, `/api/tasks/${task.body.task.id}`);
+  assert.equal(retained.body.task.projectId, "runtime");
+});
+
 test("project knowledge proposals preserve review state and publish only through the local workspace", async () => {
   let workspacePath;
   const knowledgeService = new KnowledgeService({
@@ -176,6 +198,38 @@ test("project knowledge proposals preserve review state and publish only through
   });
   assert.equal(published.response.status, 200);
   assert.equal(published.body.proposal.status, "published");
+});
+
+test("knowledge questionnaires require gap evidence and only accepted answers create reviewable proposals", async () => {
+  let workspacePath;
+  const baseUrl = await startServer(async (directory) => { workspacePath = path.join(directory, "workspace"); await mkdir(workspacePath, { recursive: true }); return {}; });
+  await request(baseUrl, "/api/projects", { method: "POST", body: { id: "survey", name: "Survey", workspacePath } });
+  const invalid = await request(baseUrl, "/api/projects/survey/knowledge-questionnaires", { method: "POST", body: { scopeType: "project", title: "Bad", questions: [{ context: "c", prompt: "p", gapReason: "", checkedSources: [], targetRole: "r", answerFormat: "f", knowledgeTarget: "docs/knowledge/index.md" }] } });
+  assert.equal(invalid.response.status, 400);
+  const created = await request(baseUrl, "/api/projects/survey/knowledge-questionnaires", { method: "POST", body: { scopeType: "project", title: "Business gap", questions: [{ context: "订单取消", prompt: "实际取消规则是什么？", gapReason: "现有源码只有状态枚举，未说明业务口径。", checkedSources: ["docs/knowledge/architecture.md", "server/orders.ts"], targetRole: "订单负责人", answerFormat: "规则和例外", knowledgeTarget: "docs/knowledge/index.md" }] } });
+  assert.equal(created.response.status, 201);
+  const questionnaire = created.body.questionnaire;
+  const questionId = questionnaire.questions[0].id;
+  const beforeOpen = await request(baseUrl, `/api/knowledge-questions/${questionId}/answers`, { method: "POST", body: { content: "人工规则", confidence: "high" } });
+  assert.equal(beforeOpen.response.status, 409);
+  const opened = await request(baseUrl, `/api/projects/survey/knowledge-questionnaires/${questionnaire.id}`, { method: "PATCH", body: { status: "open" } });
+  assert.equal(opened.response.status, 200);
+  const answer = await request(baseUrl, `/api/knowledge-questions/${questionId}/answers`, { method: "POST", body: { content: "已付款订单只有财务确认后才能取消。", confidence: "high" } });
+  assert.equal(answer.response.status, 201);
+  const review = await request(baseUrl, `/api/knowledge-answers/${answer.body.answerId}/review`, { method: "POST", body: { status: "accepted", reviewNote: "已确认" } });
+  assert.equal(review.response.status, 200);
+  assert.equal(review.body.proposal.status, "ready");
+  assert.match(review.body.proposal.changes[0].afterContent, /财务确认/);
+  assert.equal(review.body.proposal.changes[0].operation, "create");
+  const receipt = await request(baseUrl, "/api/local/projects/survey/knowledge/publish", { method: "POST", body: { workspacePath, proposal: { id: review.body.proposal.id, version: review.body.proposal.version, changes: review.body.proposal.changes } } });
+  assert.equal(receipt.response.status, 200);
+  assert.match(await readFile(path.join(workspacePath, review.body.proposal.changes[0].targetPath), "utf8"), /人工确认回答/);
+  const duplicateReview = await request(baseUrl, `/api/knowledge-answers/${answer.body.answerId}/review`, { method: "POST", body: { status: "accepted" } });
+  assert.equal(duplicateReview.response.status, 409);
+  const proposals = await request(baseUrl, "/api/projects/survey/knowledge-proposals?status=ready");
+  assert.equal(proposals.body.proposals.length, 1);
+  const closed = await request(baseUrl, `/api/projects/survey/knowledge-questionnaires/${questionnaire.id}`, { method: "PATCH", body: { status: "closed" } });
+  assert.equal(closed.response.status, 200);
 });
 
 test("a persistent project knowledge run stores its callback as a ready proposal", async () => {

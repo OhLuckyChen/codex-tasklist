@@ -35,6 +35,7 @@ import {
   getKnowledgeRun,
   resumeClaudeSession,
   resumeOmpSession,
+  renameProject,
   getWorkflowWorkspace,
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
@@ -3192,18 +3193,24 @@ export function App() {
     );
   }
 
-  function saveProjectName(project: ProjectChoice) {
+  async function saveProjectName(project: ProjectChoice) {
     const nextName = projectNameDraft.trim();
     setRenamingProjectId(null);
     if (!nextName || nextName === project.name) return;
-    setProjectAliases((current) => {
-      const next = { ...current };
-      if (nextName === project.sourceName) delete next[project.id];
-      else next[project.id] = nextName;
-      window.localStorage.setItem(PROJECT_ALIASES_KEY, JSON.stringify(next));
-      return next;
-    });
-    setAnnouncement(`${project.name} 已重命名为 ${nextName}，项目目录未改变。`);
+    try {
+      const renamed = await renameProject(project.id, nextName);
+      setProjects((current) => current.map((item) => item.id === renamed.id ? renamed : item));
+      setProjectAliases((current) => {
+        if (!(project.id in current)) return current;
+        const next = { ...current };
+        delete next[project.id];
+        window.localStorage.setItem("taskboard.projectAliases.v1", JSON.stringify(next));
+        return next;
+      });
+      setAnnouncement(`${project.name} 已重命名为 ${nextName}，项目目录未改变。`);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    }
   }
 
   function setProjectArchived(project: ProjectChoice, archived: boolean) {
