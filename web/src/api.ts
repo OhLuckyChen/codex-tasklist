@@ -232,6 +232,14 @@ export async function createProject(input: {
   return data.project;
 }
 
+export async function renameProject(projectId: string, name: string): Promise<Project> {
+  const data = await request<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+  return data.project;
+}
+
 export async function listDevelopmentContexts(
   projectId: string,
   codexProjectId?: string,

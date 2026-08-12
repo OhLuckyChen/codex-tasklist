@@ -466,6 +466,12 @@ function parseProjectCreate(body) {
   return { id, name, workspacePath };
 }
 
+function parseProjectRename(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["name"]));
+  return { name: stringField(body.name, "name", { required: true, maxLength: 120 }) };
+}
+
 function parseThreadId(value) {
   if (value === undefined) return undefined;
   const raw = stringField(value, "threadId", { required: true, maxLength: 256 });
@@ -2177,6 +2183,16 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 201, { project });
         }
         return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const projectRoute = pathname.match(/^\/api\/projects\/([^/]+)$/);
+      if (projectRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectRoute[1], "Project id"));
+        if (request.method !== "PATCH") return methodNotAllowed(response, ["PATCH"]);
+        assertNoQuery(url.searchParams, "PATCH /api/projects/:id");
+        const project = database.renameProject(projectId, parseProjectRename(await readJson(request)).name);
+        events.emit("project.updated", { project });
+        return sendJson(response, 200, { project });
       }
 
       const projectKnowledgeSourcesRoute = pathname.match(

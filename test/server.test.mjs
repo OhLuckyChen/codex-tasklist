@@ -94,6 +94,28 @@ test("health and the default local project are available", async () => {
   assert.equal(result.body.projects[0].issueCount, 0);
 });
 
+test("renaming a project preserves its ID, workspace mapping, and issues", async () => {
+  const baseUrl = await startServer();
+  const created = await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "runtime", name: "runtime", workspacePath: "/workspace/runtime" },
+  });
+  const task = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "runtime", title: "Existing issue" },
+  });
+  const renamed = await request(baseUrl, "/api/projects/runtime", {
+    method: "PATCH",
+    body: { name: "星枢" },
+  });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.body.project.id, created.body.project.id);
+  assert.equal(renamed.body.project.name, "星枢");
+  assert.equal(renamed.body.project.workspacePath, "/workspace/runtime");
+  const retained = await request(baseUrl, `/api/tasks/${task.body.task.id}`);
+  assert.equal(retained.body.task.projectId, "runtime");
+});
+
 test("project knowledge proposals preserve review state and publish only through the local workspace", async () => {
   let workspacePath;
   const knowledgeService = new KnowledgeService({
