@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -29,6 +29,7 @@ const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
 const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
 const HOST_RUNTIME_TTL_MS = 3_000;
 const CODEX_PLAN_TAIL_BYTES = 16 * 1024 * 1024;
+const BOT_SECRET_KEY_CONTEXT = "codex-taskboard-project-bot-secret";
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -567,6 +568,105 @@ function parseRuntime(value) {
     throw new ApiError(400, "INVALID_FIELD", "'runtime' must be 'codex', 'claude' or 'omp'");
   }
   return value;
+}
+
+function parseBotRuntime(value) {
+  return parseRuntime(value) ?? "codex";
+}
+
+function parseProjectBotCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "botId", "secret", "enabled", "runtime", "workspacePath", "knowledgeEnabled", "codeSearchEnabled",
+  ]));
+  return {
+    botId: stringField(body.botId, "botId", { required: true, maxLength: 128 }),
+    secret: stringField(body.secret, "secret", { required: true, maxLength: 2048 }),
+    enabled: Boolean(body.enabled),
+    runtime: parseBotRuntime(body.runtime),
+    workspacePath: stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 }),
+    knowledgeEnabled: body.knowledgeEnabled === undefined ? true : Boolean(body.knowledgeEnabled),
+    codeSearchEnabled: body.codeSearchEnabled === undefined ? true : Boolean(body.codeSearchEnabled),
+  };
+}
+
+function parseProjectBotPatch(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "version", "botId", "secret", "enabled", "runtime", "workspacePath", "knowledgeEnabled", "codeSearchEnabled",
+  ]));
+  const version = parseVersion(body.version);
+  const changes = {};
+  if (body.botId !== undefined) changes.botId = stringField(body.botId, "botId", { required: true, maxLength: 128 });
+  if (body.secret !== undefined) changes.secret = stringField(body.secret, "secret", { required: true, maxLength: 2048 });
+  if (body.enabled !== undefined) changes.enabled = Boolean(body.enabled);
+  if (body.runtime !== undefined) changes.runtime = parseBotRuntime(body.runtime);
+  if (body.workspacePath !== undefined) changes.workspacePath = pathField(body.workspacePath, "workspacePath");
+  if (body.knowledgeEnabled !== undefined) changes.knowledgeEnabled = Boolean(body.knowledgeEnabled);
+  if (body.codeSearchEnabled !== undefined) changes.codeSearchEnabled = Boolean(body.codeSearchEnabled);
+  if (Object.keys(changes).length === 0) {
+    throw new ApiError(400, "INVALID_BODY", "PATCH requires at least one project bot field");
+  }
+  return { version, changes };
+}
+
+function parseProjectBotVersionBody(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version"]));
+  return { version: parseVersion(body.version) };
+}
+
+function parseWecomMessage(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "conversationId", "userId", "chatId", "messageId", "messageType", "text",
+  ]));
+  const conversationId = stringField(
+    body.conversationId ?? body.chatId ?? body.userId,
+    "conversationId",
+    { required: true, maxLength: 256 },
+  );
+  const text = stringField(body.text, "text", { required: true, maxLength: 20_000 });
+  return {
+    conversationId,
+    messageId: stringField(body.messageId ?? null, "messageId", { nullable: true, maxLength: 256 }),
+    messageType: stringField(body.messageType ?? "text", "messageType", { required: true, maxLength: 64 }),
+    text,
+  };
+}
+
+function stableSessionKey(projectId, botId, conversationId) {
+  return createHash("sha256")
+    .update(`${projectId}\0${botId}\0${conversationId}`)
+    .digest("hex");
+}
+
+function secretKeyFromSeed(seed) {
+  return createHash("sha256").update(`${BOT_SECRET_KEY_CONTEXT}\0${seed}`).digest();
+}
+
+function encryptBotSecret(secret, seed) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", secretKeyFromSeed(seed), iv);
+  const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
+}
+
+function decryptBotSecret(ciphertext, seed) {
+  if (typeof ciphertext !== "string" || !ciphertext.startsWith("v1:")) return null;
+  const [, ivValue, tagValue, ciphertextValue] = ciphertext.split(":");
+  if (!ivValue || !tagValue || !ciphertextValue) return null;
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    secretKeyFromSeed(seed),
+    Buffer.from(ivValue, "base64url"),
+  );
+  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(ciphertextValue, "base64url")),
+    decipher.final(),
+  ]).toString("utf8");
 }
 
 function parseTaskCreate(body) {
@@ -1399,6 +1499,8 @@ export function createTaskboardServer(options = {}) {
     ompExecutable: resolved.ompExecutable,
   });
   const knowledgeRuns = new Map();
+  const botSecretSeed = options.botSecretKey ?? `${resolved.databasePath}\0${os.userInfo().username}`;
+  const wecomSessionQueues = new Map();
 
   // Codex session plan-progress scanning (backported from upstream v0.2.3).
   // Reads the tail of ~/.codex/sessions/*-<threadId>.jsonl to derive plan step
@@ -1606,6 +1708,102 @@ export function createTaskboardServer(options = {}) {
       throw new ApiError(400, "INVALID_WORKSPACE_CONTEXT", "Knowledge workspace must match the project or one of its discovered worktrees");
     }
     return selected;
+  }
+
+  function enqueueWecomSession(sessionKey, action) {
+    const previous = wecomSessionQueues.get(sessionKey) ?? Promise.resolve();
+    const current = previous.then(action, action).finally(() => {
+      if (wecomSessionQueues.get(sessionKey) === current) wecomSessionQueues.delete(sessionKey);
+    });
+    wecomSessionQueues.set(sessionKey, current);
+    return current;
+  }
+
+  async function answerWecomMessage(bot, message) {
+    if (!bot.enabled) {
+      throw new ApiError(409, "PROJECT_BOT_DISABLED", "Project bot is disabled");
+    }
+    const secretCiphertext = database.getProjectBotSecretCiphertext(bot.id);
+    if (!decryptBotSecret(secretCiphertext, botSecretSeed)) {
+      throw new ApiError(409, "PROJECT_BOT_SECRET_UNAVAILABLE", "Project bot secret is unavailable");
+    }
+    const project = database.getProject(bot.projectId);
+    if (!project) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${bot.projectId}' does not exist`);
+    }
+    const sessionKey = stableSessionKey(bot.projectId, bot.botId, message.conversationId);
+    return enqueueWecomSession(sessionKey, async () => {
+      const session = database.getOrCreateProjectBotSession({
+        botConfigId: bot.id,
+        projectId: bot.projectId,
+        botId: bot.botId,
+        wecomConversationId: message.conversationId,
+        sessionKey,
+        runtime: bot.runtime,
+      });
+      database.createProjectBotAuditEvent({
+        botConfigId: bot.id,
+        sessionId: session.id,
+        projectId: bot.projectId,
+        botId: bot.botId,
+        wecomConversationId: message.conversationId,
+        direction: "inbound",
+        messageType: message.messageType,
+        body: message.text,
+        status: "received",
+      });
+      database.updateProjectBotSession(session.id, { status: "running" });
+      try {
+        const question = [
+          "你是 Taskboard 项目绑定的企微答疑助手。",
+          `项目：${project.name} (${project.id})`,
+          `企微会话：${message.conversationId}`,
+          "只允许基于项目知识库和绑定工作区的代码、配置、测试、文档做只读回答。",
+          "回答实现、调用链或排障问题时必须给出知识条目或文件引用；不要执行代码修改、Git、部署、数据库写入或外部副作用操作。",
+          "",
+          message.text,
+        ].join("\n");
+        const answer = bot.knowledgeEnabled || bot.codeSearchEnabled
+          ? await knowledge.ask(bot.workspacePath, question)
+          : {
+              answer: "该机器人未开启知识库或代码只读检索，无法回答项目问题。",
+              citations: [],
+            };
+        const outbound = database.createProjectBotAuditEvent({
+          botConfigId: bot.id,
+          sessionId: session.id,
+          projectId: bot.projectId,
+          botId: bot.botId,
+          wecomConversationId: message.conversationId,
+          direction: "outbound",
+          messageType: "text",
+          body: answer.answer,
+          citations: answer.citations,
+          status: "answered",
+        });
+        const updatedSession = database.updateProjectBotSession(session.id, {
+          status: "idle",
+          summary: answer.answer.slice(0, 2000),
+        });
+        return { bot, session: updatedSession, answer, auditEvent: outbound };
+      } catch (error) {
+        database.updateProjectBotSession(session.id, { status: "error" });
+        database.createProjectBotAuditEvent({
+          botConfigId: bot.id,
+          sessionId: session.id,
+          projectId: bot.projectId,
+          botId: bot.botId,
+          wecomConversationId: message.conversationId,
+          direction: "outbound",
+          messageType: "error",
+          body: "",
+          citations: [],
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    });
   }
 
   const server = createServer(async (request, response) => {
@@ -2193,6 +2391,100 @@ export function createTaskboardServer(options = {}) {
         const project = database.renameProject(projectId, parseProjectRename(await readJson(request)).name);
         events.emit("project.updated", { project });
         return sendJson(response, 200, { project });
+      }
+
+      const projectBotsRoute = pathname.match(/^\/api\/projects\/([^/]+)\/bots$/);
+      if (projectBotsRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectBotsRoute[1], "Project id"));
+        assertNoQuery(url.searchParams, "Project bot routes");
+        if (request.method === "GET") {
+          return sendJson(response, 200, { bots: database.listProjectBots(projectId) });
+        }
+        if (request.method === "POST") {
+          const input = parseProjectBotCreate(await readJson(request));
+          const bot = database.createProjectBot({
+            projectId,
+            ...input,
+            secretCiphertext: encryptBotSecret(input.secret, botSecretSeed),
+          });
+          events.emit("project-bot.created", { projectId, bot });
+          return sendJson(response, 201, { bot });
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const projectBotRoute = pathname.match(/^\/api\/project-bots\/([^/]+)(?:\/(connect|disconnect|audit))?$/);
+      if (projectBotRoute) {
+        const botConfigId = decodeRouteSegment(projectBotRoute[1], "Project bot id");
+        const action = projectBotRoute[2];
+        if (action === "audit") {
+          assertAllowedQuery(url.searchParams, new Set(["limit"]), "Project bot audit route");
+          if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+          const limitValue = url.searchParams.get("limit");
+          const limit = limitValue === null ? 50 : Number(limitValue);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+            throw new ApiError(400, "INVALID_QUERY_PARAMETER", "'limit' must be an integer from 1 to 200");
+          }
+          return sendJson(response, 200, { events: database.listProjectBotAuditEvents(botConfigId, limit) });
+        }
+        assertNoQuery(url.searchParams, "Project bot routes");
+        if (action === "connect" || action === "disconnect") {
+          if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+          const { version } = parseProjectBotVersionBody(await readJson(request));
+          const current = database.getProjectBot(botConfigId);
+          if (!current) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${botConfigId}' does not exist`);
+          if (current.version !== version) {
+            throw new ApiError(409, "VERSION_CONFLICT", "Project bot was changed by another client", {
+              expectedVersion: version,
+              actualVersion: current.version,
+            });
+          }
+          const bot = database.setProjectBotConnection(
+            botConfigId,
+            action === "connect" && current.enabled ? "connected" : "disabled",
+            null,
+          );
+          events.emit("project-bot.updated", { projectId: bot.projectId, bot });
+          return sendJson(response, 200, { bot });
+        }
+        if (request.method === "GET") {
+          const bot = database.getProjectBot(botConfigId);
+          if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${botConfigId}' does not exist`);
+          return sendJson(response, 200, { bot });
+        }
+        if (request.method === "PATCH") {
+          const parsed = parseProjectBotPatch(await readJson(request));
+          const changes = { ...parsed.changes };
+          if (changes.secret !== undefined) {
+            changes.secretCiphertext = encryptBotSecret(changes.secret, botSecretSeed);
+            delete changes.secret;
+          }
+          const bot = database.updateProjectBot(botConfigId, parsed.version, changes);
+          events.emit("project-bot.updated", { projectId: bot.projectId, bot });
+          return sendJson(response, 200, { bot });
+        }
+        if (request.method === "DELETE") {
+          const { version } = parseProjectBotVersionBody(await readJson(request));
+          const bot = database.deleteProjectBot(botConfigId, version);
+          events.emit("project-bot.deleted", { projectId: bot.projectId, bot });
+          return sendJson(response, 200, { bot });
+        }
+        return methodNotAllowed(response, ["GET", "PATCH", "DELETE"]);
+      }
+
+      const wecomBotMessageRoute = pathname.match(/^\/api\/wecom\/bots\/([^/]+)\/messages$/);
+      if (wecomBotMessageRoute) {
+        assertNoQuery(url.searchParams, "WeCom bot message route");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const botId = decodeRouteSegment(wecomBotMessageRoute[1], "BotID");
+        const bot = database.getProjectBotByBotId(botId);
+        if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `BotID '${botId}' is not configured`);
+        const result = await answerWecomMessage(bot, parseWecomMessage(await readJson(request)));
+        return sendJson(response, 200, {
+          session: result.session,
+          answer: result.answer,
+          auditEvent: result.auditEvent,
+        });
       }
 
       const projectKnowledgeSourcesRoute = pathname.match(

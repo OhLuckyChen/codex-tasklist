@@ -145,6 +145,63 @@ function connectorFromRow(row) {
   };
 }
 
+function projectBotFromRow(row) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    botId: row.bot_id,
+    enabled: row.enabled === 1,
+    runtime: row.runtime,
+    workspacePath: row.workspace_path,
+    knowledgeEnabled: row.knowledge_enabled === 1,
+    codeSearchEnabled: row.code_search_enabled === 1,
+    hasSecret: Boolean(row.secret_ciphertext),
+    connectionStatus: row.connection_status,
+    lastConnectedAt: row.last_connected_at,
+    lastError: row.last_error,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function projectBotSessionFromRow(row) {
+  return {
+    id: row.id,
+    botConfigId: row.bot_config_id,
+    projectId: row.project_id,
+    botId: row.bot_id,
+    wecomConversationId: row.wecom_conversation_id,
+    sessionKey: row.session_key,
+    runtime: row.runtime,
+    threadId: row.thread_id,
+    status: row.status,
+    summary: row.summary,
+    lastMessageAt: row.last_message_at,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function projectBotAuditFromRow(row) {
+  return {
+    id: row.id,
+    botConfigId: row.bot_config_id,
+    sessionId: row.session_id,
+    projectId: row.project_id,
+    botId: row.bot_id,
+    wecomConversationId: row.wecom_conversation_id,
+    direction: row.direction,
+    messageType: row.message_type,
+    body: row.body,
+    citations: JSON.parse(row.citations ?? "[]"),
+    status: row.status,
+    error: row.error,
+    createdAt: row.created_at,
+  };
+}
+
 function knowledgeChangeFromRow(row) {
   return {
     id: row.id,
@@ -492,6 +549,68 @@ export class TaskboardDatabase {
 
       CREATE INDEX IF NOT EXISTS connectors_runtime_sort
         ON connectors(runtime, sort_order, created_at);
+
+      CREATE TABLE IF NOT EXISTS project_bot_configs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL UNIQUE,
+        secret_ciphertext TEXT,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        runtime TEXT NOT NULL DEFAULT 'codex' CHECK (runtime IN ('codex', 'claude', 'omp')),
+        workspace_path TEXT NOT NULL,
+        knowledge_enabled INTEGER NOT NULL DEFAULT 1 CHECK (knowledge_enabled IN (0, 1)),
+        code_search_enabled INTEGER NOT NULL DEFAULT 1 CHECK (code_search_enabled IN (0, 1)),
+        connection_status TEXT NOT NULL DEFAULT 'disabled' CHECK (
+          connection_status IN ('disabled', 'disconnected', 'connecting', 'connected', 'error')
+        ),
+        last_connected_at TEXT,
+        last_error TEXT,
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS project_bot_configs_project
+        ON project_bot_configs(project_id, enabled, created_at);
+
+      CREATE TABLE IF NOT EXISTS project_bot_sessions (
+        id TEXT PRIMARY KEY,
+        bot_config_id TEXT NOT NULL REFERENCES project_bot_configs(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL,
+        wecom_conversation_id TEXT NOT NULL,
+        session_key TEXT NOT NULL UNIQUE,
+        runtime TEXT NOT NULL CHECK (runtime IN ('codex', 'claude', 'omp')),
+        thread_id TEXT,
+        status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running', 'error')),
+        summary TEXT NOT NULL DEFAULT '',
+        last_message_at TEXT,
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS project_bot_sessions_config
+        ON project_bot_sessions(bot_config_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS project_bot_audit_events (
+        id TEXT PRIMARY KEY,
+        bot_config_id TEXT NOT NULL REFERENCES project_bot_configs(id) ON DELETE CASCADE,
+        session_id TEXT REFERENCES project_bot_sessions(id) ON DELETE SET NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL,
+        wecom_conversation_id TEXT NOT NULL,
+        direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+        message_type TEXT NOT NULL,
+        body TEXT NOT NULL,
+        citations TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK (status IN ('received', 'answered', 'failed')),
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS project_bot_audit_session
+        ON project_bot_audit_events(session_id, created_at DESC);
     `);
 
     const commentColumns = this.database.prepare("PRAGMA table_info(comments)").all();
@@ -1148,6 +1267,261 @@ export class TaskboardDatabase {
       });
     }
     return { id };
+  }
+
+  listProjectBots(projectId) {
+    if (!this.database.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    return this.database.prepare(`
+      SELECT * FROM project_bot_configs
+      WHERE project_id = ?
+      ORDER BY enabled DESC, created_at, id
+    `).all(projectId).map(projectBotFromRow);
+  }
+
+  getProjectBot(id) {
+    const row = this.database.prepare("SELECT * FROM project_bot_configs WHERE id = ?").get(id);
+    return row ? projectBotFromRow(row) : null;
+  }
+
+  getProjectBotByBotId(botId) {
+    const row = this.database.prepare("SELECT * FROM project_bot_configs WHERE bot_id = ?").get(botId);
+    return row ? projectBotFromRow(row) : null;
+  }
+
+  getProjectBotSecretCiphertext(id) {
+    return this.database.prepare("SELECT secret_ciphertext FROM project_bot_configs WHERE id = ?")
+      .get(id)?.secret_ciphertext ?? null;
+  }
+
+  #requireProjectBot(id) {
+    const bot = this.getProjectBot(id);
+    if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${id}' does not exist`);
+    return bot;
+  }
+
+  #projectBotVersion(current, version) {
+    if (current.version !== version) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Project bot was changed by another client", {
+        expectedVersion: version,
+        actualVersion: current.version,
+      });
+    }
+  }
+
+  createProjectBot(input) {
+    const id = randomUUID();
+    const timestamp = now();
+    if (!this.database.prepare("SELECT 1 FROM projects WHERE id = ?").get(input.projectId)) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${input.projectId}' does not exist`);
+    }
+    try {
+      this.database.prepare(`
+        INSERT INTO project_bot_configs (
+          id, project_id, bot_id, secret_ciphertext, enabled, runtime, workspace_path,
+          knowledge_enabled, code_search_enabled, connection_status,
+          version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        input.projectId,
+        input.botId,
+        input.secretCiphertext,
+        input.enabled ? 1 : 0,
+        input.runtime,
+        input.workspacePath,
+        input.knowledgeEnabled ? 1 : 0,
+        input.codeSearchEnabled ? 1 : 0,
+        input.enabled ? "disconnected" : "disabled",
+        timestamp,
+        timestamp,
+      );
+    } catch (error) {
+      if (String(error.message).includes("UNIQUE constraint failed")) {
+        throw new ApiError(409, "PROJECT_BOT_EXISTS", `BotID '${input.botId}' is already configured`);
+      }
+      throw error;
+    }
+    return this.getProjectBot(id);
+  }
+
+  updateProjectBot(id, version, changes) {
+    const current = this.#requireProjectBot(id);
+    this.#projectBotVersion(current, version);
+    const assignments = [];
+    const values = [];
+    const columns = {
+      botId: "bot_id",
+      runtime: "runtime",
+      workspacePath: "workspace_path",
+    };
+    for (const [key, value] of Object.entries(changes)) {
+      if (key === "secretCiphertext") {
+        assignments.push("secret_ciphertext = ?");
+        values.push(value);
+      } else if (key === "enabled") {
+        assignments.push("enabled = ?", "connection_status = ?");
+        values.push(value ? 1 : 0, value ? "disconnected" : "disabled");
+      } else if (key === "knowledgeEnabled") {
+        assignments.push("knowledge_enabled = ?");
+        values.push(value ? 1 : 0);
+      } else if (key === "codeSearchEnabled") {
+        assignments.push("code_search_enabled = ?");
+        values.push(value ? 1 : 0);
+      } else if (columns[key]) {
+        assignments.push(`${columns[key]} = ?`);
+        values.push(value);
+      }
+    }
+    if (assignments.length === 0) return current;
+    assignments.push("version = version + 1", "updated_at = ?");
+    values.push(now(), id, version);
+    try {
+      const result = this.database.prepare(`
+        UPDATE project_bot_configs
+        SET ${assignments.join(", ")}
+        WHERE id = ? AND version = ?
+      `).run(...values);
+      if (result.changes !== 1) {
+        throw new ApiError(409, "VERSION_CONFLICT", "Project bot was changed by another client", {
+          expectedVersion: version,
+          actualVersion: null,
+        });
+      }
+    } catch (error) {
+      if (String(error.message).includes("UNIQUE constraint failed")) {
+        throw new ApiError(409, "PROJECT_BOT_EXISTS", `BotID '${changes.botId}' is already configured`);
+      }
+      throw error;
+    }
+    return this.getProjectBot(id);
+  }
+
+  deleteProjectBot(id, version) {
+    const current = this.#requireProjectBot(id);
+    this.#projectBotVersion(current, version);
+    const result = this.database.prepare("DELETE FROM project_bot_configs WHERE id = ? AND version = ?")
+      .run(id, version);
+    if (result.changes !== 1) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Project bot was changed by another client", {
+        expectedVersion: version,
+        actualVersion: null,
+      });
+    }
+    return current;
+  }
+
+  setProjectBotConnection(id, status, error = null) {
+    const timestamp = now();
+    this.database.prepare(`
+      UPDATE project_bot_configs
+      SET connection_status = ?,
+        last_connected_at = CASE WHEN ? = 'connected' THEN ? ELSE last_connected_at END,
+        last_error = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(status, status, timestamp, error, timestamp, id);
+    return this.getProjectBot(id);
+  }
+
+  getOrCreateProjectBotSession(input) {
+    const timestamp = now();
+    const existing = this.database.prepare(`
+      SELECT * FROM project_bot_sessions WHERE session_key = ?
+    `).get(input.sessionKey);
+    if (existing) {
+      this.database.prepare(`
+        UPDATE project_bot_sessions
+        SET last_message_at = ?, updated_at = ?, runtime = ?, version = version + 1
+        WHERE id = ?
+      `).run(timestamp, timestamp, input.runtime, existing.id);
+      return projectBotSessionFromRow(this.database.prepare("SELECT * FROM project_bot_sessions WHERE id = ?").get(existing.id));
+    }
+    const id = randomUUID();
+    this.database.prepare(`
+      INSERT INTO project_bot_sessions (
+        id, bot_config_id, project_id, bot_id, wecom_conversation_id, session_key,
+        runtime, thread_id, status, summary, last_message_at, version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'idle', '', ?, 1, ?, ?)
+    `).run(
+      id,
+      input.botConfigId,
+      input.projectId,
+      input.botId,
+      input.wecomConversationId,
+      input.sessionKey,
+      input.runtime,
+      input.threadId ?? null,
+      timestamp,
+      timestamp,
+      timestamp,
+    );
+    return projectBotSessionFromRow(this.database.prepare("SELECT * FROM project_bot_sessions WHERE id = ?").get(id));
+  }
+
+  updateProjectBotSession(id, changes) {
+    const assignments = [];
+    const values = [];
+    if (changes.status) {
+      assignments.push("status = ?");
+      values.push(changes.status);
+    }
+    if (changes.threadId !== undefined) {
+      assignments.push("thread_id = ?");
+      values.push(changes.threadId);
+    }
+    if (changes.summary !== undefined) {
+      assignments.push("summary = ?");
+      values.push(changes.summary);
+    }
+    if (assignments.length === 0) {
+      const row = this.database.prepare("SELECT * FROM project_bot_sessions WHERE id = ?").get(id);
+      return row ? projectBotSessionFromRow(row) : null;
+    }
+    assignments.push("version = version + 1", "updated_at = ?");
+    values.push(now(), id);
+    this.database.prepare(`
+      UPDATE project_bot_sessions
+      SET ${assignments.join(", ")}
+      WHERE id = ?
+    `).run(...values);
+    const row = this.database.prepare("SELECT * FROM project_bot_sessions WHERE id = ?").get(id);
+    return row ? projectBotSessionFromRow(row) : null;
+  }
+
+  createProjectBotAuditEvent(input) {
+    const id = randomUUID();
+    this.database.prepare(`
+      INSERT INTO project_bot_audit_events (
+        id, bot_config_id, session_id, project_id, bot_id, wecom_conversation_id,
+        direction, message_type, body, citations, status, error, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.botConfigId,
+      input.sessionId ?? null,
+      input.projectId,
+      input.botId,
+      input.wecomConversationId,
+      input.direction,
+      input.messageType,
+      input.body,
+      JSON.stringify(input.citations ?? []),
+      input.status,
+      input.error ?? null,
+      now(),
+    );
+    return projectBotAuditFromRow(this.database.prepare("SELECT * FROM project_bot_audit_events WHERE id = ?").get(id));
+  }
+
+  listProjectBotAuditEvents(botConfigId, limit = 50) {
+    return this.database.prepare(`
+      SELECT * FROM project_bot_audit_events
+      WHERE bot_config_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(botConfigId, limit).map(projectBotAuditFromRow);
   }
 
   listKnowledgeProposals(projectId, status) {

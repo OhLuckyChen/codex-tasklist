@@ -74,6 +74,7 @@ import {
 } from "./components/InlineMediaComposer";
 import { LinearIcon } from "./components/LinearIcon";
 import { ProjectAutomationMenu } from "./components/ProjectAutomationMenu";
+import { ProjectBotsPanel } from "./components/ProjectBotsPanel";
 import { ProjectCreator, type ProjectCreateDraft } from "./components/ProjectCreator";
 import { TaskContextMenu } from "./components/TaskContextMenu";
 import { TaskDetail } from "./components/TaskDetail";
@@ -817,6 +818,7 @@ export function App() {
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [showConnectorsPanel, setShowConnectorsPanel] = useState(false);
+  const [showProjectBotsPanel, setShowProjectBotsPanel] = useState(false);
   const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -3777,12 +3779,26 @@ export function App() {
               onStatusVisibilityChange={updateColumnVisibility}
               onApplyToAllProjectsChange={updateGlobalColumnVisibility}
               onOpenConnectors={() => setShowConnectorsPanel(true)}
+              onOpenProjectBots={!isGlobalBoard && selectedProject ? () => setShowProjectBotsPanel(true) : undefined}
             />
             {showConnectorsPanel && (
               <ConnectorsPanel
                 connectors={connectors}
                 onChanged={() => { void listConnectors().then(setConnectors); }}
                 onClose={() => setShowConnectorsPanel(false)}
+              />
+            )}
+            {showProjectBotsPanel && selectedProject && (
+              <ProjectBotsPanel
+                projectId={selectedProject.id}
+                projectName={projectNames[selectedProject.id] ?? selectedProject.name}
+                workspacePath={
+                  selectedDeviceWorkspacePath
+                  ?? selectedProject.workspacePath
+                  ?? developmentScan.workspacePath
+                  ?? ""
+                }
+                onClose={() => setShowProjectBotsPanel(false)}
               />
             )}
             {(search || activeFilterCount > 0 || favoriteTasksOnly) && (
