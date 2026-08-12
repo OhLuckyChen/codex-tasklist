@@ -126,6 +126,24 @@ function workflowWorkspaceFromRow(row) {
   };
 }
 
+function connectorFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    runtime: row.runtime,
+    baseUrl: row.base_url ?? null,
+    apiKey: row.api_key ?? null,
+    model: row.model ?? null,
+    customHeaders: row.custom_headers ? JSON.parse(row.custom_headers) : null,
+    executable: row.executable ?? null,
+    isDefault: row.is_default === 1,
+    sortOrder: row.sort_order,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function aiChatRunFromRow(row) {
   return {
     id: row.id,
@@ -546,6 +564,30 @@ export class TaskboardDatabase {
       CREATE UNIQUE INDEX IF NOT EXISTS task_relations_one_parent
         ON task_relations(target_task_id)
         WHERE relation_type = 'parent';
+    `);
+
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS connectors (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'omp')),
+        base_url TEXT,
+        api_key TEXT,
+        model TEXT,
+        custom_headers TEXT,
+        executable TEXT,
+        is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS connectors_runtime_default
+        ON connectors(runtime) WHERE is_default = 1;
+
+      CREATE INDEX IF NOT EXISTS connectors_runtime_sort
+        ON connectors(runtime, sort_order, created_at);
     `);
 
     const commentColumns = this.database.prepare("PRAGMA table_info(comments)").all();
@@ -987,6 +1029,185 @@ export class TaskboardDatabase {
       throw error;
     }
     return this.getWorkflowWorkspace(projectId);
+  }
+
+  listConnectors() {
+    return this.database.prepare(`
+      SELECT * FROM connectors
+      ORDER BY runtime, sort_order, created_at
+    `).all().map(connectorFromRow);
+  }
+
+  getConnector(id) {
+    const row = this.database.prepare("SELECT * FROM connectors WHERE id = ?").get(id);
+    return row ? connectorFromRow(row) : null;
+  }
+
+  getDefaultConnector(runtime) {
+    const row = this.database.prepare(
+      "SELECT * FROM connectors WHERE runtime = ? AND is_default = 1",
+    ).get(runtime);
+    return row ? connectorFromRow(row) : null;
+  }
+
+  #requireConnector(id) {
+    const connector = this.getConnector(id);
+    if (!connector) {
+      throw new ApiError(404, "CONNECTOR_NOT_FOUND", `Connector '${id}' does not exist`);
+    }
+    return connector;
+  }
+
+  #connectorVersion(current, version) {
+    if (version !== undefined && version !== null && current.version !== version) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Connector was changed by another client", {
+        expectedVersion: version,
+        actualVersion: current.version,
+      });
+    }
+  }
+
+  createConnector(input) {
+    const id = randomUUID();
+    const timestamp = now();
+    const runtime = input.runtime;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (input.isDefault) {
+        this.database.prepare(
+          "UPDATE connectors SET is_default = 0, updated_at = ? WHERE runtime = ? AND is_default = 1",
+        ).run(timestamp, runtime);
+      }
+      this.database.prepare(`
+        INSERT INTO connectors (
+          id, name, runtime, base_url, api_key, model, custom_headers,
+          executable, is_default, sort_order, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        input.name,
+        runtime,
+        input.baseUrl ?? null,
+        input.apiKey ?? null,
+        input.model ?? null,
+        input.customHeaders ? JSON.stringify(input.customHeaders) : null,
+        input.executable ?? null,
+        input.isDefault ? 1 : 0,
+        input.sortOrder ?? 0,
+        timestamp,
+        timestamp,
+      );
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getConnector(id);
+  }
+
+  updateConnector(id, version, changes) {
+    const current = this.#requireConnector(id);
+    this.#connectorVersion(current, version);
+    const timestamp = now();
+    const columns = {
+      name: "name",
+      baseUrl: "base_url",
+      apiKey: "api_key",
+      model: "model",
+      executable: "executable",
+      sortOrder: "sort_order",
+    };
+    const assignments = [];
+    const values = [];
+    for (const [key, value] of Object.entries(changes)) {
+      if (key === "customHeaders") {
+        assignments.push("custom_headers = ?");
+        values.push(value ? JSON.stringify(value) : null);
+        continue;
+      }
+      if (key === "isDefault") {
+        continue;
+      }
+      if (columns[key]) {
+        assignments.push(`${columns[key]} = ?`);
+        values.push(value ?? null);
+      }
+    }
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (Object.hasOwn(changes, "isDefault")) {
+        if (changes.isDefault) {
+          this.database.prepare(
+            "UPDATE connectors SET is_default = 0, updated_at = ? WHERE runtime = ? AND is_default = 1 AND id != ?",
+          ).run(timestamp, current.runtime, id);
+          assignments.push("is_default = 1");
+        } else {
+          assignments.push("is_default = 0");
+        }
+      }
+      if (assignments.length > 0) {
+        assignments.push("version = version + 1", "updated_at = ?");
+        values.push(timestamp);
+        values.push(id, current.version);
+        const result = this.database.prepare(
+          `UPDATE connectors SET ${assignments.join(", ")} WHERE id = ? AND version = ?`,
+        ).run(...values);
+        if (result.changes !== 1) {
+          throw new ApiError(409, "VERSION_CONFLICT", "Connector was changed by another client", {
+            expectedVersion: current.version,
+            actualVersion: null,
+          });
+        }
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getConnector(id);
+  }
+
+  setDefaultConnector(id, version) {
+    const current = this.#requireConnector(id);
+    this.#connectorVersion(current, version);
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(
+        "UPDATE connectors SET is_default = 0, updated_at = ? WHERE runtime = ? AND is_default = 1 AND id != ?",
+      ).run(timestamp, current.runtime, id);
+      const result = this.database.prepare(`
+        UPDATE connectors
+        SET is_default = 1, version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(timestamp, id, current.version);
+      if (result.changes !== 1) {
+        throw new ApiError(409, "VERSION_CONFLICT", "Connector was changed by another client", {
+          expectedVersion: current.version,
+          actualVersion: null,
+        });
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getConnector(id);
+  }
+
+  deleteConnector(id, version) {
+    const current = this.#requireConnector(id);
+    this.#connectorVersion(current, version);
+    const result = this.database.prepare(
+      "DELETE FROM connectors WHERE id = ? AND version = ?",
+    ).run(id, current.version);
+    if (result.changes !== 1) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Connector was changed by another client", {
+        expectedVersion: current.version,
+        actualVersion: null,
+      });
+    }
+    return { id };
   }
 
   listAiChatThreads() {

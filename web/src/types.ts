@@ -43,8 +43,39 @@ export interface TaskboardMetadata {
   projectKnowledgeSkillPath?: string;
   claudeRuntime?: boolean;
   ompRuntime?: boolean;
+  connectors?: Connector[];
   capabilities?: TaskboardCapabilities;
 }
+
+export type ConnectorRuntime = "claude" | "omp";
+
+export interface Connector {
+  id: string;
+  name: string;
+  runtime: ConnectorRuntime;
+  baseUrl: string | null;
+  apiKey: string | null;
+  model: string | null;
+  customHeaders: Record<string, string> | null;
+  executable: string | null;
+  isDefault: boolean;
+  sortOrder: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ConnectorDraft = {
+  name: string;
+  runtime: ConnectorRuntime;
+  baseUrl?: string | null;
+  apiKey?: string | null;
+  model?: string | null;
+  customHeaders?: Record<string, string> | null;
+  executable?: string | null;
+  isDefault?: boolean;
+  sortOrder?: number;
+};
 
 export interface TaskboardCapabilities {
   localAiChat: boolean;

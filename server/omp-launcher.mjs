@@ -41,6 +41,32 @@ function resolveOmpBinary(candidate) {
   return "omp";
 }
 
+function connectorEnvLines(connector, tokenEnvVar) {
+  if (!connector) return [];
+  const lines = [];
+  if (connector.baseUrl) {
+    lines.push(`export ANTHROPIC_BASE_URL=${shellSingleQuote(connector.baseUrl)}`);
+  }
+  if (connector.apiKey) {
+    lines.push(`export ${tokenEnvVar}=${shellSingleQuote(connector.apiKey)}`);
+  }
+  if (connector.customHeaders && Object.keys(connector.customHeaders).length > 0) {
+    lines.push(`export ANTHROPIC_CUSTOM_HEADERS=${shellSingleQuote(JSON.stringify(connector.customHeaders))}`);
+  }
+  return lines;
+}
+
+function connectorModelFlag(connector) {
+  return connector?.model ? ` --model=${shellSingleQuote(connector.model)}` : "";
+}
+
+function resolveRuntimeBinary(connector, fallbackBinary) {
+  if (connector?.executable) {
+    return path.resolve(connector.executable);
+  }
+  return fallbackBinary;
+}
+
 export function createOmpLauncher(options = {}) {
   const dataDirectory = options.dataDirectory;
   if (!dataDirectory) throw new Error("createOmpLauncher requires dataDirectory");
@@ -69,6 +95,8 @@ export function createOmpLauncher(options = {}) {
     writeFileSync(promptPath, payload.prompt, { encoding: "utf8" });
     const sessionDir = sessionDirFor(sessionId);
     mkdirSync(sessionDir, { recursive: true });
+    const binary = resolveRuntimeBinary(payload.connector, ompBinary);
+    const modelFlag = connectorModelFlag(payload.connector);
 
     const lines = [
       "#!/bin/zsh -l",
@@ -77,8 +105,9 @@ export function createOmpLauncher(options = {}) {
       "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\" 2>/dev/null",
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='omp'`,
+      ...connectorEnvLines(payload.connector, "ANTHROPIC_API_KEY"),
       `cd -- ${shellSingleQuote(payload.workspacePath)}`,
-      `${shellSingleQuote(ompBinary)} --auto-approve --session-dir=${shellSingleQuote(sessionDir)} "$(cat ${shellSingleQuote(promptPath)})"`,
+      `${shellSingleQuote(binary)} --auto-approve${modelFlag} --session-dir=${shellSingleQuote(sessionDir)} "$(cat ${shellSingleQuote(promptPath)})"`,
       'echo "\\n[Oh My Pi 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -91,13 +120,13 @@ export function createOmpLauncher(options = {}) {
    * The session id is fixed via CODEX_THREAD_ID; OMP's own session state
    * is isolated into a per-session directory under the data runs folder.
    */
-  function launchSession({ workspacePath, sessionId, prompt }) {
+  function launchSession({ workspacePath, sessionId, prompt, connector }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
     }
     if (!sessionId) throw new Error("sessionId is required");
-    const { scriptPath } = writeSessionFiles(sessionId, { workspacePath, prompt });
+    const { scriptPath } = writeSessionFiles(sessionId, { workspacePath, prompt, connector });
     const appleScript = `tell application "Terminal"
   activate
   do script ${appleScriptString(shellSingleQuote(scriptPath))}
@@ -115,7 +144,7 @@ end tell`;
    * Oh My Pi session by id. OMP uses --continue to resume the last session
    * stored in the per-session directory.
    */
-  function resumeSession({ workspacePath, sessionId, followUp }) {
+  function resumeSession({ workspacePath, sessionId, followUp, connector }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
@@ -133,6 +162,8 @@ end tell`;
     const sessionDir = sessionDirFor(sessionId);
     mkdirSync(sessionDir, { recursive: true });
     const promptArg = hasFollowUp ? ` "$(cat ${shellSingleQuote(writeFollowUpFile(sessionId, followUp))})"` : "";
+    const binary = resolveRuntimeBinary(connector, ompBinary);
+    const modelFlag = connectorModelFlag(connector);
     const lines = [
       "#!/bin/zsh -l",
       "# taskboard-managed Oh My Pi resume launcher",
@@ -140,8 +171,9 @@ end tell`;
       "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\" 2>/dev/null",
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='omp'`,
+      ...connectorEnvLines(connector, "ANTHROPIC_API_KEY"),
       `cd -- ${shellSingleQuote(workspacePath)}`,
-      `${shellSingleQuote(ompBinary)} --auto-approve --session-dir=${shellSingleQuote(sessionDir)} --continue${promptArg}`,
+      `${shellSingleQuote(binary)} --auto-approve${modelFlag} --session-dir=${shellSingleQuote(sessionDir)} --continue${promptArg}`,
       'echo "\\n[Oh My Pi 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -259,6 +291,7 @@ end tell`;
     resumeSession,
     isRunning,
     pruneSessionFiles,
+    writeSessionFiles,
     get supportedPlatform() { return supportedPlatform; },
   };
 }

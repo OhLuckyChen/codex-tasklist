@@ -8,6 +8,8 @@ import type {
   AiChatThreadSnapshot,
   Attachment,
   Comment,
+  Connector,
+  ConnectorDraft,
   DevelopmentScan,
   IssueRelationType,
   GeneratedKnowledgeProposal,
@@ -116,6 +118,51 @@ export async function chooseLocalDirectory(): Promise<string | null> {
 
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
   return request<TaskboardMetadata>("/api/meta", { signal });
+}
+
+export async function listConnectors(signal?: AbortSignal): Promise<Connector[]> {
+  const data = await request<{ connectors: Connector[] }>("/api/connectors", { signal });
+  return data.connectors ?? [];
+}
+
+export async function createConnector(draft: ConnectorDraft): Promise<Connector> {
+  const data = await request<{ connector: Connector }>("/api/connectors", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  return data.connector;
+}
+
+export async function updateConnector(
+  connector: Connector,
+  changes: Partial<ConnectorDraft>,
+): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(connector.id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ version: connector.version, ...changes }),
+    },
+  );
+  return data.connector;
+}
+
+export async function setDefaultConnector(connector: Connector): Promise<Connector> {
+  const data = await request<{ connector: Connector }>(
+    `/api/connectors/${encodeURIComponent(connector.id)}/default`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version: connector.version }),
+    },
+  );
+  return data.connector;
+}
+
+export async function deleteConnector(connector: Connector): Promise<void> {
+  await request<{ id: string }>(`/api/connectors/${encodeURIComponent(connector.id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ version: connector.version }),
+  });
 }
 
 export async function getAiChatCatalog(

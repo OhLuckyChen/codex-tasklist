@@ -10505,3 +10505,120 @@ kbd {
   .knowledge-question-panel { grid-column: 1 / -1; border-top: 1px solid var(--border); border-left: 0; }
   .knowledge-change-editor { grid-template-columns: 1fr; }
 }
+
+/* ===== Runtime connectors ===== */
+.board-setting-link {
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.board-setting-link:hover { background: var(--hover-bg); }
+
+.connectors-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 24px;
+}
+.connectors-panel,
+.connectors-editor {
+  background: var(--bg, #fff);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  width: min(560px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.connectors-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.connectors-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.connectors-close {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+  font: inherit;
+}
+.connectors-intro { margin: 0; padding: 10px 16px; font-size: 12px; color: var(--muted); }
+.connectors-body { padding: 8px 16px 16px; overflow-y: auto; }
+.connectors-group { margin-bottom: 12px; }
+.connectors-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 0;
+}
+.connectors-add {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.connectors-add:hover { background: var(--hover-bg); }
+.connectors-empty { margin: 4px 0; font-size: 12px; color: var(--muted); }
+.connectors-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.connectors-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.connectors-item.is-default { border-color: var(--accent); }
+.connectors-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.connectors-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.connectors-name em { font-style: normal; font-size: 10px; color: var(--accent); }
+.connectors-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.connectors-item-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.connectors-item-actions button,
+.connectors-danger {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.connectors-item-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.connectors-danger { color: var(--danger, #c0392b); }
+.connectors-error { padding: 8px 16px; font-size: 12px; color: var(--danger, #c0392b); background: rgba(192, 57, 43, 0.08); border-bottom: 1px solid var(--border); }
+
+.connectors-editor form { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+.connectors-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.connectors-field input,
+.connectors-field textarea { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 13px; color: var(--text); background: var(--bg, #fff); }
+.connectors-checkbox { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.connectors-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.connectors-editor-actions button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.connectors-editor-actions button[type="submit"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+.connectors-editor-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+

@@ -40,6 +40,7 @@ import {
   listKnowledgeProposals,
   unlinkTaskThread as unlinkTaskThreadRequest,
   listComments,
+  listConnectors,
   listDevelopmentContexts,
   listDeviceWorkspaces,
   setDeviceWorkspace,
@@ -61,6 +62,7 @@ import {
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { AiChat } from "./components/AiChat";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
+import { ConnectorsPanel } from "./components/ConnectorsPanel";
 import { DraftBox } from "./components/DraftBox";
 import { FavoriteTaskList } from "./components/FavoriteTaskList";
 import { HiddenColumns } from "./components/HiddenColumns";
@@ -100,6 +102,7 @@ import {
   type KnowledgeSourceType,
   type Project,
   type Task,
+  type Connector,
   type TaskboardMetadata,
   type TaskDraft,
   type TaskRuntime,
@@ -788,6 +791,8 @@ export function App() {
   const [claudeRuntimeSupported, setClaudeRuntimeSupported] = useState(false);
   const [ompRuntimeSupported, setOmpRuntimeSupported] = useState(false);
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [showConnectorsPanel, setShowConnectorsPanel] = useState(false);
   const [localAiChatAvailable, setLocalAiChatAvailable] = useState(false);
   const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -1827,6 +1832,7 @@ export function App() {
       setOmpRuntimeSupported(metadata.ompRuntime === true);
       setLocalAiChatAvailable(metadata.capabilities?.localAiChat === true);
       setLocalKnowledgeAvailable(metadata.capabilities?.localKnowledge === true);
+      setConnectors(metadata.connectors ?? []);
       setDeviceWorkspacePaths((current) => {
         const next = workspaces;
         if (JSON.stringify(next) === JSON.stringify(current)) return current;
@@ -3678,7 +3684,15 @@ export function App() {
               applyToAllProjects={globalColumnVisibility !== null}
               onStatusVisibilityChange={updateColumnVisibility}
               onApplyToAllProjectsChange={updateGlobalColumnVisibility}
+              onOpenConnectors={() => setShowConnectorsPanel(true)}
             />
+            {showConnectorsPanel && (
+              <ConnectorsPanel
+                connectors={connectors}
+                onChanged={() => { void listConnectors().then(setConnectors); }}
+                onClose={() => setShowConnectorsPanel(false)}
+              />
+            )}
             {(search || activeFilterCount > 0 || favoriteTasksOnly) && (
               <button
                 className="clear-filter"

@@ -81,6 +81,7 @@ test("health and the default local project are available", async () => {
     projectKnowledgeSkillPath: path.resolve("skills/project-knowledge-builder/SKILL.md"),
     claudeRuntime: true,
     ompRuntime: true,
+    connectors: [],
     capabilities: { localAiChat: true, localKnowledge: true },
   });
 
