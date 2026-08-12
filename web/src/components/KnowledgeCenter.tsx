@@ -14,6 +14,11 @@ import {
   publishKnowledgeProposal,
   searchKnowledge,
   updateKnowledgeProposal,
+  createKnowledgeQuestionnaire,
+  listKnowledgeQuestionnaires,
+  reviewKnowledgeAnswer,
+  submitKnowledgeAnswer,
+  updateKnowledgeQuestionnaire,
 } from "../api";
 import type {
   DevelopmentScan,
@@ -26,10 +31,11 @@ import type {
   KnowledgeProposalChange,
   KnowledgeSearchResult,
   KnowledgeSourceType,
+  KnowledgeQuestionnaire,
   Project,
 } from "../types";
 
-type KnowledgeSection = "published" | "pending" | "health";
+type KnowledgeSection = "published" | "pending" | "health" | "questionnaires";
 
 const SOURCE_LABELS: Record<KnowledgeSourceType, string> = {
   project_scan: "项目分析",
@@ -154,6 +160,10 @@ export function KnowledgeCenter({
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResult[]>([]);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<KnowledgeAnswer | null>(null);
+  const [questionnaires, setQuestionnaires] = useState<KnowledgeQuestionnaire[]>([]);
+  const [questionnaireTitle, setQuestionnaireTitle] = useState("");
+  const [questionnaireScope, setQuestionnaireScope] = useState<"project" | "page" | "gap">("page");
+  const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
 
   const contextOptions = useMemo(() => {
     const rootBranch = developmentScan.contexts.find((context) => context.type === "branch");
@@ -240,7 +250,8 @@ export function KnowledgeCenter({
         ))
         : null,
       listKnowledgeProposals(project.id),
-    ]).then(async ([nextOverview, nextProposals]) => {
+      listKnowledgeQuestionnaires(project.id),
+    ]).then(async ([nextOverview, nextProposals, nextQuestionnaires]) => {
       if (cancelled) return;
       if (nextOverview) {
         setOverview(nextOverview);
@@ -253,6 +264,7 @@ export function KnowledgeCenter({
         }
       }
       setProposals(nextProposals);
+      setQuestionnaires(nextQuestionnaires);
       setSelectedProposalId((current) => (
         current && nextProposals.some((proposal) => proposal.id === current)
           ? current
@@ -429,6 +441,13 @@ export function KnowledgeCenter({
     }
   }
 
+  async function refreshQuestionnaires() { setQuestionnaires(await listKnowledgeQuestionnaires(project.id)); }
+  async function createQuestionnaire() {
+    if (!questionnaireTitle.trim()) return;
+    setBusy("questionnaire"); setError(null);
+    try { await createKnowledgeQuestionnaire(project.id, { scopeType: questionnaireScope, scopeRef: questionnaireScope === "page" ? page?.path ?? null : null, title: questionnaireTitle, questions: [{ context: page?.title ?? "项目知识缺口", prompt: "请说明该业务规则在实际工作中的判断标准与例外情况。", gapReason: "已检索当前知识页与相关代码，但未找到该规则的业务口径或例外处理说明。", checkedSources: [page?.path ?? "当前项目知识与源码检索"], targetRole: "熟悉该业务流程的负责人", answerFormat: "请给出规则、适用条件、例外和一个真实示例。", knowledgeTarget: page?.path ?? "项目知识" }] }); await refreshQuestionnaires(); setQuestionnaireTitle(""); setNotice("候选题已保存为草稿；请确认后发布问卷。"); } catch (e) { setError(messageFor(e)); } finally { setBusy(null); }
+  }
+
   return (
     <section className="knowledge-center">
       <header className="knowledge-header">
@@ -478,6 +497,7 @@ export function KnowledgeCenter({
         <button type="button" className={section === "health" ? "active" : ""} onClick={() => setSection("health")}>
           健康状态 {overview?.health.stale ? overview.health.stale : ""}
         </button>
+        <button type="button" className={section === "questionnaires" ? "active" : ""} onClick={() => setSection("questionnaires")}>缺口问卷 {questionnaires.length || ""}</button>
       </nav>
 
       {error && <div className="knowledge-message error" role="alert">{error}</div>}
@@ -661,6 +681,23 @@ export function KnowledgeCenter({
               })}>生成修订提案</button>
             </article>
           ))}
+        </div>
+      )}
+
+      {!loading && section === "questionnaires" && (
+        <div className="knowledge-questionnaires">
+          <header><h3>缺口问卷</h3><p>只收集当前源码、文档和已确认知识无法可靠推断的业务事实。</p></header>
+          <div className="knowledge-questionnaire-create">
+            <select value={questionnaireScope} onChange={(event) => setQuestionnaireScope(event.target.value as typeof questionnaireScope)}><option value="page">知识主题/页面</option><option value="project">全项目</option><option value="gap">指定知识缺口</option></select>
+            <input value={questionnaireTitle} onChange={(event) => setQuestionnaireTitle(event.target.value)} placeholder="例如：订单取消规则待确认" />
+            <button type="button" disabled={Boolean(busy) || !questionnaireTitle.trim()} onClick={() => void createQuestionnaire()}>生成候选题</button>
+          </div>
+          {questionnaires.map((questionnaire) => <article className="knowledge-questionnaire" key={questionnaire.id}>
+            <header><div><h3>{questionnaire.title}</h3><p>{questionnaire.scopeType} · {questionnaire.status}</p></div>{questionnaire.status === "draft" && <button type="button" onClick={() => void updateKnowledgeQuestionnaire(project.id, questionnaire.id, "open").then(setQuestionnaires)}>确认并发布</button>}</header>
+            {questionnaire.questions.map((item) => <section key={item.id}><h4>{item.prompt}</h4><p><strong>不可推断说明：</strong>{item.gapReason}</p><p><strong>已检查来源：</strong>{item.checkedSources.join("、")}</p><p><strong>答题角色：</strong>{item.targetRole}；<strong>回答格式：</strong>{item.answerFormat}</p><p><strong>拟补全：</strong>{item.knowledgeTarget}</p>
+              {questionnaire.status === "open" && <div><textarea value={answerDrafts[item.id] ?? ""} onChange={(event) => setAnswerDrafts((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="填写业务事实；不清楚也可明确说明" /><button type="button" disabled={!answerDrafts[item.id]?.trim()} onClick={() => void submitKnowledgeAnswer(item.id, answerDrafts[item.id], "medium").then(refreshQuestionnaires)}>提交回答</button></div>}
+              {item.answers.map((itemAnswer) => <div className="knowledge-answer-review" key={itemAnswer.id}><p>{itemAnswer.content}</p><small>{itemAnswer.author.name} · {itemAnswer.status}</small>{itemAnswer.status === "submitted" && <span><button type="button" onClick={() => void reviewKnowledgeAnswer(itemAnswer.id, "accepted").then(refreshQuestionnaires)}>采纳并生成提案</button><button type="button" onClick={() => void reviewKnowledgeAnswer(itemAnswer.id, "needs_revision", "请补充边界条件").then(refreshQuestionnaires)}>退回补充</button><button type="button" onClick={() => void reviewKnowledgeAnswer(itemAnswer.id, "rejected").then(refreshQuestionnaires)}>驳回</button></span>}{itemAnswer.proposalId && <small>已生成待确认知识提案：{itemAnswer.proposalId}</small>}</div>)}</section>)}
+          </article>)}
         </div>
       )}
     </section>

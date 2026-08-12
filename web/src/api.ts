@@ -19,6 +19,8 @@ import type {
   KnowledgeSourceType,
   ProjectBotConfig,
   ProjectBotDraft,
+  KnowledgeQuestionnaire,
+  KnowledgeQuestionnaireScope,
   Project,
   Task,
   TaskboardMetadata,
@@ -556,6 +558,18 @@ export async function publishKnowledgeProposal(
   });
   return data.receipt;
 }
+
+export async function listKnowledgeQuestionnaires(projectId: string): Promise<KnowledgeQuestionnaire[]> {
+  return (await request<{ questionnaires: KnowledgeQuestionnaire[] }>(`/api/projects/${encodeURIComponent(projectId)}/knowledge-questionnaires`)).questionnaires;
+}
+export async function createKnowledgeQuestionnaire(projectId: string, input: { scopeType: KnowledgeQuestionnaireScope; scopeRef?: string | null; title: string; questions: Array<{ context: string; prompt: string; gapReason: string; checkedSources: string[]; targetRole: string; answerFormat: string; knowledgeTarget: string }> }): Promise<KnowledgeQuestionnaire> {
+  return (await request<{ questionnaire: KnowledgeQuestionnaire }>(`/api/projects/${encodeURIComponent(projectId)}/knowledge-questionnaires`, { method: "POST", body: JSON.stringify(input) })).questionnaire;
+}
+export async function updateKnowledgeQuestionnaire(projectId: string, questionnaireId: string, status: "open" | "closed"): Promise<KnowledgeQuestionnaire[]> {
+  return (await request<{ questionnaires: KnowledgeQuestionnaire[] }>(`/api/projects/${encodeURIComponent(projectId)}/knowledge-questionnaires/${encodeURIComponent(questionnaireId)}`, { method: "PATCH", body: JSON.stringify({ status }) })).questionnaires;
+}
+export async function submitKnowledgeAnswer(questionId: string, content: string, confidence: "high" | "medium" | "low" | "unknown") { return request<{ answerId: string }>(`/api/knowledge-questions/${encodeURIComponent(questionId)}/answers`, { method: "POST", body: JSON.stringify({ content, confidence }) }); }
+export async function reviewKnowledgeAnswer(answerId: string, status: "accepted" | "needs_revision" | "rejected", reviewNote = "") { return request<{ proposal: KnowledgeProposal | null }>(`/api/knowledge-answers/${encodeURIComponent(answerId)}/review`, { method: "POST", body: JSON.stringify({ status, reviewNote }) }); }
 
 export async function listTasks(projectId?: string, signal?: AbortSignal): Promise<Task[]> {
   const params = new URLSearchParams({ archived: "all" });

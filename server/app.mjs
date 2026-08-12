@@ -1093,6 +1093,18 @@ function parseKnowledgeProposalPatch(body) {
   return { version: parseVersion(body.version), changes };
 }
 
+function parseQuestionnaireCreate(body) {
+  assertPlainObject(body); assertAllowedKeys(body, new Set(["scopeType", "scopeRef", "title", "questions"]));
+  const scopeType = stringField(body.scopeType, "scopeType", { required: true, maxLength: 16 });
+  if (!["project", "page", "gap"].includes(scopeType)) throw new ApiError(400, "INVALID_FIELD", "Unknown questionnaire scope");
+  if (!Array.isArray(body.questions) || body.questions.length < 1 || body.questions.length > 30) throw new ApiError(400, "INVALID_FIELD", "questions must contain 1 to 30 items");
+  return { scopeType, scopeRef: stringField(body.scopeRef ?? null, "scopeRef", { nullable: true, maxLength: 4096 }), title: stringField(body.title, "title", { required: true, maxLength: 240 }), questions: body.questions.map((question) => {
+    assertPlainObject(question); assertAllowedKeys(question, new Set(["context", "prompt", "gapReason", "checkedSources", "targetRole", "answerFormat", "knowledgeTarget"]));
+    if (!Array.isArray(question.checkedSources) || question.checkedSources.length < 1) throw new ApiError(400, "MISSING_GAP_EVIDENCE", "Each question requires checkedSources");
+    return { context: stringField(question.context, "context", { required: true, maxLength: 4000 }), prompt: stringField(question.prompt, "prompt", { required: true, maxLength: 4000 }), gapReason: stringField(question.gapReason, "gapReason", { required: true, maxLength: 4000 }), checkedSources: question.checkedSources.map((source) => stringField(source, "checkedSource", { required: true, maxLength: 1024 })), targetRole: stringField(question.targetRole, "targetRole", { required: true, maxLength: 240 }), answerFormat: stringField(question.answerFormat, "answerFormat", { required: true, maxLength: 1000 }), knowledgeTarget: stringField(question.knowledgeTarget, "knowledgeTarget", { required: true, maxLength: 1000 }) };
+  }) };
+}
+
 class EventHub {
   constructor() {
     this.clients = new Set();
@@ -2531,6 +2543,19 @@ export function createTaskboardServer(options = {}) {
         }
         return methodNotAllowed(response, ["GET", "POST"]);
       }
+
+      const questionnairesRoute = pathname.match(/^\/api\/projects\/([^/]+)\/knowledge-questionnaires(?:\/([^/]+))?$/);
+      if (questionnairesRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(questionnairesRoute[1], "Project id")); const questionnaireId = questionnairesRoute[2] ? decodeRouteSegment(questionnairesRoute[2], "Questionnaire id") : null;
+        if (!questionnaireId && request.method === "GET") return sendJson(response, 200, { questionnaires: database.listKnowledgeQuestionnaires(projectId) });
+        if (!questionnaireId && request.method === "POST") return sendJson(response, 201, { questionnaire: database.createKnowledgeQuestionnaire({ projectId, ...parseQuestionnaireCreate(await readJson(request)), actor: actorFromRequest(request) }) });
+        if (questionnaireId && request.method === "PATCH") { const body = await readJson(request); assertPlainObject(body); assertAllowedKeys(body, new Set(["status"])); const status = stringField(body.status, "status", { required: true, maxLength: 16 }); if (!["open", "closed"].includes(status)) throw new ApiError(400, "INVALID_FIELD", "status must be open or closed"); database.updateKnowledgeQuestionnaire(questionnaireId, status); return sendJson(response, 200, { questionnaires: database.listKnowledgeQuestionnaires(projectId) }); }
+        return methodNotAllowed(response, ["GET", "POST", "PATCH"]);
+      }
+      const answerRoute = pathname.match(/^\/api\/knowledge-questions\/([^/]+)\/answers$/);
+      if (answerRoute && request.method === "POST") { const body = await readJson(request); assertPlainObject(body); assertAllowedKeys(body, new Set(["content", "confidence"])); const confidence = stringField(body.confidence, "confidence", { required: true, maxLength: 16 }); if (!["high", "medium", "low", "unknown"].includes(confidence)) throw new ApiError(400, "INVALID_FIELD", "Unknown confidence"); const answerId = database.submitKnowledgeAnswer(decodeRouteSegment(answerRoute[1], "Question id"), { content: stringField(body.content, "content", { required: true, maxLength: 20000 }), confidence, actor: actorFromRequest(request) }); return sendJson(response, 201, { answerId }); }
+      const reviewRoute = pathname.match(/^\/api\/knowledge-answers\/([^/]+)\/review$/);
+      if (reviewRoute && request.method === "POST") { const body = await readJson(request); assertPlainObject(body); assertAllowedKeys(body, new Set(["status", "reviewNote"])); const status = stringField(body.status, "status", { required: true, maxLength: 20 }); if (!["accepted", "needs_revision", "rejected"].includes(status)) throw new ApiError(400, "INVALID_FIELD", "Unknown answer review status"); const answerId = decodeRouteSegment(reviewRoute[1], "Answer id"); const actor = actorFromRequest(request); const context = database.knowledgeAnswerContext(answerId); if (!context) throw new ApiError(404, "KNOWLEDGE_ANSWER_NOT_FOUND", "Knowledge answer does not exist"); if (context.status !== "submitted") throw new ApiError(409, "INVALID_ANSWER_TRANSITION", "Only submitted answers can be reviewed"); let proposal = null; if (status === "accepted") { const targetPath = `docs/knowledge/questionnaire/${answerId}.md`; const afterContent = `---\nid: questionnaire.${answerId}\ntitle: ${context.knowledge_target}\nkind: business-fact\nupdated_at: ${new Date().toISOString()}\nsources:\n  - type: questionnaire_answer\n    ref: ${answerId}\n---\n# ${context.knowledge_target}\n\n## 问题\n\n${context.prompt}\n\n## 人工确认回答\n\n${context.content}\n`; proposal = database.createKnowledgeProposal({ projectId: context.project_id, title: `待确认：${context.knowledge_target}`, sourceType: "question", sourceSnapshot: { questionnaireAnswerId: answerId, question: context.prompt }, summary: "人工问卷回答已审核采纳；此新增知识页仍须经人工确认发布。", changes: [{ targetPath, operation: "create", baseDigest: null, beforeContent: null, afterContent }], actor }); } database.reviewKnowledgeAnswer(answerId, status, stringField(body.reviewNote ?? "", "reviewNote", { maxLength: 4000 }), actor, proposal?.id ?? null); return sendJson(response, 200, { proposal }); }
 
       const knowledgeProposalRoute = pathname.match(/^\/api\/knowledge-proposals\/([^/]+)$/);
       if (knowledgeProposalRoute) {
