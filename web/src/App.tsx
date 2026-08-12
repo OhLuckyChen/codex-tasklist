@@ -3779,6 +3779,15 @@ export function App() {
                     <LinearIcon name="myIssues" />
                     全局任务视角
                   </button>
+                  <button
+                    className="project-create-trigger"
+                    type="button"
+                    aria-label="运行时连接器"
+                    onClick={() => setShowConnectorsPanel(true)}
+                  >
+                    <LinearIcon name="displayOptions" />
+                    连接器
+                  </button>
                 </div>
               </div>
               <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
@@ -3790,6 +3799,13 @@ export function App() {
                 onCancel={() => setProjectCreatorOpen(false)}
                 onChooseWorkspace={chooseProjectWorkspace}
                 onSubmit={createProjectFromHome}
+              />
+            )}
+            {showConnectorsPanel && (
+              <ConnectorsPanel
+                connectors={connectors}
+                onChanged={() => { void listConnectors().then(setConnectors); }}
+                onClose={() => setShowConnectorsPanel(false)}
               />
             )}
             {projectsLoading ? (
