@@ -53,6 +53,13 @@ const HEALTH_LABELS = {
   missing_sources: "缺少来源",
 };
 
+const QUESTIONNAIRE_HEALTH_REASONS = {
+  stale: "知识页引用的源码、配置、测试或文档已变化，当前知识可能过期，无法直接作为可靠事实使用。",
+  unverified: "知识页来源尚未完成可验证绑定，现有材料不足以证明该口径仍然准确。",
+  missing_sources: "知识页缺少可回跳来源，无法确认该业务事实来自源码、文档还是人工确认。",
+  fresh: "",
+};
+
 function messageFor(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === "PROJECT_WORKSPACE_REQUIRED") return "请先在项目首页选择本地项目目录。";
@@ -443,11 +450,37 @@ export function KnowledgeCenter({
 
   async function refreshQuestionnaires() { setQuestionnaires(await listKnowledgeQuestionnaires(project.id)); }
   async function createQuestionnaire() {
-    setBusy("questionnaire"); setError(null);
     const focus = questionnaireTitle.trim();
-    const scopeLabel = questionnaireScope === "project" ? "全项目" : questionnaireScope === "gap" ? "指定知识缺口" : page?.title ?? "当前知识主题";
-    const generatedTitle = focus || `${scopeLabel}待确认业务事实`;
-    try { await createKnowledgeQuestionnaire(project.id, { scopeType: questionnaireScope, scopeRef: questionnaireScope === "page" ? page?.path ?? null : null, title: generatedTitle, questions: [{ context: focus || page?.title || "项目知识缺口", prompt: focus ? `请补充「${focus}」的实际业务规则、判断标准与例外情况。` : "请说明该业务规则在实际工作中的判断标准与例外情况。", gapReason: "已检索当前知识页、项目文档、源码和已确认知识，但未找到可可靠推出该事实的业务口径或例外处理说明。", checkedSources: [page?.path ?? "当前项目知识", "项目源码/配置/测试", "已确认知识库"], targetRole: "熟悉该业务流程的负责人", answerFormat: "请给出规则、适用条件、例外和一个真实示例。", knowledgeTarget: page?.path ?? "项目知识" }] }); await refreshQuestionnaires(); setQuestionnaireTitle(""); setNotice("候选题已保存为草稿；请确认后发布问卷。"); } catch (e) { setError(messageFor(e)); } finally { setBusy(null); }
+    const pages = overview?.pages ?? [];
+    const candidates = questionnaireScope === "page"
+      ? pages.filter((candidate) => candidate.path === page?.path)
+      : pages.filter((candidate) => candidate.health !== "fresh");
+    const gapPages = candidates.filter((candidate) => candidate.health !== "fresh");
+    if (gapPages.length === 0) {
+      setNotice("没有生成问卷：当前范围内没有可由健康检查证明的知识缺口。请先运行“检查更新”，或切换到存在“可能过期 / 来源待验证 / 缺少来源”的知识页。");
+      setError(null);
+      return;
+    }
+    const limitedGapPages = gapPages.slice(0, 5);
+    const generatedTitle = focus || (questionnaireScope === "project"
+      ? `全项目知识缺口确认（${limitedGapPages.length} 项）`
+      : `${limitedGapPages[0].title}知识缺口确认`);
+    const questions = limitedGapPages.map((candidate) => ({
+      context: `${candidate.title}（${candidate.path}）`,
+      prompt: focus
+        ? `请确认「${focus}」在《${candidate.title}》中的真实业务口径、适用条件和例外。`
+        : `请确认《${candidate.title}》中缺少可靠来源支撑的业务口径、适用条件和例外。`,
+      gapReason: QUESTIONNAIRE_HEALTH_REASONS[candidate.health],
+      checkedSources: [
+        candidate.path,
+        ...candidate.sources.map((source) => source.ref).filter((source): source is string => Boolean(source)),
+      ],
+      targetRole: "该知识主题对应业务流程的负责人或长期维护人",
+      answerFormat: "请按“确认事实 / 适用条件 / 例外情况 / 真实示例 / 仍不确定的信息”回答。",
+      knowledgeTarget: candidate.path,
+    }));
+    setBusy("questionnaire"); setError(null);
+    try { await createKnowledgeQuestionnaire(project.id, { scopeType: questionnaireScope, scopeRef: questionnaireScope === "page" ? limitedGapPages[0].path : null, title: generatedTitle, questions }); await refreshQuestionnaires(); setQuestionnaireTitle(""); setNotice("候选题已保存为草稿；请确认后发布问卷。"); } catch (e) { setError(messageFor(e)); } finally { setBusy(null); }
   }
 
   return (
