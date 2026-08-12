@@ -65,6 +65,12 @@ export interface Connector {
   updatedAt: string;
 }
 
+export interface CodexThreadProgress {
+  completed: number | null;
+  total: number | null;
+  running: boolean;
+}
+
 export type ConnectorDraft = {
   name: string;
   runtime: ConnectorRuntime;
@@ -373,6 +379,7 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   statusChangedAt: string;
+  startDate: string | null;
 }
 
 export interface Comment {
@@ -428,6 +435,7 @@ export interface TaskDraft {
   workflowId: string | null;
   developmentContext: DevelopmentContext | null;
   dueDate: string | null;
+  startDate: string | null;
   recurrence: Recurrence | null;
 }
 

@@ -8,6 +8,7 @@ import type {
   AiChatThreadSnapshot,
   Attachment,
   Comment,
+  CodexThreadProgress,
   Connector,
   ConnectorDraft,
   DevelopmentScan,
@@ -118,6 +119,18 @@ export async function chooseLocalDirectory(): Promise<string | null> {
 
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
   return request<TaskboardMetadata>("/api/meta", { signal });
+}
+
+export async function getCodexThreadProgress(
+  threadIds: string[],
+  signal?: AbortSignal,
+): Promise<Record<string, CodexThreadProgress | null>> {
+  const query = new URLSearchParams();
+  for (const threadId of threadIds) query.append("threadId", threadId);
+  const data = await request<{
+    progress: Record<string, CodexThreadProgress | null>;
+  }>(`/api/local/codex-thread-progress?${query}`, { signal });
+  return data.progress;
 }
 
 export async function listConnectors(signal?: AbortSignal): Promise<Connector[]> {

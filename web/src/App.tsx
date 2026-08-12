@@ -31,6 +31,7 @@ import {
   createClaudeSession,
   createOmpSession,
   generateKnowledgeProposal,
+  getCodexThreadProgress,
   getKnowledgeRun,
   resumeClaudeSession,
   resumeOmpSession,
@@ -102,6 +103,7 @@ import {
   type KnowledgeSourceType,
   type Project,
   type Task,
+  type CodexThreadProgress,
   type Connector,
   type TaskboardMetadata,
   type TaskDraft,
@@ -648,6 +650,7 @@ function taskToDraft(task: Task): TaskDraft {
     workflowId: task.workflowId,
     developmentContext: task.developmentContext,
     dueDate: task.dueDate,
+    startDate: task.startDate,
     recurrence: task.recurrence,
   };
 }
@@ -798,6 +801,9 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [codexThreadProgress, setCodexThreadProgress] = useState<
+    Record<string, CodexThreadProgress | null>
+  >({});
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [hasLoadedTasks, setHasLoadedTasks] = useState(false);
@@ -1157,6 +1163,7 @@ export function App() {
       workflowId: null,
       developmentContext: null,
       dueDate: null,
+      startDate: null,
       recurrence: null,
     });
     setTasks((current) => sortTasks([saved, ...current]));
@@ -2064,6 +2071,53 @@ export function App() {
   );
 
   const activeFilterCount = taskFilterCount(filters);
+
+  // Poll Codex session plan-progress for in_progress tasks linked to a Codex
+  // thread. Non-codex (claude/omp) threads return null from the backend and are
+  // simply skipped. Derived from upstream v0.2.3.
+  const trackedCodexThreadIds = useMemo(() => [...new Set(tasks
+    .filter((task) => task.status === "in_progress" && task.threadId)
+    .map((task) => normalizeCodexThreadId(task.threadId))
+    .filter((value): value is string => value !== null))].sort(), [tasks]);
+  const trackedCodexThreadIdsKey = trackedCodexThreadIds.join(",");
+
+  useEffect(() => {
+    if (trackedCodexThreadIds.length === 0) {
+      setCodexThreadProgress({});
+      return;
+    }
+    let disposed = false;
+    const sync = async () => {
+      try {
+        const progress = await getCodexThreadProgress(trackedCodexThreadIds);
+        if (!disposed) {
+          setCodexThreadProgress((current) => (
+            JSON.stringify(current) === JSON.stringify(progress) ? current : progress
+          ));
+        }
+      } catch {}
+    };
+    void sync();
+    const timer = window.setInterval(sync, 2_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [trackedCodexThreadIdsKey]);
+
+  const progressByTaskId = useMemo(() => {
+    const map = new Map<string, CodexThreadProgress>();
+    for (const task of tasks) {
+      if (task.status !== "in_progress" || !task.threadId) continue;
+      const normalized = normalizeCodexThreadId(task.threadId);
+      if (!normalized) continue;
+      const progress = codexThreadProgress[normalized];
+      if (progress && progress.total !== null && progress.total > 0) {
+        map.set(task.id, progress);
+      }
+    }
+    return map;
+  }, [codexThreadProgress, tasks]);
 
   const tasksByStatus = useMemo(() => {
     return Object.fromEntries(
@@ -3999,6 +4053,7 @@ export function App() {
                   status={status}
                   statusIndex={TASK_STATUSES.indexOf(status)}
                   tasks={tasksByStatus[status]}
+                  progressByTaskId={progressByTaskId}
                   projectNames={isGlobalBoard ? projectNames : undefined}
                   isDropTarget={dropTarget === status}
                   isColumnDragging={draggedColumnStatus === status}

@@ -138,6 +138,7 @@ export function TaskEditor({
   const [workflowId, setWorkflowId] = useState(task?.workflowId ?? initialDraft?.workflowId ?? "");
   const [developmentContext, setDevelopmentContext] = useState<DevelopmentContext | null>(task?.developmentContext ?? initialDraft?.developmentContext ?? null);
   const [dueDate, setDueDate] = useState(task?.dueDate ?? initialDraft?.dueDate ?? "");
+  const [startDate, setStartDate] = useState(task?.startDate ?? initialDraft?.startDate ?? "");
   const [recurrence, setRecurrence] = useState<Recurrence | null>(task?.recurrence ?? initialDraft?.recurrence ?? null);
   const [menu, setMenu] = useState<"labels" | "more" | "due" | "recurrence" | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -189,6 +190,7 @@ export function TaskEditor({
       workflowId: workflowId || null,
       developmentContext,
       dueDate: dueDate || null,
+      startDate: startDate || null,
       recurrence,
     };
   }
@@ -405,6 +407,7 @@ export function TaskEditor({
             </label>
 
             {dueDate && <button className="property-control" type="button" onClick={() => setMenu("due")}><span>截止 {displayDate(dueDate)}</span></button>}
+            {startDate && <button className="property-control" type="button" onClick={() => setMenu("due")}><span>开始 {displayDate(startDate)}</span></button>}
             {recurrence && <button className="property-control" type="button" onClick={() => setMenu("recurrence")}><span>每 {recurrence.interval} {RECURRENCE_UNITS[recurrence.unit]}</span></button>}
 
             <div className="composer-menu-anchor">
@@ -418,10 +421,11 @@ export function TaskEditor({
               {menu === "due" && (
                 <div className="composer-popover due-popover">
                   <label className="custom-date-row"><span>自定义…</span><input type="date" value={dueDate} onChange={(event) => chooseDueDate(event.target.value)} /></label>
+                  <label className="custom-date-row"><span>开始日期</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
                   <button type="button" onClick={() => chooseDueDate(dateFromNow(1))}><strong>明天</strong><span>{displayDate(dateFromNow(1))}</span></button>
                   <button type="button" onClick={() => chooseDueDate(endOfWeek())}><strong>本周结束</strong><span>{displayDate(endOfWeek())}</span></button>
                   <button type="button" onClick={() => chooseDueDate(dateFromNow(7))}><strong>一周后</strong><span>{displayDate(dateFromNow(7))}</span></button>
-                  {dueDate && <button className="destructive-menu-row" type="button" onClick={() => { setDueDate(""); setRecurrence(null); setMenu(null); }}>清除截止日期</button>}
+                  {dueDate && <button className="destructive-menu-row" type="button" onClick={() => { setDueDate(""); setRecurrence(null); setStartDate(""); setMenu(null); }}>清除截止日期</button>}
                 </div>
               )}
               {menu === "recurrence" && (

@@ -1,5 +1,5 @@
 import type { MouseEvent } from "react";
-import { TASK_STATUSES, type Task, type TaskPriority, type TaskStatus } from "../types";
+import { TASK_STATUSES, type CodexThreadProgress, type Task, type TaskPriority, type TaskStatus } from "../types";
 import { ActorAvatar } from "./ActorAvatar";
 import { LinearIcon, LinearPriorityIcon } from "./LinearIcon";
 
@@ -22,6 +22,7 @@ function descriptionPreview(description: string) {
 interface TaskCardProps {
   task: Task;
   projectName?: string;
+  progress?: CodexThreadProgress | null;
   statusIndex: number;
   isDragging: boolean;
   dragShift: number;
@@ -41,6 +42,7 @@ interface TaskCardProps {
 export function TaskCard({
   task,
   projectName,
+  progress,
   statusIndex,
   isDragging,
   dragShift,
@@ -145,6 +147,20 @@ export function TaskCard({
       </div>
 
       <h3 id={`task-${task.id}-title`}>{task.title}</h3>
+
+      {progress && progress.total !== null && progress.total > 0 && progress.completed !== null && (
+        <div className="card-progress-row">
+          <div
+            className={`task-progress-segments${progress.running ? " is-running" : ""}`}
+            aria-label={`处理进度 ${Math.max(0, Math.min(progress.completed, progress.total))}/${progress.total}`}
+            title={`处理进度 ${Math.max(0, Math.min(progress.completed, progress.total))}/${progress.total}`}
+          >
+            {Array.from({ length: progress.total }, (_, index) => (
+              <span className={index < progress.completed! ? "is-complete" : ""} key={index} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {preview && <p className="card-description">{preview}</p>}
 

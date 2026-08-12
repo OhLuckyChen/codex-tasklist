@@ -1977,6 +1977,18 @@ export function TaskDetail({
             </div>
             <label className="detail-property-row">
               <span className="detail-property-icon" aria-hidden="true"><LinearIcon name="calendar" /></span>
+              <span className="detail-property-label">开始日期</span>
+              <input
+                type="date"
+                value={currentTask.startDate ?? ""}
+                disabled={savingProperty === "startDate"}
+                onChange={(event) => void saveTask({
+                  startDate: event.target.value || null,
+                }, "startDate")}
+              />
+            </label>
+            <label className="detail-property-row">
+              <span className="detail-property-icon" aria-hidden="true"><LinearIcon name="calendar" /></span>
               <span className="detail-property-label">截止日期</span>
               <input
                 type="date"

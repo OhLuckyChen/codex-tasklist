@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { DragEvent } from "react";
-import type { Task, TaskStatus } from "../types";
+import type { CodexThreadProgress, Task, TaskStatus } from "../types";
 import { ColumnVisibilityMenu } from "./ColumnVisibilityMenu";
 import { LinearIcon, LinearStatusIcon } from "./LinearIcon";
 import { TaskCard } from "./TaskCard";
@@ -43,6 +43,7 @@ interface BoardColumnProps {
   status: TaskStatus;
   statusIndex: number;
   tasks: Task[];
+  progressByTaskId?: Map<string, CodexThreadProgress>;
   projectNames?: Record<string, string>;
   isDropTarget: boolean;
   isColumnDragging: boolean;
@@ -74,6 +75,7 @@ export function BoardColumn({
   status,
   statusIndex,
   tasks,
+  progressByTaskId,
   projectNames,
   isDropTarget,
   isColumnDragging,
@@ -235,6 +237,7 @@ export function BoardColumn({
               <TaskCard
                 task={task}
                 projectName={projectNames?.[task.projectId]}
+                progress={progressByTaskId?.get(task.id)}
                 statusIndex={statusIndex}
                 isDragging={draggedTaskId === task.id}
                 dragShift={dragShift}
