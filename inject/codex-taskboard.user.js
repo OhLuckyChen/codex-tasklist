@@ -1713,9 +1713,17 @@
       && Date.now() - heartbeat <= HOST_HEARTBEAT_MAX_AGE_MS;
   }
 
-  function requestHost(action, payload = {}) {
+  function hasHostBindingFunction() {
+    return typeof window[HOST_BINDING_NAME] === "function";
+  }
+
+  function requestHost(action, payload = {}, options = {}) {
     const binding = window[HOST_BINDING_NAME];
-    if (!hasLiveHostBinding()) {
+    const requireLiveHeartbeat = options.requireLiveHeartbeat !== false;
+    if (
+      !hasHostBindingFunction()
+      || (requireLiveHeartbeat && !hasLiveHostBinding())
+    ) {
       return Promise.reject(new Error("Taskboard 启动器未运行，无法操作 Codex 对话输入框"));
     }
 
@@ -1737,10 +1745,10 @@
   }
 
   function requestHostEnsure(taskboardUrl) {
-    if (taskboardUrl.origin !== managedTaskboardOrigin() || !hasLiveHostBinding()) {
+    if (taskboardUrl.origin !== managedTaskboardOrigin() || !hasHostBindingFunction()) {
       return Promise.resolve({ managed: false, restarted: false });
     }
-    return requestHost("ensure");
+    return requestHost("ensure", {}, { requireLiveHeartbeat: false });
   }
 
   function requestHostTaskComposerPrefill({

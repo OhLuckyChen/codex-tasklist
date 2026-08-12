@@ -113,13 +113,15 @@ test("the embedded header exposes Codex's native sidebar expansion when collapse
 
 test("opening asks the resident launcher to ensure the service and rebuilds failed frames", () => {
   assert.match(source, /const HOST_BINDING_NAME = "__codexTaskboardHostV1"/);
-  assert.match(source, /return requestHost\("ensure"\)/);
   assert.match(source, /result\.restarted/);
   assert.match(source, /loadTaskboardFrame\(\)/);
   assert.match(source, /waitForFrameReady\(\)/);
   assert.match(source, /hostResponse: onHostResponse/);
   assert.match(source, /function hasLiveHostBinding/);
+  assert.match(source, /function hasHostBindingFunction/);
   assert.match(source, /HOST_HEARTBEAT_MAX_AGE_MS/);
+  assert.match(source, /requireLiveHeartbeat !== false/);
+  assert.match(source, /return requestHost\("ensure", \{\}, \{ requireLiveHeartbeat: false \}\)/);
 });
 
 test("the injected iframe can be cache-busted without reloading the Codex shell", () => {

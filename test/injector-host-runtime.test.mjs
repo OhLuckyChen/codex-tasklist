@@ -362,3 +362,28 @@ test("refresh stops every stale resident before starting one token-verified repl
     ["ready", 9231, 9876, startupToken],
   ]);
 });
+
+test("refresh starts a resident injector when discovery finds none", async () => {
+  const calls = [];
+  const startupToken = "fresh-token";
+  const replacement = await restartResidentInjector(9231, {
+    findResidents: () => [],
+    stopResident: async (pid) => calls.push(["stop", pid]),
+    createStartupToken: () => startupToken,
+    startResident: (port, token) => {
+      calls.push(["start", port, token]);
+      return { pid: 6789, started: true };
+    },
+    waitUntilReady: async (port, pid, token) => calls.push(["ready", port, pid, token]),
+  });
+
+  assert.deepEqual(replacement, {
+    previousPids: [],
+    pid: 6789,
+    restarted: true,
+  });
+  assert.deepEqual(calls, [
+    ["start", 9231, startupToken],
+    ["ready", 9231, 6789, startupToken],
+  ]);
+});

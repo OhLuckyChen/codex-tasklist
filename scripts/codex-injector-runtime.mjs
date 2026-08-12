@@ -212,8 +212,6 @@ export function findResidentInjectorPids({
 
 export async function restartResidentInjector(port, handlers) {
   const previousPids = handlers.findResidents(port);
-  if (previousPids.length === 0) return { previousPids: [], pid: null, restarted: false };
-
   for (const pid of previousPids) await handlers.stopResident(pid);
   const startupToken = handlers.createStartupToken();
   const started = handlers.startResident(port, startupToken);
