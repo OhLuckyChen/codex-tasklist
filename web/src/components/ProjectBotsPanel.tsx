@@ -9,7 +9,7 @@ interface ProjectBotsPanelProps {
   projectId: string;
   projectName: string;
   workspacePath: string;
-  onClose: () => void;
+  onClose?: () => void;
 }
 
 const RUNTIMES: TaskRuntime[] = ["codex", "claude", "omp"];
@@ -50,8 +50,10 @@ export function ProjectBotsPanel({ projectId, projectName, workspacePath, onClos
   }, [projectId]);
 
   useEffect(() => {
+    if (!onClose) return undefined;
+    const close: () => void = onClose;
     function closeWithEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") close();
     }
     document.addEventListener("keydown", closeWithEscape);
     return () => document.removeEventListener("keydown", closeWithEscape);
@@ -90,95 +92,105 @@ export function ProjectBotsPanel({ projectId, projectName, workspacePath, onClos
     });
   }
 
-  return createPortal(
-    <div className="connectors-overlay" onClick={onClose} role="presentation">
-      <div
-        className="connectors-panel project-bots-panel"
-        role="dialog"
-        aria-label="企微机器人配置"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="connectors-header">
-          <h2>{projectName} · 企微机器人</h2>
-          <button type="button" className="connectors-close" onClick={onClose} aria-label="关闭">关闭</button>
-        </header>
-        <p className="connectors-intro">
-          BotID 路由到当前项目；Secret 加密存储，保存后不回显。workspacePath 是知识库与代码只读检索边界。
-        </p>
-        {error && <div className="connectors-error">{error}</div>}
-        <div className="connectors-body">
-          <section className="connectors-group">
-            <div className="connectors-group-heading">
-              <span>机器人配置</span>
-              <button
-                type="button"
-                className="connectors-add"
-                disabled={busy}
-                onClick={() => setEditing({ bot: null, draft: emptyDraft(workspacePath) })}
-              >
-                + 新增
-              </button>
-            </div>
-            {bots.length === 0 && <p className="connectors-empty">尚未配置企微机器人。</p>}
-            <ul className="connectors-list">
-              {bots.map((bot) => (
-                <li key={bot.id} className={`connectors-item${bot.enabled ? " is-default" : ""}`}>
-                  <div className="connectors-item-main">
-                    <span className="connectors-name">
-                      {bot.botId}
-                      {bot.enabled && <em>启用</em>}
-                    </span>
-                    <span className="connectors-meta">
-                      {RUNTIME_LABELS[bot.runtime]} · {bot.connectionStatus} · {bot.workspacePath}
-                    </span>
-                  </div>
-                  <div className="connectors-item-actions">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => run(async () => {
-                        await (bot.connectionStatus === "connected"
-                          ? api.disconnectProjectBot(bot)
-                          : api.connectProjectBot(bot));
-                      })}
-                    >
-                      {bot.connectionStatus === "connected" ? "断开" : "连接"}
-                    </button>
-                    <button type="button" disabled={busy} onClick={() => startEdit(bot)}>编辑</button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      className="connectors-danger"
-                      onClick={() => run(async () => { await api.deleteProjectBot(bot); })}
-                    >
-                      删除
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        </div>
-        {editing && (
-          <ProjectBotEditor
-            draft={editing.draft}
-            editing={Boolean(editing.bot)}
-            busy={busy}
-            onCancel={() => setEditing(null)}
-            onSave={(draft) => run(async () => {
-              if (editing.bot) {
-                const changes = { ...draft };
-                if (!changes.secret?.trim()) delete changes.secret;
-                await api.updateProjectBot(editing.bot, changes);
-              } else {
-                await api.createProjectBot(projectId, draft);
-              }
-            })}
-          />
-        )}
+  const panelContent = (
+    <div
+      className="connectors-panel project-bots-panel"
+      role="dialog"
+      aria-label="企微机器人配置"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <header className="connectors-header">
+        <h2>{projectName} · 企微机器人</h2>
+        {onClose && <button type="button" className="connectors-close" onClick={onClose} aria-label="关闭">关闭</button>}
+      </header>
+      <p className="connectors-intro">
+        BotID 路由到当前项目；Secret 加密存储，保存后不回显。workspacePath 是知识库与代码只读检索边界。
+      </p>
+      {error && <div className="connectors-error">{error}</div>}
+      <div className="connectors-body">
+        <section className="connectors-group">
+          <div className="connectors-group-heading">
+            <span>机器人配置</span>
+            <button
+              type="button"
+              className="connectors-add"
+              disabled={busy}
+              onClick={() => setEditing({ bot: null, draft: emptyDraft(workspacePath) })}
+            >
+              + 新增
+            </button>
+          </div>
+          {bots.length === 0 && <p className="connectors-empty">尚未配置企微机器人。</p>}
+          <ul className="connectors-list">
+            {bots.map((bot) => (
+              <li key={bot.id} className={`connectors-item${bot.enabled ? " is-default" : ""}`}>
+                <div className="connectors-item-main">
+                  <span className="connectors-name">
+                    {bot.botId}
+                    {bot.enabled && <em>启用</em>}
+                  </span>
+                  <span className="connectors-meta">
+                    {RUNTIME_LABELS[bot.runtime]} · {bot.connectionStatus} · {bot.workspacePath}
+                  </span>
+                </div>
+                <div className="connectors-item-actions">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => run(async () => {
+                      await (bot.connectionStatus === "connected"
+                        ? api.disconnectProjectBot(bot)
+                        : api.connectProjectBot(bot));
+                    })}
+                  >
+                    {bot.connectionStatus === "connected" ? "断开" : "连接"}
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => startEdit(bot)}>编辑</button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className="connectors-danger"
+                    onClick={() => run(async () => { await api.deleteProjectBot(bot); })}
+                  >
+                    删除
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
       </div>
-    </div>,
-    document.body,
+      {editing && (
+        <ProjectBotEditor
+          draft={editing.draft}
+          editing={Boolean(editing.bot)}
+          busy={busy}
+          onCancel={() => setEditing(null)}
+          onSave={(draft) => run(async () => {
+            if (editing.bot) {
+              const changes = { ...draft };
+              if (!changes.secret?.trim()) delete changes.secret;
+              await api.updateProjectBot(editing.bot, changes);
+            } else {
+              await api.createProjectBot(projectId, draft);
+            }
+          })}
+        />
+      )}
+    </div>
+  );
+  if (onClose) {
+    return createPortal(
+      <div className="connectors-overlay" onClick={onClose} role="presentation">
+        {panelContent}
+      </div>,
+      document.body,
+    );
+  }
+  return (
+    <section className="project-bots-page">
+      {panelContent}
+    </section>
   );
 }
 
