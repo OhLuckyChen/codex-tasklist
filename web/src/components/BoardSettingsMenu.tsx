@@ -10,7 +10,6 @@ interface BoardSettingsMenuProps {
   onStatusVisibilityChange: (status: TaskStatus, visible: boolean) => void;
   onApplyToAllProjectsChange: (enabled: boolean) => void;
   onOpenConnectors?: () => void;
-  onOpenProjectBots?: () => void;
 }
 
 export function BoardSettingsMenu({
@@ -19,7 +18,6 @@ export function BoardSettingsMenu({
   onStatusVisibilityChange,
   onApplyToAllProjectsChange,
   onOpenConnectors,
-  onOpenProjectBots,
 }: BoardSettingsMenuProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -145,32 +143,18 @@ export function BoardSettingsMenu({
           </button>
         </div>
       </section>
-      {(onOpenConnectors || onOpenProjectBots) && (
+      {onOpenConnectors && (
         <section className="board-settings-section">
-          {onOpenProjectBots && (
-            <button
-              type="button"
-              className="board-setting-link"
-              onClick={() => {
-                setOpen(false);
-                onOpenProjectBots();
-              }}
-            >
-              企微机器人…
-            </button>
-          )}
-          {onOpenConnectors && (
-            <button
-              type="button"
-              className="board-setting-link"
-              onClick={() => {
-                setOpen(false);
-                onOpenConnectors();
-              }}
-            >
-              运行时连接器…
-            </button>
-          )}
+          <button
+            type="button"
+            className="board-setting-link"
+            onClick={() => {
+              setOpen(false);
+              onOpenConnectors();
+            }}
+          >
+            运行时连接器…
+          </button>
         </section>
       )}
     </div>,

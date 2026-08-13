@@ -10,37 +10,12 @@ import { createTaskboardServer } from "../server/index.mjs";
 import { KnowledgeService } from "../server/knowledge-service.mjs";
 
 const runningApps = [];
-const fakeWebSockets = [];
-
-class FakeWecomSocket extends EventTarget {
-  static OPEN = 1;
-
-  readyState = FakeWecomSocket.OPEN;
-  sent = [];
-
-  constructor(url) {
-    super();
-    this.url = url;
-    fakeWebSockets.push(this);
-    queueMicrotask(() => this.dispatchEvent(new Event("open")));
-  }
-
-  send(payload) {
-    this.sent.push(JSON.parse(payload));
-  }
-
-  close() {
-    this.readyState = 3;
-  }
-}
-
 afterEach(async () => {
   while (runningApps.length > 0) {
     const { app, directory } = runningApps.pop();
     await app.close();
     await rm(directory, { recursive: true, force: true });
   }
-  fakeWebSockets.length = 0;
 });
 
 async function startServer(configure, listenOptions = {}) {
@@ -327,261 +302,121 @@ test("a persistent project knowledge run stores its callback as a ready proposal
   );
 });
 
-test("project WeCom bots keep secrets encrypted and route isolated sessions to project knowledge", async () => {
+test("Hermes data flywheel resolves projects and records sourced interactions", async () => {
   let workspacePath;
-  let codexCallsPath;
   const baseUrl = await startServer(async (directory) => {
     workspacePath = path.join(directory, "workspace");
-    await mkdir(workspacePath, { recursive: true });
-    codexCallsPath = path.join(directory, "codex-calls.jsonl");
-    const codexExecutable = path.join(directory, "fake-codex");
-    await writeFile(codexExecutable, `#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
-appendFileSync(${JSON.stringify(codexCallsPath)}, JSON.stringify({ args: process.argv.slice(2) }) + "\\n");
-process.stdin.resume();
-process.stdin.on("end", () => {
-  console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-" + Date.now() }));
-  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "answer" } }));
-  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));
-});
+    await mkdir(path.join(workspacePath, "docs", "knowledge"), { recursive: true });
+    await writeFile(path.join(workspacePath, "docs", "knowledge", "index.md"), `---
+id: index
+title: Project knowledge
+kind: index
+updated_at: 2026-08-13T00:00:00.000Z
+---
+# Project knowledge
+
+Hermes should cite this page.
 `);
-    await chmod(codexExecutable, 0o755);
-    return { codexExecutable, botSecretKey: "test-secret-key", wecomCodexTurnTimeoutMs: 1_000 };
+    return {};
   });
   await request(baseUrl, "/api/projects", {
     method: "POST",
-    body: { id: "wecom", name: "WeCom", workspacePath },
+    body: { id: "hermes", name: "Hermes Project", workspacePath },
   });
 
-  const created = await request(baseUrl, "/api/projects/wecom/bots", {
+  const resolved = await request(
+    baseUrl,
+    `/api/projects/resolve-by-workspace?workspacePath=${encodeURIComponent(path.join(workspacePath, "packages", "app"))}`,
+  );
+  assert.equal(resolved.response.status, 200);
+  assert.equal(resolved.body.result.project.id, "hermes");
+  assert.equal(resolved.body.result.matchedBy, "ancestor");
+
+  const context = await request(baseUrl, "/api/projects/hermes/context");
+  assert.deepEqual(context.body.labels, ["咨询", "缺陷"]);
+  assert.deepEqual(context.body.interactionSources, ["knowledge", "source", "issue"]);
+
+  const created = await request(baseUrl, "/api/projects/hermes/interactions", {
     method: "POST",
     body: {
-      botId: "bot-alpha",
-      secret: "plain-secret-value",
-      enabled: true,
-      runtime: "codex",
       workspacePath,
-      knowledgeEnabled: true,
-      codeSearchEnabled: true,
+      sourceRuntime: "hermes",
+      channel: "wecom",
+      conversationId: "chat-1",
+      question: "怎么排查？",
+      answer: "按知识库说明排查。",
+      label: "咨询",
+      sources: [{ type: "knowledge", ref: "docs/knowledge/index.md", title: "Project knowledge" }],
     },
   });
   assert.equal(created.response.status, 201);
-  assert.equal(created.body.bot.hasSecret, true);
-  assert.equal("secret" in created.body.bot, false);
-  assert.equal(JSON.stringify(created.body).includes("plain-secret-value"), false);
+  assert.equal(created.body.interaction.label, "咨询");
+  assert.equal(created.body.interaction.sources[0].type, "knowledge");
 
-  const listed = await request(baseUrl, "/api/projects/wecom/bots");
-  assert.equal(listed.response.status, 200);
-  assert.equal(listed.body.bots.length, 1);
-  assert.equal(JSON.stringify(listed.body).includes("plain-secret-value"), false);
-
-  const first = await request(baseUrl, "/api/wecom/bots/bot-alpha/messages", {
+  const invalid = await request(baseUrl, "/api/projects/hermes/interactions", {
     method: "POST",
     body: {
-      conversationId: "single-user-a",
-      messageType: "text",
-      text: "调用链在哪里？",
+      workspacePath,
+      conversationId: "chat-1",
+      question: "坏标签？",
+      answer: "bad",
+      label: "需求",
     },
   });
-  assert.equal(first.response.status, 200);
-  assert.equal(first.body.answer.answer, "已收到，正在处理中。完成后会主动推送结果。");
-  assert.equal(first.body.session.wecomConversationId, "single-user-a");
+  assert.equal(invalid.response.status, 400);
 
-  const second = await request(baseUrl, "/api/wecom/bots/bot-alpha/messages", {
-    method: "POST",
-    body: {
-      conversationId: "room-b",
-      messageType: "text",
-      text: "排障怎么查？",
-    },
+  const relinked = await request(baseUrl, `/api/interactions/${created.body.interaction.id}/sources`, {
+    method: "PATCH",
+    body: { sources: [{ type: "source", ref: "server/app.mjs" }] },
   });
-  assert.equal(second.response.status, 200);
-  assert.notEqual(second.body.session.id, first.body.session.id);
-  const calls = await waitFor(async () => {
-    const content = await readFile(codexCallsPath, "utf8").catch(() => "");
-    const lines = content.trim().split("\n").filter(Boolean);
-    return lines.length >= 2 ? lines.map((line) => JSON.parse(line)) : null;
-  });
-  assert.equal(calls.length, 2);
-  assert.ok(calls.every((call) => call.args.includes("-C") && call.args.includes(workspacePath)));
+  assert.equal(relinked.response.status, 200);
+  assert.deepEqual(relinked.body.interaction.sources, [{ type: "source", ref: "server/app.mjs", title: null, url: null, excerpt: null }]);
 
-  const audit = await waitFor(async () => {
-    const result = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
-    return result.body.events.length >= 4 ? result : null;
-  });
-  assert.equal(audit.response.status, 200);
-  assert.equal(audit.body.events.length, 4);
-  const failed = audit.body.events.filter((event) => event.direction === "outbound" && event.status === "failed");
-  assert.equal(failed.length, 2);
-  assert.match(failed[0].error, /长连接未连接/);
+  const listed = await request(baseUrl, "/api/projects/hermes/interactions?limit=10");
+  assert.equal(listed.body.interactions.length, 1);
 });
 
-test("enabled WeCom bots restore websocket subscriptions after server start", async () => {
+test("Hermes can create Taskboard knowledge candidates and self-service defects without WeCom bot routes", async () => {
   let workspacePath;
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-test-"));
-  try {
-    workspacePath = path.join(directory, "workspace");
-    await mkdir(workspacePath, { recursive: true });
-    const app = createTaskboardServer({
-      dataDirectory: directory,
-      botSecretKey: "test-secret-key",
-      wecomWebSocketFactory: (url) => new FakeWecomSocket(url),
-      wecomHeartbeatMs: 60_000,
-    });
-    const address = await app.listen({ port: 0 });
-    const baseUrl = `http://127.0.0.1:${address.port}`;
-    await request(baseUrl, "/api/projects", {
-      method: "POST",
-      body: { id: "wecom-restore", name: "WeCom Restore", workspacePath },
-    });
-    const created = await request(baseUrl, "/api/projects/wecom-restore/bots", {
-      method: "POST",
-      body: {
-        botId: "bot-restore",
-        secret: "restore-secret",
-        enabled: true,
-        runtime: "codex",
-        workspacePath,
-        knowledgeEnabled: true,
-        codeSearchEnabled: true,
-      },
-    });
-    await app.close();
-    fakeWebSockets.length = 0;
-
-    const restoredApp = createTaskboardServer({
-      dataDirectory: directory,
-      botSecretKey: "test-secret-key",
-      wecomWebSocketFactory: (url) => new FakeWecomSocket(url),
-      wecomHeartbeatMs: 60_000,
-    });
-    const restoredAddress = await restoredApp.listen({ port: 0 });
-    const restoredBaseUrl = `http://127.0.0.1:${restoredAddress.port}`;
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-
-      assert.equal(fakeWebSockets.length, 1);
-      assert.deepEqual(fakeWebSockets[0].sent[0], {
-        cmd: "aibot_subscribe",
-        headers: { req_id: fakeWebSockets[0].sent[0].headers.req_id },
-        body: { bot_id: "bot-restore", secret: "restore-secret" },
-      });
-      const listed = await request(restoredBaseUrl, "/api/projects/wecom-restore/bots");
-      assert.equal(listed.body.bots[0].id, created.body.bot.id);
-      assert.equal(listed.body.bots[0].connectionStatus, "connecting");
-    } finally {
-      await restoredApp.close();
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("WeCom bot replies immediately and pushes a Codex answer when the turn completes", async () => {
-  let workspacePath;
-  let codexExecutable;
-  let codexCallsPath;
   const baseUrl = await startServer(async (directory) => {
     workspacePath = path.join(directory, "workspace");
     await mkdir(workspacePath, { recursive: true });
-    codexCallsPath = path.join(directory, "codex-calls.jsonl");
-    codexExecutable = path.join(directory, "fake-codex");
-    await writeFile(codexExecutable, `#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
-appendFileSync(${JSON.stringify(codexCallsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");
-process.stdin.resume();
-process.stdin.on("end", () => {
-  console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-wecom-1" }));
-  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "这是 Codex 后台答案" } }));
-  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));
-});
-`);
-    await chmod(codexExecutable, 0o755);
-    return {
-      codexExecutable,
-      botSecretKey: "test-secret-key",
-      wecomWebSocketFactory: (url) => new FakeWecomSocket(url),
-      wecomHeartbeatMs: 60_000,
-      wecomCodexTurnTimeoutMs: 1_000,
-    };
+    return {};
   });
   await request(baseUrl, "/api/projects", {
     method: "POST",
-    body: { id: "wecom-timeout", name: "WeCom Timeout", workspacePath },
+    body: { id: "flywheel", name: "Flywheel", workspacePath },
   });
-  const created = await request(baseUrl, "/api/projects/wecom-timeout/bots", {
-    method: "POST",
-    body: {
-      botId: "bot-timeout",
-      secret: "plain-secret-value",
-      enabled: true,
-      runtime: "codex",
-      workspacePath,
-      knowledgeEnabled: true,
-      codeSearchEnabled: true,
-    },
-  });
-  await request(baseUrl, `/api/project-bots/${created.body.bot.id}/connect`, {
-    method: "POST",
-    body: { version: created.body.bot.version },
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
 
-  const answered = await request(baseUrl, "/api/wecom/bots/bot-timeout/messages", {
+  const proposal = await request(baseUrl, "/api/projects/flywheel/knowledge-candidates", {
     method: "POST",
     body: {
-      conversationId: "single-user-timeout",
-      messageType: "text",
-      text: "你是谁",
+      title: "自助咨询沉淀",
+      content: "用户咨询后确认的处理口径。",
+      targetPath: "docs/knowledge/candidates/self-service.md",
+      sources: [{ type: "issue", ref: "FLY-1" }],
     },
   });
-  assert.equal(answered.response.status, 200);
-  assert.equal(answered.body.answer.answer, "已收到，正在处理中。完成后会主动推送结果。");
+  assert.equal(proposal.response.status, 201);
+  assert.equal(proposal.body.proposal.status, "ready");
+  assert.equal(proposal.body.proposal.creator.id, "hermes-agent");
+  assert.match(proposal.body.proposal.changes[0].afterContent, /用户咨询后确认的处理口径/);
 
-  const audit = await waitFor(async () => {
-    const result = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
-    const outboundEvent = result.body.events.find((event) => event.direction === "outbound");
-    return outboundEvent ? result : null;
-  });
-  assert.equal(audit.response.status, 200);
-  assert.equal(audit.body.events.length, 2);
-  const outbound = audit.body.events.find((event) => event.direction === "outbound");
-  assert.equal(outbound.status, "answered");
-  assert.equal(outbound.body, "这是 Codex 后台答案");
-  assert.deepEqual(fakeWebSockets[0].sent.find((message) => message.cmd === "aibot_send_msg"), {
-    cmd: "aibot_send_msg",
-    headers: { req_id: fakeWebSockets[0].sent.find((message) => message.cmd === "aibot_send_msg").headers.req_id },
-    body: {
-      bot_id: "bot-timeout",
-      chatid: "single-user-timeout",
-      msgtype: "text",
-      text: { content: "这是 Codex 后台答案" },
-    },
-  });
-  assert.equal(answered.body.session.threadId, null);
-
-  await request(baseUrl, "/api/wecom/bots/bot-timeout/messages", {
+  const defect = await request(baseUrl, "/api/tasks", {
     method: "POST",
     body: {
-      conversationId: "single-user-timeout",
-      messageType: "text",
-      text: "继续",
+      projectId: "flywheel",
+      title: "自助缺陷：无法启动",
+      description: "Hermes 判断为自助缺陷。",
+      labels: ["缺陷"],
+      status: "todo",
     },
   });
-  const calls = await waitFor(async () => {
-    const content = await readFile(codexCallsPath, "utf8").catch(() => "");
-    const lines = content.trim().split("\n").filter(Boolean);
-    return lines.length >= 2 ? lines.map((line) => JSON.parse(line)) : null;
-  });
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].slice(0, 3), ["exec", "resume", "--json"]);
-  assert.equal(calls[1].at(-2), "thread-wecom-1");
-  assert.equal(calls[1].at(-1), "-");
-  const finalAudit = await waitFor(async () => {
-    const result = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
-    return result.body.events.filter((event) => event.direction === "outbound").length >= 2 ? result : null;
-  });
-  assert.equal(finalAudit.body.events.filter((event) => event.direction === "outbound").length, 2);
+  assert.equal(defect.response.status, 201);
+  assert.deepEqual(defect.body.task.labels, ["缺陷"]);
+
+  const oldBotRoute = await request(baseUrl, "/api/projects/flywheel/bots");
+  assert.equal(oldBotRoute.response.status, 404);
 });
 
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {
