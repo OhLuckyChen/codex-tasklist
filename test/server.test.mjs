@@ -10,6 +10,29 @@ import { createTaskboardServer } from "../server/index.mjs";
 import { KnowledgeService } from "../server/knowledge-service.mjs";
 
 const runningApps = [];
+const fakeWebSockets = [];
+
+class FakeWecomSocket extends EventTarget {
+  static OPEN = 1;
+
+  readyState = FakeWecomSocket.OPEN;
+  sent = [];
+
+  constructor(url) {
+    super();
+    this.url = url;
+    fakeWebSockets.push(this);
+    queueMicrotask(() => this.dispatchEvent(new Event("open")));
+  }
+
+  send(payload) {
+    this.sent.push(JSON.parse(payload));
+  }
+
+  close() {
+    this.readyState = 3;
+  }
+}
 
 afterEach(async () => {
   while (runningApps.length > 0) {
@@ -17,6 +40,7 @@ afterEach(async () => {
     await app.close();
     await rm(directory, { recursive: true, force: true });
   }
+  fakeWebSockets.length = 0;
 });
 
 async function startServer(configure, listenOptions = {}) {
@@ -367,6 +391,67 @@ test("project WeCom bots keep secrets encrypted and route isolated sessions to p
   assert.equal(audit.body.events.length, 4);
   const answered = audit.body.events.find((event) => event.direction === "outbound" && event.status === "answered");
   assert.deepEqual(answered.citations, [{ type: "file", ref: "server/app.mjs", label: "server app" }]);
+});
+
+test("enabled WeCom bots restore websocket subscriptions after server start", async () => {
+  let workspacePath;
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-test-"));
+  try {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const app = createTaskboardServer({
+      dataDirectory: directory,
+      botSecretKey: "test-secret-key",
+      wecomWebSocketFactory: (url) => new FakeWecomSocket(url),
+      wecomHeartbeatMs: 60_000,
+    });
+    const address = await app.listen({ port: 0 });
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    await request(baseUrl, "/api/projects", {
+      method: "POST",
+      body: { id: "wecom-restore", name: "WeCom Restore", workspacePath },
+    });
+    const created = await request(baseUrl, "/api/projects/wecom-restore/bots", {
+      method: "POST",
+      body: {
+        botId: "bot-restore",
+        secret: "restore-secret",
+        enabled: true,
+        runtime: "codex",
+        workspacePath,
+        knowledgeEnabled: true,
+        codeSearchEnabled: true,
+      },
+    });
+    await app.close();
+    fakeWebSockets.length = 0;
+
+    const restoredApp = createTaskboardServer({
+      dataDirectory: directory,
+      botSecretKey: "test-secret-key",
+      wecomWebSocketFactory: (url) => new FakeWecomSocket(url),
+      wecomHeartbeatMs: 60_000,
+    });
+    const restoredAddress = await restoredApp.listen({ port: 0 });
+    const restoredBaseUrl = `http://127.0.0.1:${restoredAddress.port}`;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      assert.equal(fakeWebSockets.length, 1);
+      assert.deepEqual(fakeWebSockets[0].sent[0], {
+        cmd: "aibot_subscribe",
+        headers: { req_id: fakeWebSockets[0].sent[0].headers.req_id },
+        body: { bot_id: "bot-restore", secret: "restore-secret" },
+      });
+      const listed = await request(restoredBaseUrl, "/api/projects/wecom-restore/bots");
+      assert.equal(listed.body.bots[0].id, created.body.bot.id);
+      assert.equal(listed.body.bots[0].connectionStatus, "connecting");
+    } finally {
+      await restoredApp.close();
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {
