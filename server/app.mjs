@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import WebSocket from "ws";
 
 import {
   DEFAULT_PROJECT_ID,
@@ -33,6 +34,8 @@ const BOT_SECRET_KEY_CONTEXT = "codex-taskboard-project-bot-secret";
 const WECOM_AIBOT_WEBSOCKET_URL = "wss://openws.work.weixin.qq.com";
 const WECOM_AIBOT_HEARTBEAT_MS = 30_000;
 const WECOM_AIBOT_RECONNECT_MS = 5_000;
+const WECOM_AIBOT_ANSWER_TIMEOUT_MS = 20_000;
+const WECOM_AIBOT_TIMEOUT_ANSWER = "已收到你的问题，但项目知识检索暂时没有在企微回复窗口内完成。请稍后重试，或在 Taskboard 项目知识中检查当前工作区索引状态。";
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -660,6 +663,15 @@ function wecomMessageText(body) {
   return "";
 }
 
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function createWecomConnectionManager({
   database,
   botSecretSeed,
@@ -672,6 +684,14 @@ function createWecomConnectionManager({
 }) {
   const connections = new Map();
 
+  function addSocketListener(socket, eventName, handler) {
+    if (typeof socket.on === "function") {
+      socket.on(eventName, handler);
+    } else {
+      socket.addEventListener(eventName, handler);
+    }
+  }
+
   function sendJson(socket, payload) {
     socket.send(JSON.stringify(payload));
   }
@@ -683,7 +703,11 @@ function createWecomConnectionManager({
     clearInterval(connection.heartbeat);
     clearTimeout(connection.reconnect);
     try {
-      connection.socket.close();
+      if (typeof connection.socket.terminate === "function") {
+        connection.socket.terminate();
+      } else {
+        connection.socket.close();
+      }
     } catch {}
   }
 
@@ -766,7 +790,7 @@ function createWecomConnectionManager({
       reconnect: null,
     };
     connections.set(id, connection);
-    socket.addEventListener("open", () => {
+    addSocketListener(socket, "open", () => {
       sendJson(socket, {
         cmd: "aibot_subscribe",
         headers: { req_id: connection.subscribeReqId },
@@ -779,18 +803,20 @@ function createWecomConnectionManager({
       }, heartbeatMs);
       connection.heartbeat.unref?.();
     });
-    socket.addEventListener("message", (event) => {
-      void handleMessage(connection, event.data).catch((error) => {
+    addSocketListener(socket, "message", (data) => {
+      void handleMessage(connection, data?.data ?? data).catch((error) => {
         const updated = database.setProjectBotConnection(id, "error", error.message);
         emitBot(updated);
       });
     });
-    socket.addEventListener("close", (event) => {
-      const code = event?.code ? ` code=${event.code}` : "";
-      const reason = event?.reason ? ` reason=${event.reason}` : "";
+    addSocketListener(socket, "close", (codeOrEvent, reasonBuffer) => {
+      const closeCode = typeof codeOrEvent === "number" ? codeOrEvent : codeOrEvent?.code;
+      const closeReason = reasonBuffer?.toString?.() || codeOrEvent?.reason || "";
+      const code = closeCode ? ` code=${closeCode}` : "";
+      const reason = closeReason ? ` reason=${closeReason}` : "";
       scheduleReconnect(id, `企业微信长连接已断开${code}${reason}`);
     });
-    socket.addEventListener("error", (event) => {
+    addSocketListener(socket, "error", (event) => {
       const detail = event?.message
         ?? event?.error?.message
         ?? event?.error?.cause?.message
@@ -1973,7 +1999,11 @@ export function createTaskboardServer(options = {}) {
           message.text,
         ].join("\n");
         const answer = bot.knowledgeEnabled || bot.codeSearchEnabled
-          ? await knowledge.ask(bot.workspacePath, question)
+          ? await withTimeout(
+              knowledge.ask(bot.workspacePath, question),
+              options.wecomAnswerTimeoutMs ?? WECOM_AIBOT_ANSWER_TIMEOUT_MS,
+              "Project knowledge answer timed out",
+            )
           : {
               answer: "该机器人未开启知识库或代码只读检索，无法回答项目问题。",
               citations: [],
@@ -1996,6 +2026,32 @@ export function createTaskboardServer(options = {}) {
         });
         return { bot, session: updatedSession, answer, auditEvent: outbound };
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage === "Project knowledge answer timed out") {
+          const outbound = database.createProjectBotAuditEvent({
+            botConfigId: bot.id,
+            sessionId: session.id,
+            projectId: bot.projectId,
+            botId: bot.botId,
+            wecomConversationId: message.conversationId,
+            direction: "outbound",
+            messageType: "text",
+            body: WECOM_AIBOT_TIMEOUT_ANSWER,
+            citations: [],
+            status: "failed",
+            error: errorMessage,
+          });
+          const updatedSession = database.updateProjectBotSession(session.id, {
+            status: "error",
+            summary: WECOM_AIBOT_TIMEOUT_ANSWER,
+          });
+          return {
+            bot,
+            session: updatedSession,
+            answer: { answer: WECOM_AIBOT_TIMEOUT_ANSWER, citations: [] },
+            auditEvent: outbound,
+          };
+        }
         database.updateProjectBotSession(session.id, { status: "error" });
         database.createProjectBotAuditEvent({
           botConfigId: bot.id,
