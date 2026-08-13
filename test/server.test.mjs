@@ -454,6 +454,52 @@ test("enabled WeCom bots restore websocket subscriptions after server start", as
   }
 });
 
+test("WeCom bot answers with a timeout fallback when project knowledge is slow", async () => {
+  let workspacePath;
+  const knowledgeService = {
+    ask: () => new Promise(() => {}),
+  };
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    return { knowledgeService, botSecretKey: "test-secret-key", wecomAnswerTimeoutMs: 5 };
+  });
+  await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "wecom-timeout", name: "WeCom Timeout", workspacePath },
+  });
+  const created = await request(baseUrl, "/api/projects/wecom-timeout/bots", {
+    method: "POST",
+    body: {
+      botId: "bot-timeout",
+      secret: "plain-secret-value",
+      enabled: true,
+      runtime: "codex",
+      workspacePath,
+      knowledgeEnabled: true,
+      codeSearchEnabled: true,
+    },
+  });
+
+  const answered = await request(baseUrl, "/api/wecom/bots/bot-timeout/messages", {
+    method: "POST",
+    body: {
+      conversationId: "single-user-timeout",
+      messageType: "text",
+      text: "你是谁",
+    },
+  });
+  assert.equal(answered.response.status, 200);
+  assert.match(answered.body.answer.answer, /已收到你的问题/);
+
+  const audit = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+  assert.equal(audit.response.status, 200);
+  assert.equal(audit.body.events.length, 2);
+  const outbound = audit.body.events.find((event) => event.direction === "outbound");
+  assert.equal(outbound.status, "failed");
+  assert.equal(outbound.error, "Project knowledge answer timed out");
+});
+
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {
   const baseUrl = await startServer();
   const initial = await request(baseUrl, "/api/projects/local/workflow-workspace");
