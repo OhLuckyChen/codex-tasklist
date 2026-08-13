@@ -30,6 +30,9 @@ const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
 const HOST_RUNTIME_TTL_MS = 3_000;
 const CODEX_PLAN_TAIL_BYTES = 16 * 1024 * 1024;
 const BOT_SECRET_KEY_CONTEXT = "codex-taskboard-project-bot-secret";
+const WECOM_AIBOT_WEBSOCKET_URL = "wss://openws.work.weixin.qq.com";
+const WECOM_AIBOT_HEARTBEAT_MS = 30_000;
+const WECOM_AIBOT_RECONNECT_MS = 5_000;
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -639,6 +642,166 @@ function stableSessionKey(projectId, botId, conversationId) {
   return createHash("sha256")
     .update(`${projectId}\0${botId}\0${conversationId}`)
     .digest("hex");
+}
+
+function wecomRequestId() {
+  return randomUUID().replaceAll("-", "");
+}
+
+function wecomConversationId(body) {
+  if (body.chattype === "group" && body.chatid) return body.chatid;
+  return body.from?.userid ?? body.chatid ?? body.msgid;
+}
+
+function wecomMessageText(body) {
+  if (body.msgtype === "text") return body.text?.content ?? "";
+  if (body.msgtype === "voice") return body.voice?.text ?? "";
+  if (body.msgtype === "mixed") return body.mixed?.content ?? "";
+  return "";
+}
+
+function createWecomConnectionManager({
+  database,
+  botSecretSeed,
+  answerMessage,
+  emitBot,
+  webSocketFactory = (url) => new WebSocket(url),
+  url = WECOM_AIBOT_WEBSOCKET_URL,
+  heartbeatMs = WECOM_AIBOT_HEARTBEAT_MS,
+  reconnectMs = WECOM_AIBOT_RECONNECT_MS,
+}) {
+  const connections = new Map();
+
+  function sendJson(socket, payload) {
+    socket.send(JSON.stringify(payload));
+  }
+
+  function closeConnection(id) {
+    const connection = connections.get(id);
+    if (!connection) return;
+    connections.delete(id);
+    clearInterval(connection.heartbeat);
+    clearTimeout(connection.reconnect);
+    try {
+      connection.socket.close();
+    } catch {}
+  }
+
+  function scheduleReconnect(botId, reason) {
+    const current = database.getProjectBot(botId);
+    if (!current?.enabled) return;
+    const connection = connections.get(botId);
+    if (!connection || connection.reconnect) return;
+    const bot = database.setProjectBotConnection(botId, "disconnected", reason);
+    emitBot(bot);
+    connection.reconnect = setTimeout(() => {
+      connection.reconnect = null;
+      void connect(botId).catch(() => {});
+    }, reconnectMs);
+    connection.reconnect.unref?.();
+  }
+
+  async function handleMessage(connection, raw) {
+    let message;
+    try {
+      message = JSON.parse(typeof raw === "string" ? raw : raw.toString());
+    } catch {
+      return;
+    }
+    if (message.errcode !== undefined && message.headers?.req_id === connection.subscribeReqId) {
+      if (message.errcode === 0) {
+        const bot = database.setProjectBotConnection(connection.bot.id, "connected", null);
+        emitBot(bot);
+      } else {
+        const error = `${message.errcode}: ${message.errmsg ?? "subscribe failed"}`;
+        const bot = database.setProjectBotConnection(connection.bot.id, "error", error);
+        emitBot(bot);
+      }
+      return;
+    }
+    if (message.cmd === "aibot_event_callback" && message.body?.event?.eventtype === "disconnected_event") {
+      scheduleReconnect(connection.bot.id, "企业微信断开了旧连接");
+      return;
+    }
+    if (message.cmd !== "aibot_msg_callback") return;
+    const body = message.body ?? {};
+    const text = wecomMessageText(body).trim();
+    const conversationId = wecomConversationId(body);
+    if (!text || !conversationId) return;
+    const result = await answerMessage(connection.bot, {
+      conversationId,
+      messageId: body.msgid ?? null,
+      messageType: body.msgtype ?? "text",
+      text,
+    });
+    sendJson(connection.socket, {
+      cmd: "aibot_respond_msg",
+      headers: { req_id: message.headers?.req_id ?? wecomRequestId() },
+      body: {
+        msgtype: "stream",
+        stream: {
+          id: `tb-${body.msgid ?? wecomRequestId()}`,
+          finish: true,
+          content: result.answer.answer,
+        },
+      },
+    });
+  }
+
+  async function connect(id) {
+    const bot = database.getProjectBot(id);
+    if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${id}' does not exist`);
+    if (!bot.enabled) return database.setProjectBotConnection(id, "disabled", null);
+    const secret = decryptBotSecret(database.getProjectBotSecretCiphertext(bot.id), botSecretSeed);
+    if (!secret) throw new ApiError(409, "PROJECT_BOT_SECRET_UNAVAILABLE", "Project bot secret is unavailable");
+    closeConnection(id);
+    const connecting = database.setProjectBotConnection(id, "connecting", null);
+    emitBot(connecting);
+    const socket = webSocketFactory(url);
+    const connection = {
+      bot,
+      socket,
+      subscribeReqId: wecomRequestId(),
+      heartbeat: null,
+      reconnect: null,
+    };
+    connections.set(id, connection);
+    socket.addEventListener("open", () => {
+      sendJson(socket, {
+        cmd: "aibot_subscribe",
+        headers: { req_id: connection.subscribeReqId },
+        body: { bot_id: bot.botId, secret },
+      });
+      connection.heartbeat = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          sendJson(socket, { cmd: "ping", headers: { req_id: wecomRequestId() } });
+        }
+      }, heartbeatMs);
+      connection.heartbeat.unref?.();
+    });
+    socket.addEventListener("message", (event) => {
+      void handleMessage(connection, event.data).catch((error) => {
+        const updated = database.setProjectBotConnection(id, "error", error.message);
+        emitBot(updated);
+      });
+    });
+    socket.addEventListener("close", () => scheduleReconnect(id, "企业微信长连接已断开"));
+    socket.addEventListener("error", () => scheduleReconnect(id, "企业微信长连接错误"));
+    return connecting;
+  }
+
+  function disconnect(id) {
+    closeConnection(id);
+    const bot = database.setProjectBotConnection(id, "disconnected", null);
+    emitBot(bot);
+    return bot;
+  }
+
+  function closeAll() {
+    for (const id of [...connections.keys()]) closeConnection(id);
+  }
+
+  return { connect, disconnect, closeAll };
 }
 
 function secretKeyFromSeed(seed) {
@@ -1513,6 +1676,7 @@ export function createTaskboardServer(options = {}) {
   const knowledgeRuns = new Map();
   const botSecretSeed = options.botSecretKey ?? `${resolved.databasePath}\0${os.userInfo().username}`;
   const wecomSessionQueues = new Map();
+  let wecomConnections;
 
   // Codex session plan-progress scanning (backported from upstream v0.2.3).
   // Reads the tail of ~/.codex/sessions/*-<threadId>.jsonl to derive plan step
@@ -1817,6 +1981,17 @@ export function createTaskboardServer(options = {}) {
       }
     });
   }
+
+  wecomConnections = createWecomConnectionManager({
+    database,
+    botSecretSeed,
+    answerMessage: answerWecomMessage,
+    emitBot: (bot) => events.emit("project-bot.updated", { projectId: bot.projectId, bot }),
+    webSocketFactory: options.wecomWebSocketFactory,
+    url: options.wecomWebSocketUrl,
+    heartbeatMs: options.wecomHeartbeatMs,
+    reconnectMs: options.wecomReconnectMs,
+  });
 
   const server = createServer(async (request, response) => {
     response.setHeader("x-content-type-options", "nosniff");
@@ -2451,11 +2626,9 @@ export function createTaskboardServer(options = {}) {
               actualVersion: current.version,
             });
           }
-          const bot = database.setProjectBotConnection(
-            botConfigId,
-            action === "connect" && current.enabled ? "connected" : "disabled",
-            null,
-          );
+          const bot = action === "connect"
+            ? await wecomConnections.connect(botConfigId)
+            : wecomConnections.disconnect(botConfigId);
           events.emit("project-bot.updated", { projectId: bot.projectId, bot });
           return sendJson(response, 200, { bot });
         }
@@ -3094,6 +3267,7 @@ export function createTaskboardServer(options = {}) {
       return server.address();
     },
     async close() {
+      wecomConnections?.closeAll();
       const serverClosed = listening
         ? new Promise((resolve, reject) => {
             server.close((error) => error ? reject(error) : resolve());

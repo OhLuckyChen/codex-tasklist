@@ -20,6 +20,14 @@ const RUNTIME_LABELS: Record<TaskRuntime, string> = {
   omp: "Oh My Pi",
 };
 
+const CONNECTION_LABELS: Record<ProjectBotConfig["connectionStatus"], string> = {
+  disabled: "未启用",
+  disconnected: "未连接",
+  connecting: "连接中",
+  connected: "已连接",
+  error: "连接异常",
+};
+
 function emptyDraft(workspacePath: string): ProjectBotDraft {
   return {
     botId: "",
@@ -130,20 +138,23 @@ export function ProjectBotsPanel({ projectId, projectName, workspacePath, onClos
                     {bot.enabled && <em>启用</em>}
                   </span>
                   <span className="connectors-meta">
-                    {RUNTIME_LABELS[bot.runtime]} · {bot.connectionStatus} · {bot.workspacePath}
+                    {RUNTIME_LABELS[bot.runtime]} · {CONNECTION_LABELS[bot.connectionStatus]} · {bot.workspacePath}
+                    {bot.lastError ? ` · ${bot.lastError}` : ""}
                   </span>
                 </div>
                 <div className="connectors-item-actions">
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || bot.connectionStatus === "connecting"}
                     onClick={() => run(async () => {
                       await (bot.connectionStatus === "connected"
                         ? api.disconnectProjectBot(bot)
                         : api.connectProjectBot(bot));
                     })}
                   >
-                    {bot.connectionStatus === "connected" ? "断开" : "连接"}
+                    {bot.connectionStatus === "connected"
+                      ? "断开"
+                      : bot.connectionStatus === "connecting" ? "连接中" : "连接"}
                   </button>
                   <button type="button" disabled={busy} onClick={() => startEdit(bot)}>编辑</button>
                   <button
