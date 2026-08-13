@@ -1458,12 +1458,16 @@ export class TaskboardDatabase {
       SELECT * FROM project_bot_sessions WHERE session_key = ?
     `).get(input.sessionKey);
     if (existing) {
+      const previousLastMessageAt = existing.last_message_at;
       this.database.prepare(`
         UPDATE project_bot_sessions
         SET last_message_at = ?, updated_at = ?, runtime = ?, version = version + 1
         WHERE id = ?
       `).run(timestamp, timestamp, input.runtime, existing.id);
-      return projectBotSessionFromRow(this.database.prepare("SELECT * FROM project_bot_sessions WHERE id = ?").get(existing.id));
+      return {
+        ...projectBotSessionFromRow(this.database.prepare("SELECT * FROM project_bot_sessions WHERE id = ?").get(existing.id)),
+        previousLastMessageAt,
+      };
     }
     const id = randomUUID();
     this.database.prepare(`
