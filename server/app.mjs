@@ -785,8 +785,19 @@ function createWecomConnectionManager({
         emitBot(updated);
       });
     });
-    socket.addEventListener("close", () => scheduleReconnect(id, "企业微信长连接已断开"));
-    socket.addEventListener("error", () => scheduleReconnect(id, "企业微信长连接错误"));
+    socket.addEventListener("close", (event) => {
+      const code = event?.code ? ` code=${event.code}` : "";
+      const reason = event?.reason ? ` reason=${event.reason}` : "";
+      scheduleReconnect(id, `企业微信长连接已断开${code}${reason}`);
+    });
+    socket.addEventListener("error", (event) => {
+      const detail = event?.message
+        ?? event?.error?.message
+        ?? event?.error?.cause?.message
+        ?? event?.error?.cause?.code
+        ?? "";
+      scheduleReconnect(id, detail ? `企业微信长连接错误：${detail}` : "企业微信长连接错误");
+    });
     return connecting;
   }
 
