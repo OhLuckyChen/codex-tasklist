@@ -825,6 +825,17 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
         const instruction = ${JSON.stringify(instruction)};
         const skillName = ${JSON.stringify(skillName)};
         const skillPath = ${JSON.stringify(skillPath)};
+        const normalizeSkillPath = (value) => {
+          const raw = String(value || "").trim().replace(/^file:\\/\\//, "");
+          try {
+            return decodeURIComponent(raw).replace(/\\\\/g, "/").replace(/\\/+/g, "/").replace(/\\/$/, "");
+          } catch {
+            return raw.replace(/\\\\/g, "/").replace(/\\/+/g, "/").replace(/\\/$/, "");
+          }
+        };
+        const comparableSkillPath = (value) => normalizeSkillPath(value)
+          .replace(/\\/\\.codex\\/worktrees\\/[^/]+(?=\\/skills\\/[^/]+\\/SKILL\\.md$)/, "");
+        const requestedPath = comparableSkillPath(skillPath);
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
@@ -832,7 +843,7 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
         const mention = Array.from(editor.querySelectorAll("[skill-mention-name]"))
           .find((candidate) => (
             candidate.getAttribute("skill-mention-name") === skillName
-            && candidate.getAttribute("skill-mention-path") === skillPath
+            && comparableSkillPath(candidate.getAttribute("skill-mention-path")) === requestedPath
           ));
         if (mention && (editor.textContent || "").includes(instruction)) {
           return { ready: true, matches: true };
@@ -859,66 +870,106 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
   }
 
   let selectedSkill = false;
+  let skillCandidateIndex = 0;
+  let lastMismatchedSkillPath = "";
   while (Date.now() < deadline) {
     const selection = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const displayName = ${JSON.stringify(skillDisplayName)};
+        const candidateIndex = ${JSON.stringify(skillCandidateIndex)};
         const overlay = Array.from(document.querySelectorAll(
           '[data-composer-overlay-floating-ui="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
         if (!overlay) return { ready: false };
-        const button = Array.from(overlay.querySelectorAll(
+        const buttons = Array.from(overlay.querySelectorAll(
           'button[data-list-navigation-item="true"]'
-        )).find((candidate) => Array.from(candidate.querySelectorAll("span"))
+        )).filter((candidate) => Array.from(candidate.querySelectorAll("span"))
           .some((label) => (label.textContent || "").trim() === displayName));
+        const button = buttons[candidateIndex];
         if (!button) return { ready: true, found: false };
         button.click();
-        return { ready: true, found: true };
+        return { ready: true, found: true, candidateCount: buttons.length };
       })()`,
       contextId: executionContextId,
       returnByValue: true,
     });
-    if (selection.result.value?.found) {
+    if (!selection.result.value?.ready) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      continue;
+    }
+    if (!selection.result.value?.found) break;
+
+    let mentionResult = null;
+    while (Date.now() < deadline) {
+      const mention = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const skillName = ${JSON.stringify(skillName)};
+          const skillPath = ${JSON.stringify(skillPath)};
+          const normalizeSkillPath = (value) => {
+            const raw = String(value || "").trim().replace(/^file:\\/\\//, "");
+            try {
+              return decodeURIComponent(raw).replace(/\\\\/g, "/").replace(/\\/+/g, "/").replace(/\\/$/, "");
+            } catch {
+              return raw.replace(/\\\\/g, "/").replace(/\\/+/g, "/").replace(/\\/$/, "");
+            }
+          };
+          const comparableSkillPath = (value) => normalizeSkillPath(value)
+            .replace(/\\/\\.codex\\/worktrees\\/[^/]+(?=\\/skills\\/[^/]+\\/SKILL\\.md$)/, "");
+          const requestedPath = comparableSkillPath(skillPath);
+          const editor = Array.from(document.querySelectorAll(
+            '[data-codex-composer="true"][contenteditable="true"]'
+          )).find((candidate) => candidate.getClientRects().length > 0);
+          if (!editor) return { ready: false };
+          const selected = Array.from(editor.querySelectorAll("[skill-mention-name]"))
+            .find((candidate) => candidate.getAttribute("skill-mention-name") === skillName);
+          if (!selected) return { ready: false };
+          const selectedPath = selected.getAttribute("skill-mention-path") || "";
+          return {
+            ready: true,
+            pathMatches: comparableSkillPath(selectedPath) === requestedPath,
+            selectedPath,
+          };
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      });
+      if (mention.result.value?.ready) {
+        mentionResult = mention.result.value;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    if (mentionResult?.pathMatches) {
       selectedSkill = true;
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 80));
-  }
-  if (!selectedSkill) {
-    throw new Error(`Timed out while selecting the ${skillDisplayName} Skill`);
-  }
-
-  let mentionReady = false;
-  while (Date.now() < deadline) {
-    const mention = await cdp.send("Runtime.evaluate", {
+    lastMismatchedSkillPath = mentionResult?.selectedPath || "";
+    skillCandidateIndex += 1;
+    await cdp.send("Runtime.evaluate", {
       expression: `(() => {
-        const skillName = ${JSON.stringify(skillName)};
-        const skillPath = ${JSON.stringify(skillPath)};
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
-        if (!editor) return { ready: false };
-        const selected = Array.from(editor.querySelectorAll("[skill-mention-name]"))
-          .find((candidate) => candidate.getAttribute("skill-mention-name") === skillName);
-        return {
-          ready: Boolean(selected),
-          pathMatches: selected?.getAttribute("skill-mention-path") === skillPath,
-        };
+        if (!editor) return false;
+        editor.focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        return true;
       })()`,
       contextId: executionContextId,
       returnByValue: true,
     });
-    if (mention.result.value?.ready) {
-      if (!mention.result.value.pathMatches) {
-        throw new Error(`Codex selected a different ${skillDisplayName} Skill`);
-      }
-      mentionReady = true;
-      break;
-    }
+    await cdp.send("Input.insertText", { text: "$" });
     await new Promise((resolve) => setTimeout(resolve, 80));
   }
-  if (!mentionReady) {
-    throw new Error(`Timed out while creating the ${skillDisplayName} Skill mention`);
+  if (!selectedSkill) {
+    const suffix = lastMismatchedSkillPath
+      ? `; expected path: ${skillPath}; last mismatched path: ${lastMismatchedSkillPath}`
+      : "";
+    throw new Error(`Timed out while selecting the requested ${skillDisplayName} Skill${suffix}`);
   }
 
   await cdp.send("Input.insertText", { text: instruction });
@@ -929,13 +980,24 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
         const instruction = ${JSON.stringify(instruction)};
         const skillName = ${JSON.stringify(skillName)};
         const skillPath = ${JSON.stringify(skillPath)};
+        const normalizeSkillPath = (value) => {
+          const raw = String(value || "").trim().replace(/^file:\\/\\//, "");
+          try {
+            return decodeURIComponent(raw).replace(/\\\\/g, "/").replace(/\\/+/g, "/").replace(/\\/$/, "");
+          } catch {
+            return raw.replace(/\\\\/g, "/").replace(/\\/+/g, "/").replace(/\\/$/, "");
+          }
+        };
+        const comparableSkillPath = (value) => normalizeSkillPath(value)
+          .replace(/\\/\\.codex\\/worktrees\\/[^/]+(?=\\/skills\\/[^/]+\\/SKILL\\.md$)/, "");
+        const requestedPath = comparableSkillPath(skillPath);
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
         const mention = editor && Array.from(editor.querySelectorAll("[skill-mention-name]"))
           .find((candidate) => (
             candidate.getAttribute("skill-mention-name") === skillName
-            && candidate.getAttribute("skill-mention-path") === skillPath
+            && comparableSkillPath(candidate.getAttribute("skill-mention-path")) === requestedPath
           ));
         return Boolean(mention && (editor.textContent || "").includes(instruction));
       })()`,
