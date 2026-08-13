@@ -83,6 +83,107 @@ export const tools = [
       additionalProperties: false,
     },
   },
+  {
+    name: "taskboard_resolve_project_by_workspace",
+    description: "Resolve the Taskboard project mapped to a local workspace path. Uses exact or longest ancestor matching.",
+    inputSchema: {
+      type: "object",
+      properties: { workspacePath: { type: "string" } },
+      required: ["workspacePath"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "taskboard_get_project_context",
+    description: "Read the Taskboard project context and the labels/source types expected for Hermes data flywheel writes.",
+    inputSchema: {
+      type: "object",
+      properties: { projectId: { type: "string" } },
+      required: ["projectId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "taskboard_search_project_knowledge",
+    description: "Search project knowledge with source-backed results. Pass workspacePath when Hermes is serving a specific local workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        query: { type: "string" },
+        workspacePath: { type: "string" },
+      },
+      required: ["projectId", "query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "taskboard_record_interaction",
+    description: "Record a Hermes answer as a Taskboard interaction. Label must be one of the existing Taskboard tags: 咨询 or 缺陷.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        workspacePath: { type: "string" },
+        sourceRuntime: { type: "string" },
+        channel: { type: "string" },
+        conversationId: { type: "string" },
+        question: { type: "string" },
+        answer: { type: "string" },
+        label: { type: "string", enum: ["咨询", "缺陷"] },
+        sources: { type: "array", items: { type: "object" } },
+      },
+      required: ["projectId", "workspacePath", "conversationId", "question", "answer", "label"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "taskboard_create_knowledge_candidate",
+    description: "Create a ready knowledge proposal from a Hermes consultation. It does not publish or write knowledge files.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        title: { type: "string" },
+        summary: { type: "string" },
+        content: { type: "string" },
+        targetPath: { type: "string" },
+        interactionId: { type: "string" },
+        sources: { type: "array", items: { type: "object" } },
+      },
+      required: ["projectId", "title", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "taskboard_create_self_service_defect",
+    description: "Create a Taskboard issue for a Hermes-detected self-service defect using the existing 缺陷 label.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        priority: { type: "string", enum: ["none", "urgent", "high", "medium", "low"] },
+        threadId: { type: "string" },
+      },
+      required: ["projectId", "title"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "taskboard_link_sources",
+    description: "Attach or replace source citations on a recorded Hermes interaction.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        interactionId: { type: "string" },
+        sources: { type: "array", items: { type: "object" } },
+      },
+      required: ["interactionId", "sources"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function textResult(value) {
@@ -141,6 +242,46 @@ export function createMcpHandler({ baseUrl = process.env.TASKBOARD_MCP_URL ?? DE
       });
       case "taskboard_move_issue": return api("POST", `/api/tasks/${encodeURIComponent(args.issueId)}/move`, {
         version: args.version, status: args.status, ...(args.threadId ? { threadId: args.threadId } : {}),
+      });
+      case "taskboard_resolve_project_by_workspace": {
+        const query = new URLSearchParams({ workspacePath: args.workspacePath });
+        return api("GET", `/api/projects/resolve-by-workspace?${query}`);
+      }
+      case "taskboard_get_project_context": return api("GET", `/api/projects/${encodeURIComponent(args.projectId)}/context`);
+      case "taskboard_search_project_knowledge": {
+        const query = new URLSearchParams({ q: args.query });
+        if (args.workspacePath) query.set("workspacePath", args.workspacePath);
+        return api("GET", `/api/local/projects/${encodeURIComponent(args.projectId)}/knowledge/search?${query}`);
+      }
+      case "taskboard_record_interaction": return api("POST", `/api/projects/${encodeURIComponent(args.projectId)}/interactions`, {
+        workspacePath: args.workspacePath,
+        sourceRuntime: args.sourceRuntime ?? "hermes",
+        channel: args.channel ?? "wecom",
+        conversationId: args.conversationId,
+        question: args.question,
+        answer: args.answer,
+        label: args.label,
+        sources: args.sources ?? [],
+      });
+      case "taskboard_create_knowledge_candidate": return api("POST", `/api/projects/${encodeURIComponent(args.projectId)}/knowledge-candidates`, {
+        title: args.title,
+        summary: args.summary ?? "",
+        content: args.content,
+        targetPath: args.targetPath,
+        interactionId: args.interactionId,
+        sources: args.sources ?? [],
+      });
+      case "taskboard_create_self_service_defect": return api("POST", "/api/tasks", {
+        projectId: args.projectId,
+        title: args.title,
+        description: args.description ?? "",
+        priority: args.priority ?? "none",
+        status: "todo",
+        labels: ["缺陷"],
+        ...(args.threadId ? { threadId: args.threadId } : {}),
+      });
+      case "taskboard_link_sources": return api("PATCH", `/api/interactions/${encodeURIComponent(args.interactionId)}/sources`, {
+        sources: args.sources,
       });
       default: throw Object.assign(new Error(`Unknown tool: ${name}`), { code: -32601 });
     }

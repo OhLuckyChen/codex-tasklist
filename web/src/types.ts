@@ -83,33 +83,6 @@ export type ConnectorDraft = {
   sortOrder?: number;
 };
 
-export interface ProjectBotConfig {
-  id: string;
-  projectId: string;
-  botId: string;
-  enabled: boolean;
-  runtime: TaskRuntime;
-  workspacePath: string;
-  knowledgeEnabled: boolean;
-  codeSearchEnabled: boolean;
-  hasSecret: boolean;
-  connectionStatus: "disabled" | "disconnected" | "connecting" | "connected" | "error";
-  lastConnectedAt: string | null;
-  lastError: string | null;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type ProjectBotDraft = {
-  botId: string;
-  secret?: string;
-  enabled?: boolean;
-  runtime: TaskRuntime;
-  workspacePath: string;
-  knowledgeEnabled?: boolean;
-  codeSearchEnabled?: boolean;
-};
 
 export interface TaskboardCapabilities {
   localKnowledge?: boolean;

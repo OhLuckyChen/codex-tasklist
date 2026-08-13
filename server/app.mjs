@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -7,7 +7,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import WebSocket from "ws";
 
 import {
   DEFAULT_PROJECT_ID,
@@ -17,12 +16,10 @@ import {
 } from "../shared/domain.mjs";
 import { normalizeCodexThreadId } from "../shared/codex-thread-id.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
-import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createClaudeLauncher } from "./claude-launcher.mjs";
 import { createOmpLauncher } from "./omp-launcher.mjs";
 import { KnowledgeService, knowledgeInternals } from "./knowledge-service.mjs";
-import { normalizeCodexEvent, spawnCodexTurn } from "./codex-process.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const execFileAsync = promisify(execFile);
@@ -31,13 +28,6 @@ const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
 const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
 const HOST_RUNTIME_TTL_MS = 3_000;
 const CODEX_PLAN_TAIL_BYTES = 16 * 1024 * 1024;
-const BOT_SECRET_KEY_CONTEXT = "codex-taskboard-project-bot-secret";
-const WECOM_AIBOT_WEBSOCKET_URL = "wss://openws.work.weixin.qq.com";
-const WECOM_AIBOT_HEARTBEAT_MS = 30_000;
-const WECOM_AIBOT_RECONNECT_MS = 5_000;
-const WECOM_AIBOT_PROCESSING_ANSWER = "已收到，正在处理中。完成后会主动推送结果。";
-const WECOM_CODEX_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const WECOM_CODEX_TURN_TIMEOUT_MS = 10 * 60 * 1000;
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -578,433 +568,81 @@ function parseRuntime(value) {
   return value;
 }
 
-function parseBotRuntime(value) {
-  return parseRuntime(value) ?? "codex";
-}
-
-function parseProjectBotCreate(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set([
-    "botId", "secret", "enabled", "runtime", "workspacePath", "knowledgeEnabled", "codeSearchEnabled",
-  ]));
-  return {
-    botId: stringField(body.botId, "botId", { required: true, maxLength: 128 }),
-    secret: stringField(body.secret, "secret", { required: true, maxLength: 2048 }),
-    enabled: Boolean(body.enabled),
-    runtime: parseBotRuntime(body.runtime),
-    workspacePath: stringField(body.workspacePath, "workspacePath", { required: true, maxLength: 4096 }),
-    knowledgeEnabled: body.knowledgeEnabled === undefined ? true : Boolean(body.knowledgeEnabled),
-    codeSearchEnabled: body.codeSearchEnabled === undefined ? true : Boolean(body.codeSearchEnabled),
-  };
-}
-
-function parseProjectBotPatch(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set([
-    "version", "botId", "secret", "enabled", "runtime", "workspacePath", "knowledgeEnabled", "codeSearchEnabled",
-  ]));
-  const version = parseVersion(body.version);
-  const changes = {};
-  if (body.botId !== undefined) changes.botId = stringField(body.botId, "botId", { required: true, maxLength: 128 });
-  if (body.secret !== undefined) changes.secret = stringField(body.secret, "secret", { required: true, maxLength: 2048 });
-  if (body.enabled !== undefined) changes.enabled = Boolean(body.enabled);
-  if (body.runtime !== undefined) changes.runtime = parseBotRuntime(body.runtime);
-  if (body.workspacePath !== undefined) changes.workspacePath = pathField(body.workspacePath, "workspacePath");
-  if (body.knowledgeEnabled !== undefined) changes.knowledgeEnabled = Boolean(body.knowledgeEnabled);
-  if (body.codeSearchEnabled !== undefined) changes.codeSearchEnabled = Boolean(body.codeSearchEnabled);
-  if (Object.keys(changes).length === 0) {
-    throw new ApiError(400, "INVALID_BODY", "PATCH requires at least one project bot field");
+function parseInteractionLabel(value) {
+  const label = stringField(value ?? "咨询", "label", { required: true, maxLength: 16 });
+  if (label !== "咨询" && label !== "缺陷") {
+    throw new ApiError(400, "INVALID_FIELD", "'label' must be '咨询' or '缺陷'");
   }
-  return { version, changes };
+  return label;
 }
 
-function parseProjectBotVersionBody(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set(["version"]));
-  return { version: parseVersion(body.version) };
-}
-
-function parseWecomMessage(body) {
-  assertPlainObject(body);
-  assertAllowedKeys(body, new Set([
-    "conversationId", "userId", "chatId", "messageId", "messageType", "text",
-  ]));
-  const conversationId = stringField(
-    body.conversationId ?? body.chatId ?? body.userId,
-    "conversationId",
-    { required: true, maxLength: 256 },
-  );
-  const text = stringField(body.text, "text", { required: true, maxLength: 20_000 });
-  return {
-    conversationId,
-    messageId: stringField(body.messageId ?? null, "messageId", { nullable: true, maxLength: 256 }),
-    messageType: stringField(body.messageType ?? "text", "messageType", { required: true, maxLength: 64 }),
-    text,
-  };
-}
-
-function stableSessionKey(projectId, botId, conversationId) {
-  return createHash("sha256")
-    .update(`${projectId}\0${botId}\0${conversationId}`)
-    .digest("hex");
-}
-
-function wecomRequestId() {
-  return randomUUID().replaceAll("-", "");
-}
-
-function wecomConversationId(body) {
-  if (body.chattype === "group" && body.chatid) return body.chatid;
-  return body.from?.userid ?? body.chatid ?? body.msgid;
-}
-
-function wecomMessageText(body) {
-  if (body.msgtype === "text") return body.text?.content ?? "";
-  if (body.msgtype === "voice") return body.voice?.text ?? "";
-  if (body.msgtype === "mixed") return body.mixed?.content ?? "";
-  return "";
-}
-
-function withinTtl(timestamp, ttlMs, nowMs = Date.now()) {
-  const parsed = Date.parse(timestamp ?? "");
-  return Number.isFinite(parsed) && nowMs - parsed <= ttlMs;
-}
-
-function buildWecomCodexPrompt({ project, bot, message }) {
-  return [
-    "你是 Taskboard 项目绑定的企微答疑助手。",
-    `项目：${project.name} (${project.id})`,
-    `企微会话：${message.conversationId}`,
-    `只读工作区边界：${bot.workspacePath}`,
-    "只允许基于项目知识库和绑定工作区的代码、配置、测试、文档做只读回答。",
-    "回答实现、调用链或排障问题时必须给出知识条目或文件引用。",
-    "不要执行代码修改、Git、部署、数据库写入或外部副作用操作；如果用户要求这类操作，说明必须回到 Codex 中另行明确确认。",
-    "用中文回答，结论先行，必要时列出引用。",
-    "",
-    message.text,
-  ].join("\n");
-}
-
-async function runWecomCodexTurn({
-  executable,
-  processEnv,
-  project,
-  bot,
-  session,
-  message,
-  ttlMs = WECOM_CODEX_SESSION_TTL_MS,
-  timeoutMs = WECOM_CODEX_TURN_TIMEOUT_MS,
-}) {
-  const prompt = buildWecomCodexPrompt({ project, bot, message });
-  const previousLastMessageAt = session.previousLastMessageAt ?? session.lastMessageAt;
-  const shouldResume = Boolean(session.threadId && withinTtl(previousLastMessageAt, ttlMs));
-  const args = shouldResume
-    ? [
-        "exec",
-        "resume",
-        "--json",
-        "-c",
-        'approval_policy="never"',
-        session.threadId,
-        "-",
-      ]
-    : [
-        "exec",
-        "--skip-git-repo-check",
-        "--json",
-        "--color",
-        "never",
-        "-C",
-        bot.workspacePath,
-        "-s",
-        "read-only",
-        "-c",
-        'approval_policy="never"',
-        "-",
-      ];
-
-  let threadId = shouldResume ? session.threadId : null;
-  let answer = "";
-  let terminal = null;
-  let terminalError = "";
-  const { child, completion } = spawnCodexTurn({
-    executable,
-    args,
-    prompt,
-    env: processEnv,
-    onRawEvent(raw) {
-      const normalized = normalizeCodexEvent(raw);
-      if (normalized?.kind === "thread.started") {
-        threadId = normalized.threadId;
-      } else if (normalized?.kind === "event" && normalized.role === "assistant" && normalized.content) {
-        answer = normalized.content;
-      }
-      if (raw.type === "turn.completed") terminal = "completed";
-      if (raw.type === "turn.failed" || raw.type === "error") {
-        terminal = "failed";
-        terminalError ||= normalized?.content || "Codex answer failed";
-      }
-    },
-  });
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      try {
-        if (Number.isInteger(child.pid)) process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {}
-      reject(new Error("Codex answer timed out"));
-    }, timeoutMs);
-    timeoutId.unref?.();
-  });
-  let result;
-  try {
-    result = await Promise.race([completion, timeout]);
-  } finally {
-    clearTimeout(timeoutId);
+function parseInteractionSources(value) {
+  if (!Array.isArray(value)) {
+    throw new ApiError(400, "INVALID_FIELD", "'sources' must be an array");
   }
-  if (result.exitCode !== 0 || terminal !== "completed") {
-    throw new Error(terminalError || "Codex answer failed");
+  if (value.length > 50) {
+    throw new ApiError(400, "INVALID_FIELD", "'sources' cannot contain more than 50 items");
   }
-  return {
-    answer: answer || "Codex 已完成处理，但没有返回可发送的文本。",
-    citations: [],
-    threadId,
-  };
-}
-
-function createWecomConnectionManager({
-  database,
-  botSecretSeed,
-  answerMessage,
-  emitBot,
-  webSocketFactory = (url) => new WebSocket(url),
-  url = WECOM_AIBOT_WEBSOCKET_URL,
-  heartbeatMs = WECOM_AIBOT_HEARTBEAT_MS,
-  reconnectMs = WECOM_AIBOT_RECONNECT_MS,
-}) {
-  const connections = new Map();
-
-  function addSocketListener(socket, eventName, handler) {
-    if (typeof socket.on === "function") {
-      socket.on(eventName, handler);
-    } else {
-      socket.addEventListener(eventName, handler);
+  return value.map((item, index) => {
+    assertPlainObject(item);
+    assertAllowedKeys(item, new Set(["type", "ref", "title", "url", "excerpt"]));
+    const type = stringField(item.type, "sources." + index + ".type", { required: true, maxLength: 32 });
+    if (!["knowledge", "source", "issue"].includes(type)) {
+      throw new ApiError(400, "INVALID_FIELD", "source type must be knowledge, source or issue");
     }
-  }
-
-  function sendJson(socket, payload) {
-    socket.send(JSON.stringify(payload));
-  }
-
-  function activePush(botConfigId, conversationId, content) {
-    const connection = connections.get(botConfigId);
-    if (!connection) throw new Error("企业微信长连接未连接，无法主动推送");
-    sendJson(connection.socket, {
-      cmd: "aibot_send_msg",
-      headers: { req_id: wecomRequestId() },
-      body: {
-        bot_id: connection.bot.botId,
-        chatid: conversationId,
-        msgtype: "text",
-        text: { content },
-      },
-    });
-  }
-
-  function closeConnection(id) {
-    const connection = connections.get(id);
-    if (!connection) return;
-    connections.delete(id);
-    clearInterval(connection.heartbeat);
-    clearTimeout(connection.reconnect);
-    try {
-      if (typeof connection.socket.terminate === "function") {
-        connection.socket.terminate();
-      } else {
-        connection.socket.close();
-      }
-    } catch {}
-  }
-
-  function scheduleReconnect(botId, reason) {
-    const current = database.getProjectBot(botId);
-    if (!current?.enabled) return;
-    const connection = connections.get(botId);
-    if (!connection || connection.reconnect) return;
-    const bot = database.setProjectBotConnection(botId, "disconnected", reason);
-    emitBot(bot);
-    connection.reconnect = setTimeout(() => {
-      connection.reconnect = null;
-      void connect(botId).catch(() => {});
-    }, reconnectMs);
-    connection.reconnect.unref?.();
-  }
-
-  async function handleMessage(connection, raw) {
-    let message;
-    try {
-      message = JSON.parse(typeof raw === "string" ? raw : raw.toString());
-    } catch {
-      return;
-    }
-    if (message.errcode !== undefined && message.headers?.req_id === connection.subscribeReqId) {
-      if (message.errcode === 0) {
-        const bot = database.setProjectBotConnection(connection.bot.id, "connected", null);
-        emitBot(bot);
-      } else {
-        const error = `${message.errcode}: ${message.errmsg ?? "subscribe failed"}`;
-        const bot = database.setProjectBotConnection(connection.bot.id, "error", error);
-        emitBot(bot);
-      }
-      return;
-    }
-    if (message.cmd === "aibot_event_callback" && message.body?.event?.eventtype === "disconnected_event") {
-      scheduleReconnect(connection.bot.id, "企业微信断开了旧连接");
-      return;
-    }
-    if (message.cmd !== "aibot_msg_callback") return;
-    const body = message.body ?? {};
-    const text = wecomMessageText(body).trim();
-    const conversationId = wecomConversationId(body);
-    if (!text || !conversationId) return;
-    const result = await answerMessage(connection.bot, {
-      conversationId,
-      messageId: body.msgid ?? null,
-      messageType: body.msgtype ?? "text",
-      text,
-    });
-    sendJson(connection.socket, {
-      cmd: "aibot_respond_msg",
-      headers: { req_id: message.headers?.req_id ?? wecomRequestId() },
-      body: {
-        msgtype: "stream",
-        stream: {
-          id: `tb-${body.msgid ?? wecomRequestId()}`,
-          finish: true,
-          content: result.answer.answer,
-        },
-      },
-    });
-  }
-
-  async function connect(id) {
-    const bot = database.getProjectBot(id);
-    if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${id}' does not exist`);
-    if (!bot.enabled) return database.setProjectBotConnection(id, "disabled", null);
-    const secret = decryptBotSecret(database.getProjectBotSecretCiphertext(bot.id), botSecretSeed);
-    if (!secret) throw new ApiError(409, "PROJECT_BOT_SECRET_UNAVAILABLE", "Project bot secret is unavailable");
-    closeConnection(id);
-    const connecting = database.setProjectBotConnection(id, "connecting", null);
-    emitBot(connecting);
-    const socket = webSocketFactory(url);
-    const connection = {
-      bot,
-      socket,
-      subscribeReqId: wecomRequestId(),
-      heartbeat: null,
-      reconnect: null,
+    return {
+      type,
+      ref: stringField(item.ref, "sources." + index + ".ref", { required: true, maxLength: 1024 }),
+      title: stringField(item.title ?? null, "sources." + index + ".title", { nullable: true, maxLength: 240 }),
+      url: stringField(item.url ?? null, "sources." + index + ".url", { nullable: true, maxLength: 2048 }),
+      excerpt: stringField(item.excerpt ?? null, "sources." + index + ".excerpt", { nullable: true, maxLength: 4000 }),
     };
-    connections.set(id, connection);
-    addSocketListener(socket, "open", () => {
-      sendJson(socket, {
-        cmd: "aibot_subscribe",
-        headers: { req_id: connection.subscribeReqId },
-        body: { bot_id: bot.botId, secret },
-      });
-      connection.heartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) {
-          sendJson(socket, { cmd: "ping", headers: { req_id: wecomRequestId() } });
-        }
-      }, heartbeatMs);
-      connection.heartbeat.unref?.();
-    });
-    addSocketListener(socket, "message", (data) => {
-      void handleMessage(connection, data?.data ?? data).catch((error) => {
-        const updated = database.setProjectBotConnection(id, "error", error.message);
-        emitBot(updated);
-      });
-    });
-    addSocketListener(socket, "close", (codeOrEvent, reasonBuffer) => {
-      const closeCode = typeof codeOrEvent === "number" ? codeOrEvent : codeOrEvent?.code;
-      const closeReason = reasonBuffer?.toString?.() || codeOrEvent?.reason || "";
-      const code = closeCode ? ` code=${closeCode}` : "";
-      const reason = closeReason ? ` reason=${closeReason}` : "";
-      scheduleReconnect(id, `企业微信长连接已断开${code}${reason}`);
-    });
-    addSocketListener(socket, "error", (event) => {
-      const detail = event?.message
-        ?? event?.error?.message
-        ?? event?.error?.cause?.message
-        ?? event?.error?.cause?.code
-        ?? "";
-      scheduleReconnect(id, detail ? `企业微信长连接错误：${detail}` : "企业微信长连接错误");
-    });
-    return connecting;
-  }
-
-  function disconnect(id) {
-    closeConnection(id);
-    const bot = database.setProjectBotConnection(id, "disconnected", null);
-    emitBot(bot);
-    return bot;
-  }
-
-  function closeAll() {
-    for (const id of [...connections.keys()]) closeConnection(id);
-  }
-
-  async function restoreEnabled() {
-    const bots = database.listProjects().flatMap((project) => database.listProjectBots(project.id));
-    await Promise.all(bots
-      .filter((bot) => bot.enabled)
-      .map(async (bot) => {
-        try {
-          await connect(bot.id);
-        } catch (error) {
-          const updated = database.setProjectBotConnection(
-            bot.id,
-            "error",
-            error instanceof Error ? error.message : String(error),
-          );
-          emitBot(updated);
-        }
-      }));
-    for (const bot of bots.filter((bot) => !bot.enabled && bot.connectionStatus !== "disabled")) {
-      const updated = database.setProjectBotConnection(bot.id, "disabled", null);
-      emitBot(updated);
-    }
-  }
-
-  return { connect, disconnect, closeAll, restoreEnabled, activePush };
+  });
 }
 
-function secretKeyFromSeed(seed) {
-  return createHash("sha256").update(`${BOT_SECRET_KEY_CONTEXT}\0${seed}`).digest();
+function parseProjectInteractionCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "workspacePath", "sourceRuntime", "channel", "conversationId", "question", "answer", "label", "sources",
+  ]));
+  return {
+    workspacePath: pathField(body.workspacePath, "workspacePath"),
+    sourceRuntime: stringField(body.sourceRuntime ?? "hermes", "sourceRuntime", { required: true, maxLength: 64 }),
+    channel: stringField(body.channel ?? "wecom", "channel", { required: true, maxLength: 64 }),
+    conversationId: stringField(body.conversationId, "conversationId", { required: true, maxLength: 256 }),
+    question: stringField(body.question, "question", { required: true, maxLength: 100_000 }),
+    answer: stringField(body.answer, "answer", { required: true, maxLength: 200_000 }),
+    label: parseInteractionLabel(body.label),
+    sources: parseInteractionSources(body.sources ?? []),
+  };
 }
 
-function encryptBotSecret(secret, seed) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", secretKeyFromSeed(seed), iv);
-  const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
+function parseSourceListBody(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["sources"]));
+  return parseInteractionSources(body.sources);
 }
 
-function decryptBotSecret(ciphertext, seed) {
-  if (typeof ciphertext !== "string" || !ciphertext.startsWith("v1:")) return null;
-  const [, ivValue, tagValue, ciphertextValue] = ciphertext.split(":");
-  if (!ivValue || !tagValue || !ciphertextValue) return null;
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    secretKeyFromSeed(seed),
-    Buffer.from(ivValue, "base64url"),
+function parseKnowledgeCandidateCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["title", "summary", "content", "targetPath", "interactionId", "sources"]));
+  const title = stringField(body.title, "title", { required: true, maxLength: 240 });
+  const targetPath = stringField(
+    body.targetPath ?? `docs/knowledge/candidates/${randomUUID()}.md`,
+    "targetPath",
+    { required: true, maxLength: 4096 },
   );
-  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertextValue, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
+  if (!targetPath.startsWith("docs/knowledge/") || !targetPath.endsWith(".md")) {
+    throw new ApiError(400, "INVALID_FIELD", "'targetPath' must be a docs/knowledge/*.md file");
+  }
+  return {
+    title,
+    summary: stringField(body.summary ?? "", "summary", { maxLength: 20_000 }),
+    content: stringField(body.content, "content", { required: true, maxLength: 200_000 }),
+    targetPath,
+    interactionId: stringField(body.interactionId ?? null, "interactionId", { nullable: true, maxLength: 128 }),
+    sources: parseInteractionSources(body.sources ?? []),
+  };
 }
 
 function parseTaskCreate(body) {
@@ -1826,10 +1464,6 @@ export function createTaskboardServer(options = {}) {
   const resolved = resolveServerOptions(options);
   const database = new TaskboardDatabase(resolved.databasePath);
   const events = new EventHub();
-  const codexProcessEnvironment = withoutTaskboardLauncherEnvironment(
-    options.processEnv ?? process.env,
-  );
-
   const knowledge = options.knowledgeService ?? new KnowledgeService({
     codexExecutable: resolved.codexExecutable,
     processEnv: options.processEnv ?? process.env,
@@ -1849,10 +1483,6 @@ export function createTaskboardServer(options = {}) {
     ompExecutable: resolved.ompExecutable,
   });
   const knowledgeRuns = new Map();
-  const botSecretSeed = options.botSecretKey ?? `${resolved.databasePath}\0${os.userInfo().username}`;
-  const wecomSessionQueues = new Map();
-  let wecomConnections;
-
   // Codex session plan-progress scanning (backported from upstream v0.2.3).
   // Reads the tail of ~/.codex/sessions/*-<threadId>.jsonl to derive plan step
   // completion. Returns null for non-codex threads (claude/omp have no such
@@ -2061,129 +1691,6 @@ export function createTaskboardServer(options = {}) {
     return selected;
   }
 
-  function enqueueWecomSession(sessionKey, action) {
-    const previous = wecomSessionQueues.get(sessionKey) ?? Promise.resolve();
-    const current = previous.then(action, action).finally(() => {
-      if (wecomSessionQueues.get(sessionKey) === current) wecomSessionQueues.delete(sessionKey);
-    });
-    wecomSessionQueues.set(sessionKey, current);
-    return current;
-  }
-
-  function recordWecomMessage(bot, message) {
-    if (!bot.enabled) {
-      throw new ApiError(409, "PROJECT_BOT_DISABLED", "Project bot is disabled");
-    }
-    const secretCiphertext = database.getProjectBotSecretCiphertext(bot.id);
-    if (!decryptBotSecret(secretCiphertext, botSecretSeed)) {
-      throw new ApiError(409, "PROJECT_BOT_SECRET_UNAVAILABLE", "Project bot secret is unavailable");
-    }
-    const project = database.getProject(bot.projectId);
-    if (!project) {
-      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${bot.projectId}' does not exist`);
-    }
-    const sessionKey = stableSessionKey(bot.projectId, bot.botId, message.conversationId);
-    const session = database.getOrCreateProjectBotSession({
-      botConfigId: bot.id,
-      projectId: bot.projectId,
-      botId: bot.botId,
-      wecomConversationId: message.conversationId,
-      sessionKey,
-      runtime: bot.runtime,
-    });
-    database.createProjectBotAuditEvent({
-      botConfigId: bot.id,
-      sessionId: session.id,
-      projectId: bot.projectId,
-      botId: bot.botId,
-      wecomConversationId: message.conversationId,
-      direction: "inbound",
-      messageType: message.messageType,
-      body: message.text,
-      status: "received",
-    });
-    return { project, session, sessionKey };
-  }
-
-  function startWecomBackgroundAnswer(bot, message) {
-    const { project, session, sessionKey } = recordWecomMessage(bot, message);
-    void enqueueWecomSession(sessionKey, async () => {
-      const runningSession = database.updateProjectBotSession(session.id, { status: "running" }) ?? session;
-      try {
-        const answer = bot.knowledgeEnabled || bot.codeSearchEnabled
-          ? await runWecomCodexTurn({
-              executable: resolved.codexExecutable,
-              processEnv: codexProcessEnvironment,
-              project,
-              bot,
-              session: runningSession,
-              message,
-              ttlMs: options.wecomCodexSessionTtlMs ?? WECOM_CODEX_SESSION_TTL_MS,
-              timeoutMs: options.wecomCodexTurnTimeoutMs ?? WECOM_CODEX_TURN_TIMEOUT_MS,
-            })
-          : {
-              answer: "该机器人未开启知识库或代码只读检索，无法回答项目问题。",
-              citations: [],
-              threadId: runningSession.threadId,
-            };
-        wecomConnections.activePush(bot.id, message.conversationId, answer.answer);
-        const outbound = database.createProjectBotAuditEvent({
-          botConfigId: bot.id,
-          sessionId: session.id,
-          projectId: bot.projectId,
-          botId: bot.botId,
-          wecomConversationId: message.conversationId,
-          direction: "outbound",
-          messageType: "text",
-          body: answer.answer,
-          citations: answer.citations,
-          status: "answered",
-        });
-        const updatedSession = database.updateProjectBotSession(session.id, {
-          status: "idle",
-          threadId: answer.threadId ?? runningSession.threadId,
-          summary: answer.answer.slice(0, 2000),
-        });
-        return { bot, session: updatedSession, answer, auditEvent: outbound };
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        database.updateProjectBotSession(session.id, { status: "error" });
-        database.createProjectBotAuditEvent({
-          botConfigId: bot.id,
-          sessionId: session.id,
-          projectId: bot.projectId,
-          botId: bot.botId,
-          wecomConversationId: message.conversationId,
-          direction: "outbound",
-          messageType: "error",
-          body: "",
-          citations: [],
-          status: "failed",
-          error: error instanceof Error ? error.message : String(error),
-        });
-        try {
-          wecomConnections.activePush(bot.id, message.conversationId, `处理失败：${errorMessage}`);
-        } catch {}
-      }
-    });
-    return {
-      bot,
-      session,
-      answer: { answer: WECOM_AIBOT_PROCESSING_ANSWER, citations: [] },
-      auditEvent: null,
-    };
-  }
-
-  wecomConnections = createWecomConnectionManager({
-    database,
-    botSecretSeed,
-    answerMessage: startWecomBackgroundAnswer,
-    emitBot: (bot) => events.emit("project-bot.updated", { projectId: bot.projectId, bot }),
-    webSocketFactory: options.wecomWebSocketFactory,
-    url: options.wecomWebSocketUrl,
-    heartbeatMs: options.wecomHeartbeatMs,
-    reconnectMs: options.wecomReconnectMs,
-  });
 
   const server = createServer(async (request, response) => {
     response.setHeader("x-content-type-options", "nosniff");
@@ -2762,6 +2269,13 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "POST"]);
       }
 
+      if (pathname === "/api/projects/resolve-by-workspace") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertAllowedQuery(url.searchParams, new Set(["workspacePath"]), "Resolve project by workspace");
+        const workspacePath = pathField(url.searchParams.get("workspacePath") ?? "", "workspacePath");
+        return sendJson(response, 200, { result: database.resolveProjectByWorkspace(workspacePath) });
+      }
+
       const projectRoute = pathname.match(/^\/api\/projects\/([^/]+)$/);
       if (projectRoute) {
         const projectId = validateProjectId(decodeRouteSegment(projectRoute[1], "Project id"));
@@ -2772,96 +2286,113 @@ export function createTaskboardServer(options = {}) {
         return sendJson(response, 200, { project });
       }
 
-      const projectBotsRoute = pathname.match(/^\/api\/projects\/([^/]+)\/bots$/);
-      if (projectBotsRoute) {
-        const projectId = validateProjectId(decodeRouteSegment(projectBotsRoute[1], "Project id"));
-        assertNoQuery(url.searchParams, "Project bot routes");
-        if (request.method === "GET") {
-          return sendJson(response, 200, { bots: database.listProjectBots(projectId) });
-        }
-        if (request.method === "POST") {
-          const input = parseProjectBotCreate(await readJson(request));
-          const bot = database.createProjectBot({
-            projectId,
-            ...input,
-            secretCiphertext: encryptBotSecret(input.secret, botSecretSeed),
-          });
-          events.emit("project-bot.created", { projectId, bot });
-          return sendJson(response, 201, { bot });
-        }
-        return methodNotAllowed(response, ["GET", "POST"]);
+      const projectContextRoute = pathname.match(/^\/api\/projects\/([^/]+)\/context$/);
+      if (projectContextRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectContextRoute[1], "Project id"));
+        assertNoQuery(url.searchParams, "Project context route");
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const project = database.getProject(projectId);
+        if (!project) throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+        return sendJson(response, 200, {
+          project,
+          labels: ["咨询", "缺陷"],
+          interactionSources: ["knowledge", "source", "issue"],
+        });
       }
 
-      const projectBotRoute = pathname.match(/^\/api\/project-bots\/([^/]+)(?:\/(connect|disconnect|audit))?$/);
-      if (projectBotRoute) {
-        const botConfigId = decodeRouteSegment(projectBotRoute[1], "Project bot id");
-        const action = projectBotRoute[2];
-        if (action === "audit") {
-          assertAllowedQuery(url.searchParams, new Set(["limit"]), "Project bot audit route");
-          if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+      const projectInteractionsRoute = pathname.match(/^\/api\/projects\/([^/]+)\/interactions$/);
+      if (projectInteractionsRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectInteractionsRoute[1], "Project id"));
+        if (request.method === "GET") {
+          assertAllowedQuery(url.searchParams, new Set(["limit"]), "Project interactions route");
           const limitValue = url.searchParams.get("limit");
           const limit = limitValue === null ? 50 : Number(limitValue);
           if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
             throw new ApiError(400, "INVALID_QUERY_PARAMETER", "'limit' must be an integer from 1 to 200");
           }
-          return sendJson(response, 200, { events: database.listProjectBotAuditEvents(botConfigId, limit) });
+          return sendJson(response, 200, { interactions: database.listProjectInteractions(projectId, limit) });
         }
-        assertNoQuery(url.searchParams, "Project bot routes");
-        if (action === "connect" || action === "disconnect") {
-          if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
-          const { version } = parseProjectBotVersionBody(await readJson(request));
-          const current = database.getProjectBot(botConfigId);
-          if (!current) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${botConfigId}' does not exist`);
-          if (current.version !== version) {
-            throw new ApiError(409, "VERSION_CONFLICT", "Project bot was changed by another client", {
-              expectedVersion: version,
-              actualVersion: current.version,
-            });
-          }
-          const bot = action === "connect"
-            ? await wecomConnections.connect(botConfigId)
-            : wecomConnections.disconnect(botConfigId);
-          events.emit("project-bot.updated", { projectId: bot.projectId, bot });
-          return sendJson(response, 200, { bot });
+        if (request.method === "POST") {
+          assertNoQuery(url.searchParams, "Project interactions route");
+          const interaction = database.createProjectInteraction({
+            projectId,
+            ...parseProjectInteractionCreate(await readJson(
+              request,
+              KNOWLEDGE_BODY_LIMIT,
+              "Interaction payload cannot exceed 6 MiB",
+            )),
+          });
+          events.emit("project-interaction.created", { projectId, interaction });
+          return sendJson(response, 201, { interaction });
         }
-        if (request.method === "GET") {
-          const bot = database.getProjectBot(botConfigId);
-          if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `Project bot '${botConfigId}' does not exist`);
-          return sendJson(response, 200, { bot });
-        }
-        if (request.method === "PATCH") {
-          const parsed = parseProjectBotPatch(await readJson(request));
-          const changes = { ...parsed.changes };
-          if (changes.secret !== undefined) {
-            changes.secretCiphertext = encryptBotSecret(changes.secret, botSecretSeed);
-            delete changes.secret;
-          }
-          const bot = database.updateProjectBot(botConfigId, parsed.version, changes);
-          events.emit("project-bot.updated", { projectId: bot.projectId, bot });
-          return sendJson(response, 200, { bot });
-        }
-        if (request.method === "DELETE") {
-          const { version } = parseProjectBotVersionBody(await readJson(request));
-          const bot = database.deleteProjectBot(botConfigId, version);
-          events.emit("project-bot.deleted", { projectId: bot.projectId, bot });
-          return sendJson(response, 200, { bot });
-        }
-        return methodNotAllowed(response, ["GET", "PATCH", "DELETE"]);
+        return methodNotAllowed(response, ["GET", "POST"]);
       }
 
-      const wecomBotMessageRoute = pathname.match(/^\/api\/wecom\/bots\/([^/]+)\/messages$/);
-      if (wecomBotMessageRoute) {
-        assertNoQuery(url.searchParams, "WeCom bot message route");
+      const interactionSourcesRoute = pathname.match(/^\/api\/interactions\/([^/]+)\/sources$/);
+      if (interactionSourcesRoute) {
+        const id = decodeRouteSegment(interactionSourcesRoute[1], "Interaction id");
+        assertNoQuery(url.searchParams, "Interaction sources route");
+        if (request.method !== "PATCH") return methodNotAllowed(response, ["PATCH"]);
+        const interaction = database.updateProjectInteractionSources(
+          id,
+          parseSourceListBody(await readJson(
+            request,
+            KNOWLEDGE_BODY_LIMIT,
+            "Interaction sources cannot exceed 6 MiB",
+          )),
+        );
+        return sendJson(response, 200, { interaction });
+      }
+
+      const projectKnowledgeCandidatesRoute = pathname.match(
+        /^\/api\/projects\/([^/]+)\/knowledge-candidates$/,
+      );
+      if (projectKnowledgeCandidatesRoute) {
+        const projectId = validateProjectId(decodeRouteSegment(projectKnowledgeCandidatesRoute[1], "Project id"));
+        assertNoQuery(url.searchParams, "Knowledge candidate route");
         if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
-        const botId = decodeRouteSegment(wecomBotMessageRoute[1], "BotID");
-        const bot = database.getProjectBotByBotId(botId);
-        if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `BotID '${botId}' is not configured`);
-        const result = startWecomBackgroundAnswer(bot, parseWecomMessage(await readJson(request)));
-        return sendJson(response, 200, {
-          session: result.session,
-          answer: result.answer,
-          auditEvent: result.auditEvent,
+        const input = parseKnowledgeCandidateCreate(await readJson(
+          request,
+          KNOWLEDGE_BODY_LIMIT,
+          "Knowledge candidate cannot exceed 6 MiB",
+        ));
+        const sourceLines = input.sources.map((source) => (
+          `  - type: ${source.type}\n    ref: ${source.ref}`
+        )).join("\n");
+        const afterContent = [
+          "---",
+          `id: candidate.${randomUUID()}`,
+          `title: ${input.title}`,
+          "kind: business-fact",
+          `updated_at: ${new Date().toISOString()}`,
+          ...(sourceLines ? ["sources:", sourceLines] : []),
+          "---",
+          `# ${input.title}`,
+          "",
+          input.content,
+          "",
+        ].join("\n");
+        const proposal = database.createKnowledgeProposal({
+          projectId,
+          title: input.title,
+          sourceType: "project_review",
+          sourceSnapshot: {
+            sourceRuntime: "hermes",
+            interactionId: input.interactionId,
+            sources: input.sources,
+          },
+          summary: input.summary,
+          changes: [{
+            targetPath: input.targetPath,
+            operation: "create",
+            baseDigest: null,
+            beforeContent: null,
+            afterContent,
+          }],
+          actor: { type: "agent", id: "hermes-agent", name: "Hermes Agent" },
         });
+        events.emit("knowledge-proposal.created", { projectId, proposal });
+        return sendJson(response, 201, { proposal });
       }
 
       const projectKnowledgeSourcesRoute = pathname.match(
@@ -3456,13 +2987,9 @@ export function createTaskboardServer(options = {}) {
         server.listen(port, host);
       });
       listening = true;
-      void wecomConnections.restoreEnabled().catch((error) => {
-        console.error("Failed to restore WeCom bot connections", error);
-      });
       return server.address();
     },
     async close() {
-      wecomConnections?.closeAll();
       const serverClosed = listening
         ? new Promise((resolve, reject) => {
             server.close((error) => error ? reject(error) : resolve());

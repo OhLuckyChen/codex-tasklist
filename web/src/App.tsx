@@ -74,7 +74,6 @@ import {
 } from "./components/InlineMediaComposer";
 import { LinearIcon } from "./components/LinearIcon";
 import { ProjectAutomationMenu } from "./components/ProjectAutomationMenu";
-import { ProjectBotsPanel } from "./components/ProjectBotsPanel";
 import { ProjectCreator, type ProjectCreateDraft } from "./components/ProjectCreator";
 import { TaskContextMenu } from "./components/TaskContextMenu";
 import { TaskDetail } from "./components/TaskDetail";
@@ -122,7 +121,7 @@ import {
 } from "./workflowStore";
 type ConnectionState = "connecting" | "live" | "reconnecting";
 type Theme = "light" | "dark";
-type BoardView = "issues" | "drafts" | "knowledge" | "bots" | "workflow";
+type BoardView = "issues" | "drafts" | "knowledge" | "workflow";
 const SHOW_WORKFLOW_BOARD_ENTRY = false;
 const GLOBAL_PROJECT_ID = "__all_projects__";
 const GLOBAL_VIEW_QUERY_PARAM = "view";
@@ -637,7 +636,6 @@ function isProjectBoardView(value: string | null): value is BoardView {
   return value === "issues"
     || value === "drafts"
     || value === "knowledge"
-    || value === "bots"
     || value === "workflow";
 }
 
@@ -3714,14 +3712,6 @@ export function App() {
                 >
                   项目知识{knowledgeProposalCount > 0 ? ` ${knowledgeProposalCount}` : ""}
                 </button>
-                <button
-                  className={`view-tab${boardView === "bots" ? " active" : ""}`}
-                  type="button"
-                  aria-pressed={boardView === "bots"}
-                  onClick={() => selectBoardView("bots")}
-                >
-                  企微机器人
-                </button>
               </>
             )}
             {SHOW_WORKFLOW_BOARD_ENTRY && (
@@ -3991,17 +3981,6 @@ export function App() {
             onProposalCountChange={setKnowledgeProposalCount}
             onInitialize={openKnowledgeInitializationIssue}
             onGenerateProposal={runKnowledgeAnalysisInCodex}
-          />
-        ) : !detailTask && boardView === "bots" && selectedProject ? (
-          <ProjectBotsPanel
-            projectId={selectedProject.id}
-            projectName={projectNames[selectedProject.id] ?? selectedProject.name}
-            workspacePath={
-              selectedDeviceWorkspacePath
-              ?? selectedProject.workspacePath
-              ?? developmentScan.workspacePath
-              ?? ""
-            }
           />
         ) : detailTask && selectedProject ? (
           <TaskDetail
