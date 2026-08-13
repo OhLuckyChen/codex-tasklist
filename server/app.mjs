@@ -801,7 +801,29 @@ function createWecomConnectionManager({
     for (const id of [...connections.keys()]) closeConnection(id);
   }
 
-  return { connect, disconnect, closeAll };
+  async function restoreEnabled() {
+    const bots = database.listProjects().flatMap((project) => database.listProjectBots(project.id));
+    await Promise.all(bots
+      .filter((bot) => bot.enabled)
+      .map(async (bot) => {
+        try {
+          await connect(bot.id);
+        } catch (error) {
+          const updated = database.setProjectBotConnection(
+            bot.id,
+            "error",
+            error instanceof Error ? error.message : String(error),
+          );
+          emitBot(updated);
+        }
+      }));
+    for (const bot of bots.filter((bot) => !bot.enabled && bot.connectionStatus !== "disabled")) {
+      const updated = database.setProjectBotConnection(bot.id, "disabled", null);
+      emitBot(updated);
+    }
+  }
+
+  return { connect, disconnect, closeAll, restoreEnabled };
 }
 
 function secretKeyFromSeed(seed) {
@@ -3264,6 +3286,9 @@ export function createTaskboardServer(options = {}) {
         server.listen(port, host);
       });
       listening = true;
+      void wecomConnections.restoreEnabled().catch((error) => {
+        console.error("Failed to restore WeCom bot connections", error);
+      });
       return server.address();
     },
     async close() {
