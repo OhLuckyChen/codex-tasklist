@@ -87,6 +87,17 @@ async function requestWithHost(baseUrl, host) {
   });
 }
 
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue;
+  while (Date.now() < deadline) {
+    lastValue = await predicate();
+    if (lastValue) return lastValue;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return lastValue;
+}
+
 test("health and the default local project are available", async () => {
   let skillPath;
   const baseUrl = await startServer(async (directory) => {
@@ -318,20 +329,24 @@ test("a persistent project knowledge run stores its callback as a ready proposal
 
 test("project WeCom bots keep secrets encrypted and route isolated sessions to project knowledge", async () => {
   let workspacePath;
-  const asked = [];
-  const knowledgeService = {
-    ask: async (workspace, question) => {
-      asked.push({ workspace, question });
-      return {
-        answer: `answer ${asked.length}`,
-        citations: [{ type: "file", ref: "server/app.mjs", label: "server app" }],
-      };
-    },
-  };
+  let codexCallsPath;
   const baseUrl = await startServer(async (directory) => {
     workspacePath = path.join(directory, "workspace");
     await mkdir(workspacePath, { recursive: true });
-    return { knowledgeService, botSecretKey: "test-secret-key" };
+    codexCallsPath = path.join(directory, "codex-calls.jsonl");
+    const codexExecutable = path.join(directory, "fake-codex");
+    await writeFile(codexExecutable, `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+appendFileSync(${JSON.stringify(codexCallsPath)}, JSON.stringify({ args: process.argv.slice(2) }) + "\\n");
+process.stdin.resume();
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-" + Date.now() }));
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "answer" } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));
+});
+`);
+    await chmod(codexExecutable, 0o755);
+    return { codexExecutable, botSecretKey: "test-secret-key", wecomCodexTurnTimeoutMs: 1_000 };
   });
   await request(baseUrl, "/api/projects", {
     method: "POST",
@@ -369,7 +384,7 @@ test("project WeCom bots keep secrets encrypted and route isolated sessions to p
     },
   });
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.answer.answer, "answer 1");
+  assert.equal(first.body.answer.answer, "已收到，正在处理中。完成后会主动推送结果。");
   assert.equal(first.body.session.wecomConversationId, "single-user-a");
 
   const second = await request(baseUrl, "/api/wecom/bots/bot-alpha/messages", {
@@ -382,15 +397,23 @@ test("project WeCom bots keep secrets encrypted and route isolated sessions to p
   });
   assert.equal(second.response.status, 200);
   assert.notEqual(second.body.session.id, first.body.session.id);
-  assert.equal(asked.length, 2);
-  assert.equal(asked[0].workspace, workspacePath);
-  assert.match(asked[0].question, /只读回答/);
+  const calls = await waitFor(async () => {
+    const content = await readFile(codexCallsPath, "utf8").catch(() => "");
+    const lines = content.trim().split("\n").filter(Boolean);
+    return lines.length >= 2 ? lines.map((line) => JSON.parse(line)) : null;
+  });
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((call) => call.args.includes("-C") && call.args.includes(workspacePath)));
 
-  const audit = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+  const audit = await waitFor(async () => {
+    const result = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+    return result.body.events.length >= 4 ? result : null;
+  });
   assert.equal(audit.response.status, 200);
   assert.equal(audit.body.events.length, 4);
-  const answered = audit.body.events.find((event) => event.direction === "outbound" && event.status === "answered");
-  assert.deepEqual(answered.citations, [{ type: "file", ref: "server/app.mjs", label: "server app" }]);
+  const failed = audit.body.events.filter((event) => event.direction === "outbound" && event.status === "failed");
+  assert.equal(failed.length, 2);
+  assert.match(failed[0].error, /长连接未连接/);
 });
 
 test("enabled WeCom bots restore websocket subscriptions after server start", async () => {
@@ -454,15 +477,33 @@ test("enabled WeCom bots restore websocket subscriptions after server start", as
   }
 });
 
-test("WeCom bot answers with a timeout fallback when project knowledge is slow", async () => {
+test("WeCom bot replies immediately and pushes a Codex answer when the turn completes", async () => {
   let workspacePath;
-  const knowledgeService = {
-    ask: () => new Promise(() => {}),
-  };
+  let codexExecutable;
+  let codexCallsPath;
   const baseUrl = await startServer(async (directory) => {
     workspacePath = path.join(directory, "workspace");
     await mkdir(workspacePath, { recursive: true });
-    return { knowledgeService, botSecretKey: "test-secret-key", wecomAnswerTimeoutMs: 5 };
+    codexCallsPath = path.join(directory, "codex-calls.jsonl");
+    codexExecutable = path.join(directory, "fake-codex");
+    await writeFile(codexExecutable, `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+appendFileSync(${JSON.stringify(codexCallsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+process.stdin.resume();
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-wecom-1" }));
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "这是 Codex 后台答案" } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));
+});
+`);
+    await chmod(codexExecutable, 0o755);
+    return {
+      codexExecutable,
+      botSecretKey: "test-secret-key",
+      wecomWebSocketFactory: (url) => new FakeWecomSocket(url),
+      wecomHeartbeatMs: 60_000,
+      wecomCodexTurnTimeoutMs: 1_000,
+    };
   });
   await request(baseUrl, "/api/projects", {
     method: "POST",
@@ -480,6 +521,11 @@ test("WeCom bot answers with a timeout fallback when project knowledge is slow",
       codeSearchEnabled: true,
     },
   });
+  await request(baseUrl, `/api/project-bots/${created.body.bot.id}/connect`, {
+    method: "POST",
+    body: { version: created.body.bot.version },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
 
   const answered = await request(baseUrl, "/api/wecom/bots/bot-timeout/messages", {
     method: "POST",
@@ -490,14 +536,52 @@ test("WeCom bot answers with a timeout fallback when project knowledge is slow",
     },
   });
   assert.equal(answered.response.status, 200);
-  assert.match(answered.body.answer.answer, /已收到你的问题/);
+  assert.equal(answered.body.answer.answer, "已收到，正在处理中。完成后会主动推送结果。");
 
-  const audit = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+  const audit = await waitFor(async () => {
+    const result = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+    const outboundEvent = result.body.events.find((event) => event.direction === "outbound");
+    return outboundEvent ? result : null;
+  });
   assert.equal(audit.response.status, 200);
   assert.equal(audit.body.events.length, 2);
   const outbound = audit.body.events.find((event) => event.direction === "outbound");
-  assert.equal(outbound.status, "failed");
-  assert.equal(outbound.error, "Project knowledge answer timed out");
+  assert.equal(outbound.status, "answered");
+  assert.equal(outbound.body, "这是 Codex 后台答案");
+  assert.deepEqual(fakeWebSockets[0].sent.find((message) => message.cmd === "aibot_send_msg"), {
+    cmd: "aibot_send_msg",
+    headers: { req_id: fakeWebSockets[0].sent.find((message) => message.cmd === "aibot_send_msg").headers.req_id },
+    body: {
+      bot_id: "bot-timeout",
+      chatid: "single-user-timeout",
+      msgtype: "text",
+      text: { content: "这是 Codex 后台答案" },
+    },
+  });
+  assert.equal(answered.body.session.threadId, null);
+
+  await request(baseUrl, "/api/wecom/bots/bot-timeout/messages", {
+    method: "POST",
+    body: {
+      conversationId: "single-user-timeout",
+      messageType: "text",
+      text: "继续",
+    },
+  });
+  const calls = await waitFor(async () => {
+    const content = await readFile(codexCallsPath, "utf8").catch(() => "");
+    const lines = content.trim().split("\n").filter(Boolean);
+    return lines.length >= 2 ? lines.map((line) => JSON.parse(line)) : null;
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].slice(0, 3), ["exec", "resume", "--json"]);
+  assert.equal(calls[1].at(-2), "thread-wecom-1");
+  assert.equal(calls[1].at(-1), "-");
+  const finalAudit = await waitFor(async () => {
+    const result = await request(baseUrl, `/api/project-bots/${created.body.bot.id}/audit`);
+    return result.body.events.filter((event) => event.direction === "outbound").length >= 2 ? result : null;
+  });
+  assert.equal(finalAudit.body.events.filter((event) => event.direction === "outbound").length, 2);
 });
 
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {

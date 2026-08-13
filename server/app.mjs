@@ -22,6 +22,7 @@ import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createClaudeLauncher } from "./claude-launcher.mjs";
 import { createOmpLauncher } from "./omp-launcher.mjs";
 import { KnowledgeService, knowledgeInternals } from "./knowledge-service.mjs";
+import { normalizeCodexEvent, spawnCodexTurn } from "./codex-process.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const execFileAsync = promisify(execFile);
@@ -34,8 +35,9 @@ const BOT_SECRET_KEY_CONTEXT = "codex-taskboard-project-bot-secret";
 const WECOM_AIBOT_WEBSOCKET_URL = "wss://openws.work.weixin.qq.com";
 const WECOM_AIBOT_HEARTBEAT_MS = 30_000;
 const WECOM_AIBOT_RECONNECT_MS = 5_000;
-const WECOM_AIBOT_ANSWER_TIMEOUT_MS = 20_000;
-const WECOM_AIBOT_TIMEOUT_ANSWER = "已收到你的问题，但项目知识检索暂时没有在企微回复窗口内完成。请稍后重试，或在 Taskboard 项目知识中检查当前工作区索引状态。";
+const WECOM_AIBOT_PROCESSING_ANSWER = "已收到，正在处理中。完成后会主动推送结果。";
+const WECOM_CODEX_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const WECOM_CODEX_TURN_TIMEOUT_MS = 10 * 60 * 1000;
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -663,13 +665,112 @@ function wecomMessageText(body) {
   return "";
 }
 
-function withTimeout(promise, timeoutMs, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-    timer.unref?.();
+function withinTtl(timestamp, ttlMs, nowMs = Date.now()) {
+  const parsed = Date.parse(timestamp ?? "");
+  return Number.isFinite(parsed) && nowMs - parsed <= ttlMs;
+}
+
+function buildWecomCodexPrompt({ project, bot, message }) {
+  return [
+    "你是 Taskboard 项目绑定的企微答疑助手。",
+    `项目：${project.name} (${project.id})`,
+    `企微会话：${message.conversationId}`,
+    `只读工作区边界：${bot.workspacePath}`,
+    "只允许基于项目知识库和绑定工作区的代码、配置、测试、文档做只读回答。",
+    "回答实现、调用链或排障问题时必须给出知识条目或文件引用。",
+    "不要执行代码修改、Git、部署、数据库写入或外部副作用操作；如果用户要求这类操作，说明必须回到 Codex 中另行明确确认。",
+    "用中文回答，结论先行，必要时列出引用。",
+    "",
+    message.text,
+  ].join("\n");
+}
+
+async function runWecomCodexTurn({
+  executable,
+  processEnv,
+  project,
+  bot,
+  session,
+  message,
+  ttlMs = WECOM_CODEX_SESSION_TTL_MS,
+  timeoutMs = WECOM_CODEX_TURN_TIMEOUT_MS,
+}) {
+  const prompt = buildWecomCodexPrompt({ project, bot, message });
+  const previousLastMessageAt = session.previousLastMessageAt ?? session.lastMessageAt;
+  const shouldResume = Boolean(session.threadId && withinTtl(previousLastMessageAt, ttlMs));
+  const args = shouldResume
+    ? [
+        "exec",
+        "resume",
+        "--json",
+        "-c",
+        'approval_policy="never"',
+        session.threadId,
+        "-",
+      ]
+    : [
+        "exec",
+        "--skip-git-repo-check",
+        "--json",
+        "--color",
+        "never",
+        "-C",
+        bot.workspacePath,
+        "-s",
+        "read-only",
+        "-c",
+        'approval_policy="never"',
+        "-",
+      ];
+
+  let threadId = shouldResume ? session.threadId : null;
+  let answer = "";
+  let terminal = null;
+  let terminalError = "";
+  const { child, completion } = spawnCodexTurn({
+    executable,
+    args,
+    prompt,
+    env: processEnv,
+    onRawEvent(raw) {
+      const normalized = normalizeCodexEvent(raw);
+      if (normalized?.kind === "thread.started") {
+        threadId = normalized.threadId;
+      } else if (normalized?.kind === "event" && normalized.role === "assistant" && normalized.content) {
+        answer = normalized.content;
+      }
+      if (raw.type === "turn.completed") terminal = "completed";
+      if (raw.type === "turn.failed" || raw.type === "error") {
+        terminal = "failed";
+        terminalError ||= normalized?.content || "Codex answer failed";
+      }
+    },
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      try {
+        if (Number.isInteger(child.pid)) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {}
+      reject(new Error("Codex answer timed out"));
+    }, timeoutMs);
+    timeoutId.unref?.();
+  });
+  let result;
+  try {
+    result = await Promise.race([completion, timeout]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  if (result.exitCode !== 0 || terminal !== "completed") {
+    throw new Error(terminalError || "Codex answer failed");
+  }
+  return {
+    answer: answer || "Codex 已完成处理，但没有返回可发送的文本。",
+    citations: [],
+    threadId,
+  };
 }
 
 function createWecomConnectionManager({
@@ -694,6 +795,21 @@ function createWecomConnectionManager({
 
   function sendJson(socket, payload) {
     socket.send(JSON.stringify(payload));
+  }
+
+  function activePush(botConfigId, conversationId, content) {
+    const connection = connections.get(botConfigId);
+    if (!connection) throw new Error("企业微信长连接未连接，无法主动推送");
+    sendJson(connection.socket, {
+      cmd: "aibot_send_msg",
+      headers: { req_id: wecomRequestId() },
+      body: {
+        bot_id: connection.bot.botId,
+        chatid: conversationId,
+        msgtype: "text",
+        text: { content },
+      },
+    });
   }
 
   function closeConnection(id) {
@@ -860,7 +976,7 @@ function createWecomConnectionManager({
     }
   }
 
-  return { connect, disconnect, closeAll, restoreEnabled };
+  return { connect, disconnect, closeAll, restoreEnabled, activePush };
 }
 
 function secretKeyFromSeed(seed) {
@@ -1954,7 +2070,7 @@ export function createTaskboardServer(options = {}) {
     return current;
   }
 
-  async function answerWecomMessage(bot, message) {
+  function recordWecomMessage(bot, message) {
     if (!bot.enabled) {
       throw new ApiError(409, "PROJECT_BOT_DISABLED", "Project bot is disabled");
     }
@@ -1967,47 +2083,50 @@ export function createTaskboardServer(options = {}) {
       throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${bot.projectId}' does not exist`);
     }
     const sessionKey = stableSessionKey(bot.projectId, bot.botId, message.conversationId);
-    return enqueueWecomSession(sessionKey, async () => {
-      const session = database.getOrCreateProjectBotSession({
-        botConfigId: bot.id,
-        projectId: bot.projectId,
-        botId: bot.botId,
-        wecomConversationId: message.conversationId,
-        sessionKey,
-        runtime: bot.runtime,
-      });
-      database.createProjectBotAuditEvent({
-        botConfigId: bot.id,
-        sessionId: session.id,
-        projectId: bot.projectId,
-        botId: bot.botId,
-        wecomConversationId: message.conversationId,
-        direction: "inbound",
-        messageType: message.messageType,
-        body: message.text,
-        status: "received",
-      });
-      database.updateProjectBotSession(session.id, { status: "running" });
+    const session = database.getOrCreateProjectBotSession({
+      botConfigId: bot.id,
+      projectId: bot.projectId,
+      botId: bot.botId,
+      wecomConversationId: message.conversationId,
+      sessionKey,
+      runtime: bot.runtime,
+    });
+    database.createProjectBotAuditEvent({
+      botConfigId: bot.id,
+      sessionId: session.id,
+      projectId: bot.projectId,
+      botId: bot.botId,
+      wecomConversationId: message.conversationId,
+      direction: "inbound",
+      messageType: message.messageType,
+      body: message.text,
+      status: "received",
+    });
+    return { project, session, sessionKey };
+  }
+
+  function startWecomBackgroundAnswer(bot, message) {
+    const { project, session, sessionKey } = recordWecomMessage(bot, message);
+    void enqueueWecomSession(sessionKey, async () => {
+      const runningSession = database.updateProjectBotSession(session.id, { status: "running" }) ?? session;
       try {
-        const question = [
-          "你是 Taskboard 项目绑定的企微答疑助手。",
-          `项目：${project.name} (${project.id})`,
-          `企微会话：${message.conversationId}`,
-          "只允许基于项目知识库和绑定工作区的代码、配置、测试、文档做只读回答。",
-          "回答实现、调用链或排障问题时必须给出知识条目或文件引用；不要执行代码修改、Git、部署、数据库写入或外部副作用操作。",
-          "",
-          message.text,
-        ].join("\n");
         const answer = bot.knowledgeEnabled || bot.codeSearchEnabled
-          ? await withTimeout(
-              knowledge.ask(bot.workspacePath, question),
-              options.wecomAnswerTimeoutMs ?? WECOM_AIBOT_ANSWER_TIMEOUT_MS,
-              "Project knowledge answer timed out",
-            )
+          ? await runWecomCodexTurn({
+              executable: resolved.codexExecutable,
+              processEnv: codexProcessEnvironment,
+              project,
+              bot,
+              session: runningSession,
+              message,
+              ttlMs: options.wecomCodexSessionTtlMs ?? WECOM_CODEX_SESSION_TTL_MS,
+              timeoutMs: options.wecomCodexTurnTimeoutMs ?? WECOM_CODEX_TURN_TIMEOUT_MS,
+            })
           : {
               answer: "该机器人未开启知识库或代码只读检索，无法回答项目问题。",
               citations: [],
+              threadId: runningSession.threadId,
             };
+        wecomConnections.activePush(bot.id, message.conversationId, answer.answer);
         const outbound = database.createProjectBotAuditEvent({
           botConfigId: bot.id,
           sessionId: session.id,
@@ -2022,36 +2141,12 @@ export function createTaskboardServer(options = {}) {
         });
         const updatedSession = database.updateProjectBotSession(session.id, {
           status: "idle",
+          threadId: answer.threadId ?? runningSession.threadId,
           summary: answer.answer.slice(0, 2000),
         });
         return { bot, session: updatedSession, answer, auditEvent: outbound };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (errorMessage === "Project knowledge answer timed out") {
-          const outbound = database.createProjectBotAuditEvent({
-            botConfigId: bot.id,
-            sessionId: session.id,
-            projectId: bot.projectId,
-            botId: bot.botId,
-            wecomConversationId: message.conversationId,
-            direction: "outbound",
-            messageType: "text",
-            body: WECOM_AIBOT_TIMEOUT_ANSWER,
-            citations: [],
-            status: "failed",
-            error: errorMessage,
-          });
-          const updatedSession = database.updateProjectBotSession(session.id, {
-            status: "error",
-            summary: WECOM_AIBOT_TIMEOUT_ANSWER,
-          });
-          return {
-            bot,
-            session: updatedSession,
-            answer: { answer: WECOM_AIBOT_TIMEOUT_ANSWER, citations: [] },
-            auditEvent: outbound,
-          };
-        }
         database.updateProjectBotSession(session.id, { status: "error" });
         database.createProjectBotAuditEvent({
           botConfigId: bot.id,
@@ -2066,15 +2161,23 @@ export function createTaskboardServer(options = {}) {
           status: "failed",
           error: error instanceof Error ? error.message : String(error),
         });
-        throw error;
+        try {
+          wecomConnections.activePush(bot.id, message.conversationId, `处理失败：${errorMessage}`);
+        } catch {}
       }
     });
+    return {
+      bot,
+      session,
+      answer: { answer: WECOM_AIBOT_PROCESSING_ANSWER, citations: [] },
+      auditEvent: null,
+    };
   }
 
   wecomConnections = createWecomConnectionManager({
     database,
     botSecretSeed,
-    answerMessage: answerWecomMessage,
+    answerMessage: startWecomBackgroundAnswer,
     emitBot: (bot) => events.emit("project-bot.updated", { projectId: bot.projectId, bot }),
     webSocketFactory: options.wecomWebSocketFactory,
     url: options.wecomWebSocketUrl,
@@ -2753,7 +2856,7 @@ export function createTaskboardServer(options = {}) {
         const botId = decodeRouteSegment(wecomBotMessageRoute[1], "BotID");
         const bot = database.getProjectBotByBotId(botId);
         if (!bot) throw new ApiError(404, "PROJECT_BOT_NOT_FOUND", `BotID '${botId}' is not configured`);
-        const result = await answerWecomMessage(bot, parseWecomMessage(await readJson(request)));
+        const result = startWecomBackgroundAnswer(bot, parseWecomMessage(await readJson(request)));
         return sendJson(response, 200, {
           session: result.session,
           answer: result.answer,
