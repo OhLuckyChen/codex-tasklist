@@ -3723,7 +3723,6 @@ export function App() {
               aria-label="收藏议题"
               aria-pressed={boardView === "issues" && favoriteTasksOnly}
               onClick={() => {
-                if (!isGlobalBoard) openGlobalBoard("issues");
                 setFavoriteTasksOnly(true);
                 selectBoardView("issues");
               }}
