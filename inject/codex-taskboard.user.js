@@ -146,6 +146,7 @@
         || typeof request !== "object"
         || typeof request.requestId !== "string"
         || typeof request.taskId !== "string"
+        || (request.identifier !== undefined && typeof request.identifier !== "string")
         || (request.commentId !== undefined && typeof request.commentId !== "string")
         || (request.action !== undefined && request.action !== "create" && request.action !== "follow-up")
         || (request.threadId !== undefined && !normalizeThreadId(request.threadId))
@@ -782,6 +783,7 @@
         persistPendingThreadLinkReceipt({
           requestId: request.requestId,
           taskId: request.taskId,
+          identifier: request.identifier || undefined,
           commentId: request.commentId || undefined,
           action: request.action === "follow-up" ? "follow-up" : "create",
           threadId,
@@ -1163,6 +1165,7 @@
     persistPendingTaskThreadLink({
       requestId,
       taskId,
+      identifier,
       ...(commentId ? { commentId } : {}),
       action: "create",
       marker,
@@ -1371,6 +1374,7 @@
     persistPendingTaskThreadLink({
       requestId,
       taskId,
+      identifier,
       action: "follow-up",
       threadId,
       marker,
@@ -1473,6 +1477,30 @@
     }
   }
 
+  async function renameThreadForTask(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
+    const threadId = normalizeThreadId(payload?.threadId);
+    const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+    if (!requestId || !threadId || !name) return;
+    try {
+      await requestHost("rename-thread", { threadId, name });
+      postToFrame({
+        type: "taskboard:thread-renamed",
+        payload: { requestId, ok: true, threadId },
+      });
+    } catch (error) {
+      postToFrame({
+        type: "taskboard:thread-renamed",
+        payload: {
+          requestId,
+          ok: false,
+          threadId,
+          error: error instanceof Error ? error.message : "无法重命名 Codex 会话",
+        },
+      });
+    }
+  }
+
   function onFrameMessage(event) {
     if (!frame || event.source !== frame.contentWindow || event.origin !== frameOrigin) return;
     const message = event.data;
@@ -1511,6 +1539,10 @@
     }
     if (message.type === "taskboard:create-thread") {
       void createThreadForTask(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:rename-thread") {
+      void renameThreadForTask(message.payload);
       return;
     }
     if (message.type === "taskboard:create-knowledge-thread") {

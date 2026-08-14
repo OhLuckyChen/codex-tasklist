@@ -30,6 +30,18 @@ function parseHostRequest(payload, parseAutomationRequest) {
   ) {
     return { id, request, error: null };
   }
+  if (
+    request.action === "rename-thread"
+    && typeof request.threadId === "string"
+    && /^[a-z0-9-]{1,128}$/i.test(request.threadId)
+    && typeof request.name === "string"
+    && request.name.trim() === request.name
+    && request.name.length > 0
+    && request.name.length <= 200
+    && !/[\u0000-\u001f\u007f]/.test(request.name)
+  ) {
+    return { id, request, error: null };
+  }
   if (request.action === "automation") {
     const parsed = parseAutomationRequest(request);
     return parsed
@@ -91,6 +103,8 @@ export async function handleHostBindingPayload(params, handlers) {
       result = await handlers.runAutomation(parsed.request, params.executionContextId);
     } else if (parsed.request.action === "resolve-task-thread") {
       result = await handlers.resolveTaskThread(parsed.request);
+    } else if (parsed.request.action === "rename-thread") {
+      result = await handlers.renameThread(parsed.request, params.executionContextId);
     } else {
       result = await handlers.prefill(parsed.request, params.executionContextId);
     }

@@ -39,6 +39,9 @@ test("the CDP bridge accepts service, composer, and exact thread correlation act
   assert.match(runtimeSource, /request\.action === "ensure"/);
   assert.match(runtimeSource, /request\.action === "prefill-task-composer"/);
   assert.match(runtimeSource, /request\.action === "resolve-task-thread"/);
+  assert.match(runtimeSource, /request\.action === "rename-thread"/);
+  assert.match(source, /function requestCodexThreadRenameViaCdp/);
+  assert.match(source, /"thread\/name\/set"/);
   assert.match(runtimeSource, /request\.instruction\.length <= 8_192/);
   assert.match(runtimeSource, /request\.skillPath\.length <= 1_024/);
   assert.match(source, /function prefillTaskComposerViaCdp/);
@@ -75,7 +78,7 @@ test("the CDP bridge exposes only the fixed Taskboard automation operations", ()
   assert.match(source, /reconcileTaskboardAutomation/);
   assert.match(runtimeSource, /request\.action === "automation"/);
   assert.match(source, /function requestCodexAutomationViaCdp/);
-  assert.match(source, /new Set\(\[\s*"list-automations",\s*"automation-create",\s*"automation-update",\s*\]\)/);
+  assert.match(source, /new Set\(\[\s*"list-automations",\s*"automation-create",\s*"automation-update",\s*"thread\/name\/set",\s*\]\)/);
   assert.match(source, /bridge\.sendMessageFromView\(\{\s*type: "fetch",\s*requestId,/);
   assert.match(source, /method: "POST"/);
   assert.match(source, /vscode:\/\/codex\/\$\{method\}/);

@@ -246,6 +246,9 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.match(source, /requestHost\("prefill-task-composer"/);
   assert.match(source, /submit: true/);
   assert.match(source, /type: "taskboard:thread-prepared"/);
+  assert.match(source, /message\.type === "taskboard:rename-thread"/);
+  assert.match(source, /function renameThreadForTask\(payload\)/);
+  assert.match(source, /requestHost\("rename-thread", \{ threadId, name \}\)/);
   assert.match(source, /if \(page\?\.hidden !== false\) openTaskboard\(\);/);
   assert.match(source, /type: "taskboard:thread-create-error"/);
   assert.doesNotMatch(source, /function waitForCreatedThread/);
@@ -263,6 +266,7 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.match(webApp, /skillDisplayName: skill\.displayName/);
   assert.match(webApp, /skillPath: skill\.path/);
   assert.match(webApp, /instruction,/);
+  assert.match(webApp, /identifier: task\.identifier/);
   assert.match(webApp, /type: "taskboard:create-thread"/);
   assert.match(webApp, /deviceWorkspacePaths\[task\.projectId\]/);
   assert.match(webApp, /project\.id === task\.projectId/);
@@ -271,6 +275,18 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
     webApp.indexOf("function followUpTaskInThread"),
   );
   assert.doesNotMatch(openTaskSource, /hostContext\?\.workspacePath/);
+});
+
+test("created Codex issue threads are verified and renamed after linking", () => {
+  assert.match(source, /request\.identifier !== undefined && typeof request\.identifier !== "string"/);
+  assert.match(source, /identifier: request\.identifier \|\| undefined/);
+  assert.match(webApp, /pendingRequest\.identifier[\s\S]*pendingRequest\.identifier !== payload\.identifier/);
+  assert.match(webApp, /已阻止覆盖主会话/);
+  assert.match(webApp, /expectedIdentifier: pendingRequest\.identifier/);
+  assert.match(webApp, /if \(args\.expectedIdentifier && task\.identifier !== args\.expectedIdentifier\)/);
+  assert.match(webApp, /function taskThreadTitle\(task: Task\)/);
+  assert.match(webApp, /type: "taskboard:rename-thread"/);
+  assert.match(webApp, /name: taskThreadTitle\(task\)/);
 });
 
 test("existing conversation follow-ups resume review only after the message is persisted", () => {

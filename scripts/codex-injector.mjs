@@ -43,6 +43,7 @@ const codexAutomationMethods = new Set([
   "list-automations",
   "automation-create",
   "automation-update",
+  "thread/name/set",
 ]);
 let codexAutomationRequestSequence = 0;
 const quotaPolicyTimers = new Map();
@@ -620,6 +621,14 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
   }
 }
 
+async function requestCodexThreadRenameViaCdp(cdp, executionContextId, { threadId, name }) {
+  await requestCodexAutomationViaCdp(cdp, executionContextId, "thread/name/set", {
+    threadId,
+    name,
+  });
+  return { renamed: true };
+}
+
 async function applyTaskboardAutomationPolicy(request, rpc, stillCurrent = () => true) {
   const quota = request.quotaAware
     ? await readCodexQuotaStatus(request.model)
@@ -1154,6 +1163,9 @@ async function installTaskboardHostBinding(cdp, supervisor) {
         });
         return threadId ? { status: "resolved", threadId } : { status: "pending" };
       },
+      renameThread: (request, executionContextId) => (
+        requestCodexThreadRenameViaCdp(cdp, executionContextId, request)
+      ),
       sendResponse: (executionContextId, response) => (
         sendHostResponse(cdp, executionContextId, response)
       ),

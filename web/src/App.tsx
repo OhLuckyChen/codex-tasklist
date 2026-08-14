@@ -175,6 +175,7 @@ type AutomationIntervalMinutes = 5 | 10 | 15 | 30 | 60;
 interface PendingThreadRequest {
   taskId: string;
   projectId: string;
+  identifier?: string;
   commentId?: string;
   action?: "create" | "follow-up";
   threadId?: string;
@@ -384,6 +385,7 @@ function readPendingThreadRequests(): Map<string, PendingThreadRequest> {
         typeof requestId !== "string"
         || typeof candidate.taskId !== "string"
         || typeof candidate.projectId !== "string"
+        || (candidate.identifier !== undefined && typeof candidate.identifier !== "string")
         || (candidate.commentId !== undefined && typeof candidate.commentId !== "string")
         || (candidate.action !== undefined && candidate.action !== "create" && candidate.action !== "follow-up")
         || (candidate.threadId !== undefined && typeof candidate.threadId !== "string")
@@ -1695,6 +1697,7 @@ export function App() {
         const payload = message.payload as {
           requestId?: unknown;
           taskId?: unknown;
+          identifier?: unknown;
           commentId?: unknown;
           threadId?: unknown;
         };
@@ -1709,6 +1712,17 @@ export function App() {
           || pendingRequest.action === "follow-up"
           || pendingRequest.taskId !== payload.taskId
         ) return;
+        if (
+          pendingRequest.identifier
+          && typeof payload.identifier === "string"
+          && pendingRequest.identifier !== payload.identifier
+        ) {
+          pendingThreadRequestsRef.current.delete(payload.requestId);
+          writePendingThreadRequests(pendingThreadRequestsRef.current);
+          setOpeningThreadTaskId(null);
+          setActionError("Codex 新会话回执与当前议题不一致，已阻止覆盖主会话。");
+          return;
+        }
         const threadId = normalizeCodexThreadId(payload.threadId);
         if (!threadId) return;
         const commentId = pendingRequest.commentId ?? (
@@ -1719,6 +1733,7 @@ export function App() {
           requestId: payload.requestId,
           taskId: payload.taskId,
           projectId: pendingRequest.projectId,
+          expectedIdentifier: pendingRequest.identifier,
           commentId,
           threadId,
           runtime: "codex",
@@ -2799,6 +2814,10 @@ export function App() {
       : instruction;
   }
 
+  function taskThreadTitle(task: Task) {
+    return `${task.identifier} · ${task.title}`.slice(0, 200);
+  }
+
   function taskSkill(task: Task) {
     const projectKnowledgeTask = task.labels.includes("项目知识库")
       && task.description.includes("项目知识库构建");
@@ -2820,6 +2839,7 @@ export function App() {
     requestId: string;
     taskId: string;
     projectId: string;
+    expectedIdentifier?: string;
     commentId?: string;
     threadId: string;
     runtime: TaskRuntime;
@@ -2854,6 +2874,9 @@ export function App() {
       let latestTasks = await listTasks(args.projectId);
       let task = latestTasks.find((candidate) => candidate.id === args.taskId);
       if (!task) throw new Error("没有找到需要关联会话的议题。");
+      if (args.expectedIdentifier && task.identifier !== args.expectedIdentifier) {
+        throw new Error("Codex 新会话回执与当前议题不一致，已阻止覆盖主会话。");
+      }
       if (normalizeCodexThreadId(task.threadId) !== args.threadId) {
         try {
           task = await linkTaskThreadRequest(task, args.threadId, args.runtime);
@@ -2868,6 +2891,16 @@ export function App() {
             latestTasks = latestTasks.map((candidate) => candidate.id === task?.id ? task : candidate);
           }
         }
+      }
+      if (args.runtime === "codex" && embedded && window.parent !== window && task) {
+        window.parent.postMessage({
+          type: "taskboard:rename-thread",
+          payload: {
+            requestId: args.requestId,
+            threadId: args.threadId,
+            name: taskThreadTitle(task),
+          },
+        }, "*");
       }
       if (selectedProjectIdRef.current === args.projectId) {
         setTasks(sortTasks(latestTasks));
@@ -2907,6 +2940,7 @@ export function App() {
       pendingThreadRequestsRef.current.set(requestId, {
         taskId: task.id,
         projectId: task.projectId,
+        identifier: task.identifier,
         commentId: comment?.id,
         action: "create",
         createdAt: Date.now(),
@@ -2951,6 +2985,7 @@ export function App() {
       pendingThreadRequestsRef.current.set(requestId, {
         taskId: task.id,
         projectId: task.projectId,
+        identifier: task.identifier,
         commentId: comment?.id,
         action: "create",
         createdAt: Date.now(),
@@ -3007,6 +3042,7 @@ export function App() {
     pendingThreadRequestsRef.current.set(requestId, {
       taskId: task.id,
       projectId: task.projectId,
+      identifier: task.identifier,
       commentId: comment?.id,
       action: "create",
       createdAt: Date.now(),
@@ -3085,6 +3121,7 @@ export function App() {
     pendingThreadRequestsRef.current.set(requestId, {
       taskId: task.id,
       projectId: task.projectId,
+      identifier: task.identifier,
       action: "follow-up",
       threadId: normalizedThreadId,
       createdAt: Date.now(),

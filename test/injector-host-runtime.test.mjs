@@ -159,6 +159,40 @@ test("the host bridge resolves a taskboard request marker to a Codex thread", as
   }]);
 });
 
+test("the host bridge accepts a bounded Codex thread rename request", async () => {
+  const responses = [];
+  const received = [];
+  const request = {
+    id: "rename-request-1",
+    action: "rename-thread",
+    threadId: "019ffbc5-d4b9-79b2-930c-e343eeb8770b",
+    name: "3417FD193D6E-44 · 替换最外层dmg图标",
+  };
+  const result = await handleHostBindingPayload(
+    { payload: JSON.stringify(request), executionContextId: 21 },
+    {
+      parseAutomationRequest: () => null,
+      ensure: async () => assert.fail("ensure must not run"),
+      runAutomation: async () => assert.fail("automation must not run"),
+      resolveTaskThread: async () => assert.fail("resolution must not run"),
+      renameThread: async (payload) => {
+        received.push(payload);
+        return { renamed: true };
+      },
+      prefill: async () => assert.fail("prefill must not run"),
+      sendResponse: async (_executionContextId, response) => responses.push(response),
+    },
+  );
+
+  assert.deepEqual(result, { responded: true, accepted: true });
+  assert.deepEqual(received, [request]);
+  assert.deepEqual(responses, [{
+    id: request.id,
+    ok: true,
+    renamed: true,
+  }]);
+});
+
 test("the host bridge accepts an explicit submit request for a prepared task composer", async () => {
   const responses = [];
   const received = [];

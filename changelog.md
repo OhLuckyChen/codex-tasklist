@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-08-14 — Taskboard 会话标题与错绑防护
+
+- 新建 Codex 议题会话成功关联后，会通过宿主桥接把会话标题收敛为 `<issue identifier> · <issue title>`，避免侧栏长期显示 `e-taskboard Addressing...`。
+- 新建和跟进会话的 pending request、marker receipt 均携带 issue identifier；主 `threadId` 写回前会校验回执与当前议题一致，不一致时阻止覆盖并提示错误。
+- 注入器 host bridge 新增有界 `rename-thread` 请求，转发到 Codex `thread/name/set` automation；标题长度和控制字符均做边界校验。
+- 增加注入脚本、CDP bridge 与 host runtime 回归测试，覆盖标题收敛和错绑防护。
+- 验证：`npm run typecheck`、`npm test -- test/inject.test.mjs test/injector.test.mjs test/injector-host-runtime.test.mjs`、`npm run build:web` 通过。
+
 ## 2026-08-12 — 多运行时连接、任务元数据与会话恢复
 
 - 任务模型新增 `startDate` 与 `statusChangedAt`，数据库、API、类型、编辑器、详情页和看板排序共同支持开始日期录入，以及按状态变更时间分组展示；普通 issues 看板仍保留拖拽排序。
