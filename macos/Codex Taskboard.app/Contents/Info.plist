@@ -8,6 +8,8 @@
   <string>Codex</string>
   <key>CFBundleExecutable</key>
   <string>codex-taskboard</string>
+  <key>CFBundleIconFile</key>
+  <string>codex-taskboard</string>
   <key>CFBundleIdentifier</key>
   <string>io.github.ohluckychen.codex-taskboard.launcher</string>
   <key>CFBundleInfoDictionaryVersion</key>

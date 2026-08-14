@@ -140,6 +140,43 @@ test("generated proposals remain pending data until an idempotent safe publish",
   assert.deepEqual(retried.changes, first.changes);
 });
 
+test("knowledge proposals can publish bounded machine-readable pre-index files", async () => {
+  const root = await workspace();
+  const indexContent = JSON.stringify([
+    {
+      path: "src/api.ts",
+      type: "source",
+      language: "typescript",
+      keywords: ["api", "route"],
+      freshness: "fresh",
+    },
+  ], null, 2);
+  const service = new KnowledgeService({
+    analyze: async () => ({
+      title: "Pre-index",
+      summary: "Create project routing index",
+      changes: [{
+        targetPath: ".taskboard/knowledge-index/files.json",
+        operation: "create",
+        afterContent: indexContent,
+      }],
+    }),
+  });
+
+  const proposal = await service.generateProposal(root, {
+    sourceType: "project_scan",
+    sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+  });
+  assert.equal(proposal.changes[0].targetPath, ".taskboard/knowledge-index/files.json");
+
+  const published = await service.publish(root, proposal);
+  assert.equal(published.changes[0].targetPath, ".taskboard/knowledge-index/files.json");
+  assert.equal(
+    await readFile(path.join(root, ".taskboard", "knowledge-index", "files.json"), "utf8"),
+    indexContent,
+  );
+});
+
 test("publish rejects traversal and detects real concurrent edits", async () => {
   const root = await workspace();
   const target = path.join(root, "docs", "knowledge", "architecture.md");
@@ -186,6 +223,7 @@ test("project knowledge runs distinguish initial scans from deterministic increm
   });
   assert.match(initial, /complete project understanding/);
   assert.match(initial, /git-blob:<git hash-object value>/);
+  assert.match(initial, /\.taskboard\/knowledge-index\/\*:json|\.taskboard\/knowledge-index\/\*\.json/);
   assert.match(initial, /do not edit, create, delete or format project files/);
 
   const incremental = service.knowledgeRunInstruction({

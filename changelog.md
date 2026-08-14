@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-14 — 项目初始化、知识索引与启动器细节
+
+- 项目创建流程在嵌入 Codex 场景下会先检查本地目录；空目录会初始化一份可移植的 `AGENTS.md` 项目规范，帮助 Codex 正常注册项目并继承 Taskboard 协作约束。
+- 新增本地 workspace 检查与初始化 API，覆盖目录不存在、非目录、空目录和已初始化目录等路径。
+- 项目知识提案允许发布 `.taskboard/knowledge-index/*.json` 作为机器可读 pre-index，并在生成、发布和 Skill 契约中要求 JSON 有效、路径相对且不包含本机痕迹。
+- 任务列表改为批量补齐关联与会话 runtime，并在服务启动和列表读取时异步调和历史 runtime，减少列表接口被本地 Codex session 扫描阻塞。
+- Codex Taskboard macOS 启动器补充应用图标配置与 `codex-taskboard.icns` 资源。
+- 收藏议题按钮不再强制切换到全局看板，避免在项目视图内点击收藏过滤时跳出当前项目范围。
+
 ## 2026-08-14 — Taskboard 会话标题与错绑防护
 
 - 新建 Codex 议题会话成功关联后，会通过宿主桥接把会话标题收敛为 `<issue identifier> · <issue title>`，避免侧栏长期显示 `e-taskboard Addressing...`。

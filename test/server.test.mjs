@@ -126,6 +126,91 @@ test("renaming a project preserves its ID, workspace mapping, and issues", async
   assert.equal(retained.body.task.projectId, "runtime");
 });
 
+test("local workspace check reports missing, empty, and populated directories", async () => {
+  let emptyWorkspace;
+  let populatedWorkspace;
+  let missingWorkspace;
+  const baseUrl = await startServer(async (directory) => {
+    emptyWorkspace = path.join(directory, "empty-workspace");
+    populatedWorkspace = path.join(directory, "populated-workspace");
+    missingWorkspace = path.join(directory, "missing-workspace");
+    await mkdir(emptyWorkspace);
+    await mkdir(populatedWorkspace);
+    await writeFile(path.join(populatedWorkspace, "package.json"), "{}\n");
+    return {};
+  });
+
+  const empty = await request(
+    baseUrl,
+    `/api/local/workspace-check?workspacePath=${encodeURIComponent(emptyWorkspace)}`,
+  );
+  assert.equal(empty.response.status, 200);
+  assert.deepEqual(empty.body, {
+    workspacePath: emptyWorkspace,
+    exists: true,
+    isDirectory: true,
+    isEmpty: true,
+  });
+
+  const populated = await request(
+    baseUrl,
+    `/api/local/workspace-check?workspacePath=${encodeURIComponent(populatedWorkspace)}`,
+  );
+  assert.equal(populated.response.status, 200);
+  assert.deepEqual(populated.body, {
+    workspacePath: populatedWorkspace,
+    exists: true,
+    isDirectory: true,
+    isEmpty: false,
+  });
+
+  const missing = await request(
+    baseUrl,
+    `/api/local/workspace-check?workspacePath=${encodeURIComponent(missingWorkspace)}`,
+  );
+  assert.equal(missing.response.status, 200);
+  assert.deepEqual(missing.body, {
+    workspacePath: missingWorkspace,
+    exists: false,
+    isDirectory: false,
+    isEmpty: null,
+  });
+});
+
+test("local workspace initialization writes portable Taskboard guidance into empty directories", async () => {
+  let workspacePath;
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "new-project");
+    await mkdir(workspacePath);
+    return {};
+  });
+
+  const initialized = await request(baseUrl, "/api/local/workspace-initialize", {
+    method: "POST",
+    body: { workspacePath },
+  });
+  assert.equal(initialized.response.status, 200);
+  assert.equal(initialized.body.initialized, true);
+  assert.deepEqual(initialized.body.createdFiles, ["AGENTS.md"]);
+  assert.equal(initialized.body.exists, true);
+  assert.equal(initialized.body.isDirectory, true);
+  assert.equal(initialized.body.isEmpty, false);
+
+  const content = await readFile(path.join(workspacePath, "AGENTS.md"), "utf8");
+  assert.match(content, /# Taskboard Project Guidelines/);
+  assert.match(content, /Treat this directory as the project root/);
+  assert.doesNotMatch(content, new RegExp(workspacePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(content, /\/Users\/|\/var\/folders\/|taskboard\/vendor/);
+
+  const repeated = await request(baseUrl, "/api/local/workspace-initialize", {
+    method: "POST",
+    body: { workspacePath },
+  });
+  assert.equal(repeated.response.status, 200);
+  assert.equal(repeated.body.initialized, false);
+  assert.deepEqual(repeated.body.createdFiles, []);
+});
+
 test("project knowledge proposals preserve review state and publish only through the local workspace", async () => {
   let workspacePath;
   const knowledgeService = new KnowledgeService({

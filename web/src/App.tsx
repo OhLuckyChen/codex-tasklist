@@ -23,6 +23,7 @@ import {
   ApiError,
   addTaskRelation,
   archiveTask as archiveTaskRequest,
+  checkLocalWorkspace,
   chooseLocalDirectory,
   createProject as createProjectRequest,
   createTask as createTaskRequest,
@@ -33,6 +34,7 @@ import {
   generateKnowledgeProposal,
   getCodexThreadProgress,
   getKnowledgeRun,
+  initializeLocalWorkspace,
   resumeClaudeSession,
   resumeOmpSession,
   renameProject,
@@ -3294,11 +3296,32 @@ export function App() {
     setProjectCreatePending(true);
     setActionError(null);
     try {
-      const activation = await activateCodexProject(draft);
       const linkedWithCodex = embedded && window.parent !== window;
-      if (linkedWithCodex && (!activation.project?.id || !activation.project.name)) {
-        throw new Error("Codex 已切换目录，但没有返回可关联的项目，请重试。");
+      if (linkedWithCodex) {
+        const workspace = await checkLocalWorkspace(draft.workspacePath);
+        if (!workspace.exists) {
+          throw new Error("本地项目目录不存在，请重新选择一个已有目录。");
+        }
+        if (!workspace.isDirectory) {
+          throw new Error("本地项目路径不是文件夹，请重新选择项目目录。");
+        }
+        if (workspace.isEmpty) {
+          const initialized = await initializeLocalWorkspace(draft.workspacePath);
+          if (!initialized.initialized) {
+            throw new Error("该目录为空，但 Taskboard 未能初始化项目规范文件，请重试。");
+          }
+        }
       }
+      let activation: CodexProjectActivationResponse = { requestId: "local", ok: true };
+      let codexSyncError = "";
+      if (linkedWithCodex) {
+        try {
+          activation = await activateCodexProject(draft);
+        } catch (error) {
+          codexSyncError = errorMessage(error);
+        }
+      }
+      const linkedCodexProject = Boolean(linkedWithCodex && activation.project?.id && activation.project.name);
       const project = await createProjectRequest({
         ...(activation.project?.id ? { id: activation.project.id } : {}),
         name: draft.name,
@@ -3311,7 +3334,9 @@ export function App() {
         project,
       ]);
       setProjectCreatorOpen(false);
-      setAnnouncement(`${project.name} 已新增${linkedWithCodex ? "，并同步到 Codex 项目。" : "。"}`);
+      setAnnouncement(linkedCodexProject
+        ? `${project.name} 已新增，并同步到 Codex 项目。`
+        : `${project.name} 已新增，并保存了本机项目目录${codexSyncError ? "；Codex 暂未显示该项目。" : "。"}`);
     } catch (error) {
       setActionError(error instanceof ApiError && error.code === "PROJECT_EXISTS"
         ? "该项目已经存在，可直接从项目列表打开。"

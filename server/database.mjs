@@ -78,6 +78,43 @@ function taskRelationSummaryFromRow(row) {
   };
 }
 
+function taskRelationSummaryFromPrefixedRow(row, prefix) {
+  return {
+    id: row[`${prefix}_id`],
+    identifier: row[`${prefix}_identifier`],
+    projectId: row[`${prefix}_project_id`],
+    title: row[`${prefix}_title`],
+    status: row[`${prefix}_status`],
+    priority: row[`${prefix}_priority`],
+    assignee: {
+      type: row[`${prefix}_assignee_type`],
+      id: row[`${prefix}_assignee_id`],
+      name: row[`${prefix}_assignee_name`],
+      avatarUrl: row[`${prefix}_assignee_avatar_url`],
+    },
+    archivedAt: row[`${prefix}_archived_at`],
+  };
+}
+
+function taskRelationSortEntry(row, prefix) {
+  return {
+    summary: taskRelationSummaryFromPrefixedRow(row, prefix),
+    sortOrder: row[`${prefix}_sort_order`],
+    createdAt: row[`${prefix}_created_at`],
+    id: row[`${prefix}_id`],
+  };
+}
+
+function sortRelationEntries(entries) {
+  return entries
+    .sort((left, right) => (
+      left.sortOrder - right.sortOrder
+      || left.createdAt.localeCompare(right.createdAt)
+      || left.id.localeCompare(right.id)
+    ))
+    .map((entry) => entry.summary);
+}
+
 function commentFromRow(row) {
   return {
     id: row.id,
@@ -1527,7 +1564,7 @@ export class TaskboardDatabase {
         created_at,
         id
     `;
-    return this.database.prepare(sql).all(...values).map((row) => this.#taskWithRelations(row));
+    return this.#tasksWithRelations(this.database.prepare(sql).all(...values));
   }
 
   getTask(id) {
@@ -2218,6 +2255,121 @@ export class TaskboardDatabase {
       WHERE comment_id = ?
       ORDER BY created_at, id
     `).all(commentId).map(attachmentFromRow);
+  }
+
+  #tasksWithRelations(rows) {
+    const tasks = rows.map(taskFromRow);
+    if (tasks.length === 0) return [];
+
+    const tasksById = new Map(tasks.map((task) => [task.id, task]));
+    const taskIds = tasks.map((task) => task.id);
+    const placeholders = taskIds.map(() => "?").join(", ");
+
+    for (const task of tasks) {
+      task.threadIds = [];
+      task.threadRuntimes = {};
+      task.relations = {
+        parent: null,
+        subIssues: [],
+        blockedBy: [],
+        blocks: [],
+        related: [],
+      };
+    }
+
+    const threadRows = this.database.prepare(`
+      SELECT task_threads.task_id, task_threads.thread_id, task_threads.runtime
+      FROM task_threads
+      JOIN tasks ON tasks.id = task_threads.task_id
+      WHERE task_threads.task_id IN (${placeholders})
+      ORDER BY
+        task_threads.task_id,
+        CASE WHEN task_threads.thread_id = tasks.thread_id THEN 0 ELSE 1 END,
+        task_threads.linked_at DESC,
+        task_threads.thread_id DESC
+    `).all(...taskIds);
+    for (const row of threadRows) {
+      const task = tasksById.get(row.task_id);
+      if (!task) continue;
+      task.threadIds.push(row.thread_id);
+      task.threadRuntimes[row.thread_id] = row.runtime ?? "codex";
+    }
+
+    const relationRows = this.database.prepare(`
+      SELECT
+        task_relations.relation_type,
+        task_relations.source_task_id,
+        task_relations.target_task_id,
+        source.id AS source_id,
+        source.identifier AS source_identifier,
+        source.project_id AS source_project_id,
+        source.title AS source_title,
+        source.status AS source_status,
+        source.priority AS source_priority,
+        source.assignee_type AS source_assignee_type,
+        source.assignee_id AS source_assignee_id,
+        source.assignee_name AS source_assignee_name,
+        source.assignee_avatar_url AS source_assignee_avatar_url,
+        source.archived_at AS source_archived_at,
+        source.sort_order AS source_sort_order,
+        source.created_at AS source_created_at,
+        target.id AS target_id,
+        target.identifier AS target_identifier,
+        target.project_id AS target_project_id,
+        target.title AS target_title,
+        target.status AS target_status,
+        target.priority AS target_priority,
+        target.assignee_type AS target_assignee_type,
+        target.assignee_id AS target_assignee_id,
+        target.assignee_name AS target_assignee_name,
+        target.assignee_avatar_url AS target_assignee_avatar_url,
+        target.archived_at AS target_archived_at,
+        target.sort_order AS target_sort_order,
+        target.created_at AS target_created_at
+      FROM task_relations
+      JOIN tasks AS source ON source.id = task_relations.source_task_id
+      JOIN tasks AS target ON target.id = task_relations.target_task_id
+      WHERE task_relations.source_task_id IN (${placeholders})
+         OR task_relations.target_task_id IN (${placeholders})
+    `).all(...taskIds, ...taskIds);
+
+    const sortableRelations = new Map(tasks.map((task) => [
+      task.id,
+      {
+        subIssues: [],
+        blockedBy: [],
+        blocks: [],
+        related: [],
+      },
+    ]));
+
+    for (const row of relationRows) {
+      const sourceTask = tasksById.get(row.source_task_id);
+      const targetTask = tasksById.get(row.target_task_id);
+      const sourceSummary = taskRelationSummaryFromPrefixedRow(row, "source");
+      const targetSummary = taskRelationSummaryFromPrefixedRow(row, "target");
+
+      if (row.relation_type === "parent") {
+        if (targetTask) targetTask.relations.parent = sourceSummary;
+        if (sourceTask) sortableRelations.get(sourceTask.id).subIssues.push(taskRelationSortEntry(row, "target"));
+      } else if (row.relation_type === "blocks") {
+        if (targetTask) sortableRelations.get(targetTask.id).blockedBy.push(taskRelationSortEntry(row, "source"));
+        if (sourceTask) sortableRelations.get(sourceTask.id).blocks.push(taskRelationSortEntry(row, "target"));
+      } else if (row.relation_type === "related") {
+        if (sourceTask) sortableRelations.get(sourceTask.id).related.push(taskRelationSortEntry(row, "target"));
+        if (targetTask) sortableRelations.get(targetTask.id).related.push(taskRelationSortEntry(row, "source"));
+      }
+    }
+
+    for (const task of tasks) {
+      const relations = sortableRelations.get(task.id);
+      task.relations.subIssues = sortRelationEntries(relations.subIssues);
+      task.relations.blockedBy = sortRelationEntries(relations.blockedBy);
+      task.relations.blocks = sortRelationEntries(relations.blocks);
+      task.relations.related = sortRelationEntries(relations.related);
+    }
+
+    return tasks;
   }
 
   #taskWithRelations(row) {

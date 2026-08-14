@@ -40,6 +40,41 @@ const INLINE_ATTACHMENT_TYPES = new Set([
 const PROJECT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TRUSTED_EMBED_ORIGINS = new Set(["app://-"]);
 const DIRECTORY_PICKER_SCRIPT = 'POSIX path of (choose folder with prompt "选择本地项目目录")';
+const TASKBOARD_PROJECT_AGENTS_MD = `# Taskboard Project Guidelines
+
+## Communication
+
+- Default to Chinese for user-facing communication.
+- Keep updates concise and result-oriented.
+- When discussing implementation, cite concrete files, APIs, commands, or UI paths as evidence.
+
+## Workspace
+
+- Treat this directory as the project root for the Taskboard project.
+- Do not write outside this project unless the user explicitly names the path and authorizes the change.
+- Before changing files, inspect the current state and avoid overwriting user edits.
+
+## Taskboard Workflow
+
+- For tracked work, read the latest Taskboard issue and all comments before implementation.
+- If an issue is in todo, claim it by moving it to in_progress with the latest version before editing.
+- After implementation, add a Taskboard comment with changed files, verification, result, and remaining risk.
+- Move completed agent work to in_review, not directly to done.
+- Move to done only after the user explicitly accepts the result.
+
+## Engineering Approach
+
+- Prove the real operation path before implementation: entry point, user or agent action, state change, and visible result.
+- Prefer the smallest direct change that satisfies the requested main path.
+- Add tests or broader guardrails only when they are needed for the requested behavior or a concrete reported failure.
+- Keep unrelated refactors, formatting churn, dependency changes, and generated artifacts out of the task.
+
+## Verification
+
+- Run the narrowest useful checks for the changed surface.
+- Report any checks that could not be run, including the reason.
+- If UI behavior changes, verify the observable path in the running product when practical.
+`;
 const CODEX_AGENT_ACTOR = {
   type: "agent",
   id: "codex-agent",
@@ -463,6 +498,34 @@ function parseProjectCreate(body) {
     throw new ApiError(400, "INVALID_FIELD", "'workspacePath' cannot contain null bytes");
   }
   return { id, name, workspacePath };
+}
+
+async function inspectLocalWorkspace(workspacePath) {
+  const resolved = path.resolve(workspacePath);
+  const fileStats = await stat(resolved).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!fileStats) return { workspacePath: resolved, exists: false, isDirectory: false, isEmpty: null };
+  if (!fileStats.isDirectory()) return { workspacePath: resolved, exists: true, isDirectory: false, isEmpty: null };
+  const entries = await readdir(resolved);
+  return { workspacePath: resolved, exists: true, isDirectory: true, isEmpty: entries.length === 0 };
+}
+
+async function initializeTaskboardWorkspace(workspacePath) {
+  const inspection = await inspectLocalWorkspace(workspacePath);
+  if (!inspection.exists) {
+    throw new ApiError(400, "WORKSPACE_NOT_FOUND", "Workspace directory does not exist");
+  }
+  if (!inspection.isDirectory) {
+    throw new ApiError(400, "WORKSPACE_NOT_DIRECTORY", "Workspace path is not a directory");
+  }
+  if (!inspection.isEmpty) {
+    return { ...inspection, initialized: false, createdFiles: [] };
+  }
+  const agentsPath = path.join(inspection.workspacePath, "AGENTS.md");
+  await writeFile(agentsPath, TASKBOARD_PROJECT_AGENTS_MD, { flag: "wx" });
+  return { ...await inspectLocalWorkspace(inspection.workspacePath), initialized: true, createdFiles: ["AGENTS.md"] };
 }
 
 function parseProjectRename(body) {
@@ -1491,6 +1554,7 @@ export function createTaskboardServer(options = {}) {
   const codexSessionStateCache = new Map();
   const codexSessionsDirectory = path.join(path.dirname(resolved.codexStatePath), "sessions");
   let hostRuntime = null;
+  let runtimeReconcilePromise = null;
 
   async function findCodexSession(threadId) {
     const cached = codexSessionSearches.get(threadId);
@@ -1545,8 +1609,21 @@ export function createTaskboardServer(options = {}) {
     }
   }
 
+  function scheduleTaskThreadRuntimeReconcile(filters) {
+    if (runtimeReconcilePromise) return;
+    const records = database.listTaskThreadRuntimeRecords(filters);
+    if (records.length === 0) return;
+    runtimeReconcilePromise = reconcileTaskThreadRuntimes(records)
+      .catch((error) => {
+        console.error("Task thread runtime reconcile failed", error);
+      })
+      .finally(() => {
+        runtimeReconcilePromise = null;
+      });
+  }
+
   async function listTasksWithResolvedRuntimes(filters) {
-    await reconcileTaskThreadRuntimes(database.listTaskThreadRuntimeRecords(filters));
+    scheduleTaskThreadRuntimeReconcile(filters);
     return database.listTasks(filters);
   }
 
@@ -1712,6 +1789,42 @@ export function createTaskboardServer(options = {}) {
         assertNoQuery(url.searchParams, "POST /api/local/directory-picker");
         await assertEmptyRequestBody(request, "POST /api/local/directory-picker");
         return sendJson(response, 200, { workspacePath: await chooseLocalDirectory() });
+      }
+
+      if (pathname === "/api/local/workspace-check") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertAllowedQuery(url.searchParams, new Set(["workspacePath"]), "GET local workspace check");
+        const workspacePath = stringField(
+          url.searchParams.get("workspacePath") ?? "",
+          "workspacePath",
+          { required: true, maxLength: 4096 },
+        );
+        if (!path.isAbsolute(workspacePath)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be absolute");
+        }
+        if (workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' cannot contain null bytes");
+        }
+        return sendJson(response, 200, await inspectLocalWorkspace(workspacePath));
+      }
+
+      if (pathname === "/api/local/workspace-initialize") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/workspace-initialize");
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["workspacePath"]));
+        const workspacePath = stringField(body.workspacePath, "workspacePath", {
+          required: true,
+          maxLength: 4096,
+        });
+        if (!path.isAbsolute(workspacePath)) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be absolute");
+        }
+        if (workspacePath.includes("\0")) {
+          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' cannot contain null bytes");
+        }
+        return sendJson(response, 200, await initializeTaskboardWorkspace(workspacePath));
       }
 
       const createKnowledgeRunRoute = pathname.match(
@@ -2987,6 +3100,7 @@ export function createTaskboardServer(options = {}) {
         server.listen(port, host);
       });
       listening = true;
+      scheduleTaskThreadRuntimeReconcile({ archived: "all" });
       return server.address();
     },
     async close() {

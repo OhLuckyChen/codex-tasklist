@@ -289,6 +289,18 @@ test("created Codex issue threads are verified and renamed after linking", () =>
   assert.match(webApp, /name: taskThreadTitle\(task\)/);
 });
 
+test("project creation falls back to a saved Taskboard project when Codex does not expose a project id", () => {
+  const createProjectSource = webApp.slice(
+    webApp.indexOf("async function createProjectFromHome"),
+    webApp.indexOf("function closeDetail"),
+  );
+  assert.match(createProjectSource, /try \{\s*activation = await activateCodexProject\(draft\);/);
+  assert.match(createProjectSource, /catch \(error\) \{\s*codexSyncError = errorMessage\(error\);/);
+  assert.doesNotMatch(createProjectSource, /throw new Error\("Codex 已切换目录，但没有返回可关联的项目，请重试。"\)/);
+  assert.match(createProjectSource, /createProjectRequest\(\{\s*\.\.\.\(activation\.project\?\.id \? \{ id: activation\.project\.id \} : \{\}\),/);
+  assert.match(createProjectSource, /Codex 暂未显示该项目/);
+});
+
 test("existing conversation follow-ups resume review only after the message is persisted", () => {
   const followUpSource = source.slice(
     source.indexOf("async function followUpThreadForTask"),

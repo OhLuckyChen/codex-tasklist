@@ -1085,7 +1085,9 @@
           || (activeProject?.id !== beforeActiveProjectId ? activeProject : null);
         if (!project) await new Promise((resolve) => window.setTimeout(resolve, 60));
       }
-      if (!project) throw new Error("Codex 未能从该目录创建或识别项目，请确认目录存在");
+      if (!project) {
+        throw new Error("Codex 已收到目录切换请求，但未能注册或识别该项目；请确认目录不是空文件夹，并在 Codex 侧边栏查看项目是否已出现");
+      }
 
       hostContextSnapshot = await captureHostContext();
       postHostContext();

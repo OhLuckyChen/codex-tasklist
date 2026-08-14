@@ -4,14 +4,16 @@
 
 1. Published and pending boundary
 2. Page taxonomy
-3. Page format
-4. Proposal format
-5. Initial coverage
-6. Incremental maintenance
+3. Pre-index taxonomy
+4. Page format
+5. Pre-index format
+6. Proposal format
+7. Initial coverage
+8. Incremental maintenance
 
 ## 1. Published and pending boundary
 
-Published knowledge lives only in the analyzed project's `docs/knowledge/` and its existing `changelog.md`. It contains confirmed current facts and completed decisions.
+Published knowledge lives only in the analyzed project's `docs/knowledge/`, `.taskboard/knowledge-index/`, and its existing `changelog.md`. Markdown knowledge contains confirmed current facts and completed decisions. Pre-index JSON contains machine-readable routing metadata derived from current evidence.
 
 Pending knowledge lives only in Taskboard's proposal queue until a user reviews and publishes it. A proposal may contain a well-supported fact that has not yet been reviewed, an unresolved option explicitly labeled as pending, or a correction to stale published knowledge. Do not create `pending.md` in the project.
 
@@ -38,7 +40,19 @@ Promotion requires all of the following:
 
 Do not create a page when its useful content fits an existing owner page. Do not create empty category directories.
 
-## 3. Page format
+## 3. Pre-index taxonomy
+
+Pre-index files live under `.taskboard/knowledge-index/`. They are compact JSON files for routing questions to candidate files, symbols, documents, and recent changes before reading source. They are not human-facing narrative pages.
+
+- `.taskboard/knowledge-index/manifest.json`: schema version, project summary, generated time, scan scope, excluded paths, and source revisions when available.
+- `.taskboard/knowledge-index/files.json`: file records with path, type, language, size, mtime when available, keywords, owning component, and freshness or revision when available.
+- `.taskboard/knowledge-index/symbols.json`: functions, classes, API routes, CLI commands, scripts, config keys, and public request/response shapes with path, line, signature or route, and keywords.
+- `.taskboard/knowledge-index/docs.json`: README, docs, published knowledge pages, and high-value Taskboard proposal summaries with title, source, keywords, summary, and health or proposal status.
+- `.taskboard/knowledge-index/recent.json`: recent git or mtime-based changes with path, changed_at, source, status, and reason.
+
+Do not include secrets, absolute local paths, raw conversation logs, temporary run directories, build outputs, vendored dependencies, or generated caches. Use project-relative paths only.
+
+## 4. Page format
 
 Every proposed knowledge page is a complete Markdown file with YAML frontmatter:
 
@@ -66,7 +80,30 @@ Use project-relative paths only. Never store a machine-specific absolute path. F
 
 The body should lead with the fact or model, then give boundaries, relationships, and operational consequences. Use a compact table or Mermaid diagram only when it materially improves a multi-component mapping or flow.
 
-## 4. Proposal format
+Write user-facing knowledge pages in Chinese unless the project already has a stronger local documentation convention.
+
+## 5. Pre-index format
+
+Pre-index files must be valid JSON, not Markdown. Prefer arrays for `files.json`, `symbols.json`, `docs.json`, and `recent.json`. Keep entries concise and project-relative.
+
+Example `symbols.json` entry:
+
+```json
+{
+  "path": "app/api/repowiki_download.py",
+  "name": "download_repowiki_files",
+  "kind": "api_route",
+  "language": "python",
+  "line": 42,
+  "method": "POST",
+  "route": "/aicodingkbmgr/repowiki/download",
+  "signature": "download_repowiki_files(request: RepoWikiDownloadRequest)",
+  "keywords": ["repowiki", "download", "workspace", "smileId"],
+  "summary": "Handles RepoWiki manifest download requests and routes by workspace or Smile ID."
+}
+```
+
+## 6. Proposal format
 
 Return JSON only:
 
@@ -86,7 +123,13 @@ Return JSON only:
 
 Operations are `create`, `update`, or `delete`. `afterContent` is required for create/update and omitted for delete. Include the full resulting file content, but only include files that changed. A proposal may target at most 50 files and 5 MiB total.
 
-## 5. Initial coverage
+Allowed targets are:
+
+- `docs/knowledge/**/*.md`
+- `.taskboard/knowledge-index/*.json`
+- `changelog.md` only for an actual completed project behavior change
+
+## 7. Initial coverage
 
 An initial proposal is complete when it lets a new maintainer answer, with evidence:
 
@@ -96,13 +139,15 @@ An initial proposal is complete when it lets a new maintainer answer, with evide
 - How the central user and system flows cross those components.
 - Which constraints, failure modes, and operating practices repeatedly matter.
 - Which accepted designs and decisions remain relevant.
+- Which concrete files, symbols, routes, scripts, docs, and recent changes are likely entry points for future questions.
 
 Completeness does not mean documenting every file, class, endpoint, or historical Issue.
 
-## 6. Incremental maintenance
+## 8. Incremental maintenance
 
 - File sources use content revisions; Issue and comment sources use Taskboard versions.
 - A stale source triggers impact analysis starting from that source and the pages that cite it.
 - Issue/comment capture verifies the claimed result against the current project before proposing an update.
 - Phase review scans for uncited new components, changed boundaries, missing completed decisions, and contradictions not caught by existing source links.
+- Pre-index files should be updated when file locations, public symbols, route shapes, document summaries, or recent-change routing materially changes.
 - Unrelated pages remain unchanged. Never rewrite every page merely to update timestamps or wording.

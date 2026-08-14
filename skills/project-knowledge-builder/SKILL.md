@@ -23,11 +23,14 @@ Good project knowledge:
 - Explains important relationships and flows, not a file-by-file inventory or copied source code.
 - Is organized by topic, updates an existing page when possible, and gives the reader a clear next place to look.
 - Records source revisions so later checks can identify exactly what changed.
+- Gives machines a fast routing layer for common questions: file inventory, symbols, API routes, document summaries, and recent changes.
+- Uses Chinese for user-facing knowledge pages unless the project already has a stronger local documentation convention.
 - Uses `changelog.md` only for actual completed project changes, never as a dumping ground for analysis notes.
 
 Bad project knowledge includes:
 
 - Raw code summaries, meeting notes, copied Issue descriptions, or copied comment timelines with no synthesis.
+- Broad overview pages that force a future agent back into whole-repository search for concrete file, function, route, parameter, or recent-change questions.
 - Unverified plans presented as implemented behavior, or one person's suggestion presented as a decision.
 - Temporary debugging details, progress chatter, personal opinions, machine-specific paths, secrets, tokens, or generated-agent process notes.
 - Duplicate pages for the same concept, generic advice that is not project-specific, or details that become stale without helping a reader act.
@@ -79,6 +82,8 @@ The initialization Issue uses `INIT`.
 For `INIT`, inspect at minimum:
 
 - Root structure, entry points, manifests, build/run configuration, primary modules, persistence and external boundaries.
+- File inventory across the project, excluding generated/cache/vendor/build directories.
+- Lightweight symbols: important functions, classes, API routes, command entry points, scripts, configuration keys, and public request/response shapes.
 - Tests and verification scripts that reveal supported behavior and invariants.
 - Existing project documentation and `changelog.md`.
 - Existing `docs/knowledge/`, if present, to avoid duplicate topics.
@@ -89,6 +94,16 @@ Follow imports, calls, routes, schemas, and tests deeply enough to support each 
 ### 5. Design the proposal
 
 Prefer a small coherent set of topic pages over many shallow pages. The initial set normally covers project overview, architecture, code map, key flows, and engineering notes; create decision, design, flow, or guide pages only when the evidence contains durable content for them.
+
+For `INIT`, include a machine-readable pre-index under `.taskboard/knowledge-index/` unless the project is too small to benefit from it:
+
+- `manifest.json`: index schema version, project summary, generated time, scan scope, excluded paths, and source revisions when available.
+- `files.json`: project-relative file records with type, language, size, mtime when available, keywords, owning component, and freshness/revision when available.
+- `symbols.json`: functions, classes, API routes, CLI commands, scripts, config keys, and public request/response shapes with path, line, signature or route, and keywords.
+- `docs.json`: README, docs, published knowledge pages, and high-value Taskboard knowledge proposal summaries with title, source, keywords, summary, and health/status.
+- `recent.json`: recent git changes or mtime-based changes with path, changed_at, source, status, and reason.
+
+The pre-index is not a replacement for knowledge pages. It is a routing layer so a future question can first identify 1-3 candidate files or symbols, then read only those sources. Keep JSON compact, valid, project-relative, and free of absolute paths, secrets, raw conversation logs, and temporary run directories.
 
 Before proposing each page, check:
 
@@ -127,12 +142,14 @@ The response contains a run-specific `instruction`, callback URL, and one-time t
 
 ### 7. Verify and hand off
 
-Confirm the callback returned `{"ok":true}`. Then verify through Taskboard that the project has a `ready` knowledge proposal. The proposal must contain only changed files and every target must be `docs/knowledge/**/*.md` or, for a completed behavior change only, `changelog.md`.
+Confirm the callback returned `{"ok":true}`. Then verify through Taskboard that the project has a `ready` knowledge proposal. The proposal must contain only changed files and every target must be `docs/knowledge/**/*.md`, `.taskboard/knowledge-index/*.json`, or, for a completed behavior change only, `changelog.md`.
+For `INIT`, the proposal should also contain `.taskboard/knowledge-index/*.json` targets when the project has enough files or modules to need routing.
 
 Add a concise Issue comment containing:
 
 - Evidence scope inspected.
 - Proposed pages and why they are durable.
+- Pre-index files generated and what runtime questions they route.
 - Items deliberately left pending or excluded.
 - Verification that the proposal is visible and unpublished.
 

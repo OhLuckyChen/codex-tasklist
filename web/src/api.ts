@@ -113,6 +113,32 @@ export async function chooseLocalDirectory(): Promise<string | null> {
   return data.workspacePath;
 }
 
+export interface LocalWorkspaceCheck {
+  workspacePath: string;
+  exists: boolean;
+  isDirectory: boolean;
+  isEmpty: boolean | null;
+}
+
+export async function checkLocalWorkspace(workspacePath: string): Promise<LocalWorkspaceCheck> {
+  const query = new URLSearchParams({ workspacePath });
+  return request<LocalWorkspaceCheck>(`/api/local/workspace-check?${query}`);
+}
+
+export interface LocalWorkspaceInitialization extends LocalWorkspaceCheck {
+  initialized: boolean;
+  createdFiles: string[];
+}
+
+export async function initializeLocalWorkspace(
+  workspacePath: string,
+): Promise<LocalWorkspaceInitialization> {
+  return request<LocalWorkspaceInitialization>("/api/local/workspace-initialize", {
+    method: "POST",
+    body: JSON.stringify({ workspacePath }),
+  });
+}
+
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
   return request<TaskboardMetadata>("/api/meta", { signal });
 }

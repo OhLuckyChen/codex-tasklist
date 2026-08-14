@@ -22,6 +22,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const KNOWLEDGE_DIRECTORY = path.join("docs", "knowledge");
+const KNOWLEDGE_INDEX_DIRECTORY = path.join(".taskboard", "knowledge-index");
 const MAX_PAGE_BYTES = 1024 * 1024;
 const MAX_PROPOSAL_CHANGES = 50;
 const MAX_PROPOSAL_BYTES = 5 * 1024 * 1024;
@@ -111,7 +112,22 @@ function normalizeRelativePath(value) {
 
 function isAllowedTarget(relativePath) {
   return relativePath === "changelog.md"
-    || (relativePath.startsWith("docs/knowledge/") && relativePath.endsWith(".md"));
+    || (relativePath.startsWith("docs/knowledge/") && relativePath.endsWith(".md"))
+    || isKnowledgeIndexTarget(relativePath);
+}
+
+function isKnowledgeIndexTarget(relativePath) {
+  const prefix = `${KNOWLEDGE_INDEX_DIRECTORY.replaceAll(path.sep, "/")}/`;
+  return relativePath.startsWith(prefix) && relativePath.endsWith(".json");
+}
+
+function assertValidKnowledgeIndexJson(relativePath, content) {
+  if (!isKnowledgeIndexTarget(relativePath)) return;
+  try {
+    JSON.parse(content);
+  } catch {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_INDEX_JSON", `Knowledge index '${relativePath}' must be valid JSON`);
+  }
 }
 
 function isInside(root, candidate) {
@@ -380,10 +396,12 @@ function analysisPrompt(sourceType, sourceSnapshot) {
     "Formal knowledge is current project truth. Pending or unverified ideas must not be written as facts.",
     "Prefer updating an existing topic page. Create a new page only when no existing page can hold the topic.",
     "Technical designs belong under docs/knowledge/designs/. Decisions, detailed flows and guides use their matching directories.",
-    "Allowed targets are docs/knowledge/**/*.md and changelog.md. Include changelog.md only for an actual project behavior change.",
+    "Allowed targets are docs/knowledge/**/*.md, .taskboard/knowledge-index/*.json, and changelog.md. Include changelog.md only for an actual project behavior change.",
     "Every knowledge page must have YAML frontmatter with id, title, kind, updated_at and sources. Source refs are project-relative paths or issue/comment identifiers. For file sources, record the current revision as git-blob:<git hash-object value>; for issue/comment sources, use the supplied version. These revisions are the deterministic baseline for later incremental checks.",
+    "For initial scans, also propose project pre-index JSON files under .taskboard/knowledge-index/: manifest.json, files.json, symbols.json, docs.json, and recent.json. These files are machine-readable routing aids, not narrative knowledge; keep entries project-relative and include freshness or revision data when available.",
+    "Write user-facing knowledge pages in Chinese unless the project already has a stronger local convention.",
     "Return JSON only with this shape:",
-    '{"title":"...","summary":"...","changes":[{"targetPath":"docs/knowledge/...md","operation":"create|update|delete","afterContent":"full file content"}]}',
+    '{"title":"...","summary":"...","changes":[{"targetPath":"docs/knowledge/...md or .taskboard/knowledge-index/files.json","operation":"create|update|delete","afterContent":"full file content"}]}',
     "For delete operations omit afterContent. Never include unchanged files.",
     sourceSnapshot === undefined ? "" : `Source snapshot:\n${JSON.stringify(sourceSnapshot, null, 2)}`,
   ].filter(Boolean).join("\n\n");
@@ -562,6 +580,7 @@ export class KnowledgeService {
       if (operation !== "delete" && (!afterContent.trim() || Buffer.byteLength(afterContent) > MAX_PAGE_BYTES)) {
         throw new ApiError(413, "KNOWLEDGE_PAGE_TOO_LARGE", "Proposed knowledge pages must contain at most 1 MiB");
       }
+      if (operation !== "delete") assertValidKnowledgeIndexJson(targetPath, afterContent);
       changes.push({
         id: randomUUID(),
         targetPath,
@@ -651,6 +670,7 @@ export class KnowledgeService {
       if (raw.operation !== "delete" && (!afterContent.trim() || Buffer.byteLength(afterContent) > MAX_PAGE_BYTES)) {
         throw new ApiError(413, "KNOWLEDGE_PAGE_TOO_LARGE", "Proposed knowledge pages must contain at most 1 MiB");
       }
+      if (raw.operation !== "delete") assertValidKnowledgeIndexJson(targetPath, afterContent);
       prepared.push({ targetPath, target, operation: raw.operation, beforeContent, afterContent, alreadyApplied });
     }
 
