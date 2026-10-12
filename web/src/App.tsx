@@ -42,7 +42,6 @@ import {
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
   listAgentTemplates,
-  listKnowledgeProposals,
   unlinkTaskThread as unlinkTaskThreadRequest,
   listComments,
   listConnectors,
@@ -59,7 +58,6 @@ import {
   transferTaskProject as transferTaskProjectRequest,
   uploadAttachment,
   updateComment as updateCommentRequest,
-  updateKnowledgeProposal,
   updateTask as updateTaskRequest,
 } from "./api";
 import {
@@ -2578,7 +2576,6 @@ export function App() {
   async function createTaskKnowledgeProposal(
     task: Task,
     selectedComments?: Comment[],
-    trigger = "manual",
   ): Promise<boolean> {
     if (!localKnowledgeAvailable) {
       throw new Error("当前入口无法访问本地项目文件，请启动本地 Taskboard 服务后重试。");
@@ -2594,7 +2591,7 @@ export function App() {
         ? { type: task.developmentContext.type, branch: task.developmentContext.branch }
         : null,
       sourceSnapshot: {
-        trigger,
+        trigger: "manual",
         capturedAt: new Date().toISOString(),
         issue: {
           id: task.id,
@@ -2621,35 +2618,9 @@ export function App() {
       },
     });
     if (generated.changes.length === 0) return false;
-    const automatic = trigger === "in_review" || trigger === "completed";
-    const existing = automatic
-      ? (await listKnowledgeProposals(task.projectId, "ready")).find((proposal) => (
-        proposal.sourceType === "issue"
-        && (proposal.sourceSnapshot.issue as { id?: string } | undefined)?.id === task.id
-      ))
-      : undefined;
-    if (existing) {
-      await updateKnowledgeProposal(existing, {
-        title: generated.title,
-        summary: generated.summary,
-        changes: generated.changes,
-      });
-    } else {
-      await createKnowledgeProposal(task.projectId, generated);
-    }
+    await createKnowledgeProposal(task.projectId, generated);
     setKnowledgeRevision((current) => current + 1);
     return true;
-  }
-
-  function queueAutomaticKnowledgeReview(task: Task, trigger: "in_review" | "completed") {
-    if (!localKnowledgeAvailable || !knowledgeWorkspaceForTask(task)) return;
-    void createTaskKnowledgeProposal(task, undefined, trigger)
-      .then((created) => {
-        setAnnouncement(created
-          ? `${task.identifier} 已生成待确认知识提案。`
-          : `${task.identifier} 复盘完成，没有新的长期知识。`);
-      })
-      .catch((error) => setActionError(`知识复盘未完成：${errorMessage(error)}`));
   }
 
   async function moveTask(
@@ -2704,9 +2675,6 @@ export function App() {
       setTasks((current) => sortTasks(current.map((candidate) =>
         candidate.id === moved.id ? moved : candidate,
       )));
-      if (task.status !== moved.status && (moved.status === "in_review" || moved.status === "done")) {
-        queueAutomaticKnowledgeReview(moved, moved.status === "done" ? "completed" : "in_review");
-      }
       const message = task.status === status
         ? `${task.identifier} 排序已调整。`
         : `${task.identifier} 已移至${STATUS_DETAILS[status].label}。`;
@@ -2763,9 +2731,6 @@ export function App() {
       setTasks((current) => sortTasks(current.map((candidate) =>
         candidate.id === updated.id ? updated : candidate,
       )));
-      if (previous.status !== updated.status && (updated.status === "in_review" || updated.status === "done")) {
-        queueAutomaticKnowledgeReview(updated, updated.status === "done" ? "completed" : "in_review");
-      }
       const previousAssigneeTarget = assigneeTargetForActor(previous.assignee, currentUser);
       if (!assigneeTarget || previousAssigneeTarget) {
         pushUndo(
@@ -4338,7 +4303,7 @@ export function App() {
             onUpdate={(current, changes) => updateTaskProperties(current, changes)}
             knowledgeAvailable={localKnowledgeAvailable && Boolean(knowledgeWorkspaceForTask(detailTask))}
             onCreateKnowledgeProposal={async (current, selectedComments) => {
-              const created = await createTaskKnowledgeProposal(current, selectedComments, "manual");
+              const created = await createTaskKnowledgeProposal(current, selectedComments);
               if (created) {
                 setDetailTaskIdentifier(null);
                 const knowledgeUrl = buildIssueUrl(window.location.href, current.projectId, null);

@@ -31,8 +31,7 @@ test("published comments can explicitly remove an incorrect conversation associa
 test("project knowledge keeps confirmed files separate from reviewable issue and comment proposals", () => {
   assert.match(appSource, /type BoardView = "issues" \| "drafts" \| "knowledge"/);
   assert.match(appSource, />\s*项目知识\{knowledgeProposalCount/);
-  assert.match(appSource, /queueAutomaticKnowledgeReview/);
-  assert.match(appSource, /moved\.status === "in_review" \|\| moved\.status === "done"/);
+  assert.doesNotMatch(appSource, /queueAutomaticKnowledgeReview/);
   assert.match(detailSource, /整理为项目知识/);
   assert.match(detailSource, /加入知识提案/);
   assert.match(detailSource, /选择评论整理/);
