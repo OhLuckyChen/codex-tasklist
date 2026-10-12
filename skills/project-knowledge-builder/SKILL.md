@@ -24,6 +24,7 @@ Good project knowledge:
 - Is organized by topic, updates an existing page when possible, and gives the reader a clear next place to look.
 - Records source revisions so later checks can identify exactly what changed.
 - Gives machines a fast routing layer for common questions: file inventory, symbols, API routes, document summaries, and recent changes.
+- Gives agents a durable model of core objects, state authority, critical entry points, data boundaries, and end-to-end flows before narrative pages are written.
 - Uses Chinese for user-facing knowledge pages unless the project already has a stronger local documentation convention.
 - Uses `changelog.md` only for actual completed project changes, never as a dumping ground for analysis notes.
 
@@ -31,6 +32,7 @@ Bad project knowledge includes:
 
 - Raw code summaries, meeting notes, copied Issue descriptions, or copied comment timelines with no synthesis.
 - Broad overview pages that force a future agent back into whole-repository search for concrete file, function, route, parameter, or recent-change questions.
+- A shallow module inventory that names components but does not say which objects they own, which entry points mutate state, what success means, or where evidence lives.
 - Unverified plans presented as implemented behavior, or one person's suggestion presented as a decision.
 - Temporary debugging details, progress chatter, personal opinions, machine-specific paths, secrets, tokens, or generated-agent process notes.
 - Duplicate pages for the same concept, generic advice that is not project-specific, or details that become stale without helping a reader act.
@@ -84,6 +86,8 @@ For `INIT`, inspect at minimum:
 - Root structure, entry points, manifests, build/run configuration, primary modules, persistence and external boundaries.
 - File inventory across the project, excluding generated/cache/vendor/build directories.
 - Lightweight symbols: important functions, classes, API routes, command entry points, scripts, configuration keys, and public request/response shapes.
+- Core domain or project objects: stable identifiers, creation and mutation paths, authoritative state source, projections/caches, invariants, and uncertain boundaries.
+- Critical end-to-end flows: trigger, entry point, participating components, state/file/database changes, success semantics, failure/partial/retry boundaries, and evidence.
 - Tests and verification scripts that reveal supported behavior and invariants.
 - Existing project documentation and `changelog.md`.
 - Existing `docs/knowledge/`, if present, to avoid duplicate topics.
@@ -95,15 +99,38 @@ Follow imports, calls, routes, schemas, and tests deeply enough to support each 
 
 Prefer a small coherent set of topic pages over many shallow pages. The initial set normally covers project overview, architecture, code map, key flows, and engineering notes; create decision, design, flow, or guide pages only when the evidence contains durable content for them.
 
+For `INIT`, analyze in this order before writing pages:
+
+1. Classify project layers and component responsibilities: UI, service/API, scripts/jobs, skills, configuration, storage, external systems, tests, and generated assets.
+2. Identify core objects and their fact authority: stable ID, creator, updater, state source, final states, projections, caches, invariants, and unresolved ownership questions.
+3. Identify entry points and rank them `critical`, `important`, or `supporting`: HTTP routes, CLI commands, scripts, event/job handlers, public functions, config keys, and user-facing actions.
+4. Close central flows end to end: trigger, entry point, components, state changes, success semantics, failure/partial/retry/idempotency boundary, and evidence.
+5. Cross-check page claims against the machine indexes. A page that describes an object, flow, or critical entry point must have a matching index entry; a critical index entry must link back to a page.
+6. Separate certainty levels. Use `confirmed` only when current code, configuration, tests, project documents, or confirmed Taskboard evidence supports the claim; use `inferred` for reasoned conclusions and `pending` for open questions.
+
+For `INIT`, include these core knowledge pages unless the callback explicitly reports that evidence was insufficient:
+
+- `docs/knowledge/index.md`
+- `docs/knowledge/project-overview.md`
+- `docs/knowledge/architecture.md`
+- `docs/knowledge/code-map.md`
+- `docs/knowledge/key-flows.md`
+- `docs/knowledge/engineering-notes.md`
+- `docs/knowledge/data-boundaries.md`
+- `docs/knowledge/interfaces-and-entrypoints.md`
+
 For `INIT`, include a machine-readable pre-index under `.taskboard/knowledge-index/` unless the project is too small to benefit from it:
 
 - `manifest.json`: index schema version, project summary, generated time, scan scope, excluded paths, and source revisions when available.
 - `files.json`: project-relative file records with type, language, size, mtime when available, keywords, owning component, and freshness/revision when available.
-- `symbols.json`: functions, classes, API routes, CLI commands, scripts, config keys, and public request/response shapes with path, line, signature or route, and keywords.
+- `symbols.json`: functions, classes, API routes, CLI commands, scripts, config keys, and public request/response shapes with path, line, signature or route, method, request fields, response fields, importance, evidence status, linked knowledge, and keywords.
+- `entrypoints.json`: user, API, CLI, script, job, event, and configuration entry points with business/runtime purpose, full callable route including deployment prefix or compatibility aliases, method, required request fields, success semantics, importance, evidence status, and linked knowledge.
+- `objects.json`: core objects with stable ID, authority, creators/updaters, state source, states, invariants, evidence, and confidence.
+- `flows.json`: central flows with trigger, entry point, components, state changes, success semantics, failure semantics, evidence, and confidence.
 - `docs.json`: README, docs, published knowledge pages, and high-value Taskboard knowledge proposal summaries with title, source, keywords, summary, and health/status.
 - `recent.json`: recent git changes or mtime-based changes with path, changed_at, source, status, and reason.
 
-The pre-index is not a replacement for knowledge pages. It is a routing layer so a future question can first identify 1-3 candidate files or symbols, then read only those sources. Keep JSON compact, valid, project-relative, and free of absolute paths, secrets, raw conversation logs, and temporary run directories.
+The pre-index is not a replacement for knowledge pages. It is a routing layer so a future question can first identify 1-3 candidate files, symbols, objects, or flows, then read only those sources. Keep JSON compact, valid, project-relative, and free of absolute paths, secrets, raw conversation logs, and temporary run directories. For dangerous operations, record required acknowledgement fields and state preconditions; never hide them in prose only.
 
 Before proposing each page, check:
 
@@ -112,6 +139,7 @@ Before proposing each page, check:
 - Is the content confirmed, completed, and current?
 - Does an existing page already own this topic?
 - Would the content remain useful after the current Issue is closed?
+- Does the matching index entry point back to this page when the topic is critical?
 
 Do not propose an empty category merely to fill the directory shape.
 

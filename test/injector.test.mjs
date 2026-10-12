@@ -15,6 +15,10 @@ const supervisorSource = await readFile(
   new URL("../scripts/codex-taskboard-supervisor.sh", import.meta.url),
   "utf8",
 );
+const installerSource = await readFile(
+  new URL("../scripts/install-macos-launcher.sh", import.meta.url),
+  "utf8",
+);
 const injectionSource = await readFile(
   new URL("../inject/codex-taskboard.user.js", import.meta.url),
   "utf8",
@@ -23,20 +27,43 @@ const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 
-test("the resident injector supervises the fixed local Taskboard service", () => {
+test("the resident injector supervises an independently-lived local Taskboard service", () => {
   assert.match(source, /function createTaskboardSupervisor/);
-  assert.match(source, /await isReachable\(taskboardHealthUrl\)/);
+  assert.match(source, /function readTaskboardHealth/);
+  assert.match(source, /function healthMatchesCurrentProject/);
+  assert.match(source, /function healthBelongsToAnotherProject/);
+  assert.match(source, /projectRoot/);
+  assert.match(source, /Taskboard port \$\{resolvePort\(\)\} is owned by/);
   assert.match(source, /ensureInFlight/);
+  assert.match(source, /restartInFlight/);
+  assert.match(source, /if \(restartInFlight\) return restartInFlight/);
+  assert.match(source, /async function stopCurrentTaskboardServers/);
+  assert.match(source, /async function stopTaskboardServerProcess/);
+  assert.match(source, /process\.kill\(pid, "SIGKILL"\)/);
+  assert.match(source, /async function startFreshTaskboard/);
+  assert.match(source, /async function restart\(\)/);
   assert.match(source, /await supervisor\.ensure\(\)/);
   assert.match(source, /it will be restarted automatically/);
   assert.match(source, /AbortSignal\.timeout\(1_500\)/);
   assert.match(source, /CODEX_TASKBOARD_HOST: "127\.0\.0\.1"/);
   assert.match(source, /CODEX_TASKBOARD_PORT: String\(resolvePort\(\)\)/);
+  assert.match(source, /residentTaskboardServerPids\(\)/);
+  assert.match(source, /event: "taskboard-health-delayed"/);
+  assert.match(source, /return \{ status: "degraded", restarted: false \}/);
+  assert.match(source, /event: "taskboard-startup-delayed"/);
+  assert.match(source, /"\/usr\/sbin\/taskpolicy"/);
+  assert.match(source, /\["-a", process\.execPath/);
+  assert.match(source, /startTaskboard\(\{ detached: true \}\)/);
+  assert.match(source, /started\.unref\(\)/);
+  assert.match(source, /function detach\(\) \{\s*child = null;\s*\}/);
+  assert.match(runtimeSource, /findResidentTaskboardServerPids/);
 });
 
 test("the CDP bridge accepts service, composer, and exact thread correlation actions", () => {
   assert.match(source, /const hostBindingName = "__codexTaskboardHostV1"/);
   assert.match(runtimeSource, /request\.action === "ensure"/);
+  assert.match(runtimeSource, /request\.action === "restart-service"/);
+  assert.match(source, /restartService: \(\) => supervisor\.restart\(\)/);
   assert.match(runtimeSource, /request\.action === "prefill-task-composer"/);
   assert.match(runtimeSource, /request\.action === "resolve-task-thread"/);
   assert.match(runtimeSource, /request\.action === "rename-thread"/);
@@ -61,6 +88,35 @@ test("the CDP bridge accepts service, composer, and exact thread correlation act
   assert.match(source, /if \(keepAlive\) await installTaskboardHostBinding/);
   assert.match(source, /publishHostHeartbeat/);
   assert.match(source, /__codexTaskboardHostHeartbeatV1/);
+});
+
+test("task composer waits for asynchronously loaded personal Skills", () => {
+  const prefillSource = source.slice(
+    source.indexOf("async function prefillTaskComposerViaCdp"),
+    source.indexOf("async function prefillPlainComposerViaCdp"),
+  );
+  assert.match(prefillSource, /const composerDeadline = Date\.now\(\) \+ 8_000/);
+  assert.match(prefillSource, /const skillSelectionDeadline = Date\.now\(\) \+ 12_000/);
+  assert.match(prefillSource, /const mentionDeadline = Date\.now\(\) \+ 4_000/);
+  assert.match(
+    prefillSource,
+    /if \(!selection\.result\.value\?\.found\) \{\s*await new Promise\(\(resolve\) => setTimeout\(resolve, 80\)\);\s*continue;/,
+  );
+  assert.doesNotMatch(prefillSource, /if \(!selection\.result\.value\?\.found\) break/);
+});
+
+test("composer verification tolerates ProseMirror paragraph boundaries", () => {
+  const composerSource = source.slice(
+    source.indexOf("async function prefillTaskComposerViaCdp"),
+    source.indexOf("async function sendHostResponse"),
+  );
+  const lineBasedChecks = composerSource.match(/instruction\.split\(\/\\\\r\?\\\\n\/\)/g) || [];
+  assert.equal(lineBasedChecks.length, 5);
+  assert.match(
+    composerSource,
+    /instructionParts\.every\(\(part\) => editorText\.includes\(part\)\)/,
+  );
+  assert.doesNotMatch(composerSource, /textContent \|\| ""\)\.includes\(instruction\)/);
 });
 
 test("new task threads use a durable request marker instead of sidebar ordering", () => {
@@ -116,9 +172,19 @@ test("the macOS Dock launcher enables loopback-only CDP before Codex starts", ()
 });
 
 test("the login supervisor is passive and never requests a Codex restart", () => {
+  assert.match(supervisorSource, /unsetopt BG_NICE/);
+  assert.match(supervisorSource, /taskpolicy -B -p \$\$/);
+  assert.match(supervisorSource, /taskpolicy -a "\$node_binary" "\$injector"/);
   assert.match(supervisorSource, /--watch --open --attach-existing/);
+  assert.match(supervisorSource, /codex-taskboard-supervisor\.lock/);
+  assert.match(supervisorSource, /owns_lock=true/);
+  assert.match(supervisorSource, /Another Taskboard supervisor already owns/);
   assert.match(supervisorSource, /attached_cdp_signature/);
-  assert.match(supervisorSource, /Detected a new Codex CDP instance/);
+  assert.match(supervisorSource, /cdp_failure_threshold=6/);
+  assert.match(supervisorSource, /CDP probe delayed/);
+  assert.match(supervisorSource, /cdp-unavailable-after-\$\{cdp_failure_count\}-probes/);
+  assert.match(supervisorSource, /Taskboard service remains running/);
+  assert.match(supervisorSource, /trigger=\$restart_trigger/);
   assert.match(supervisorSource, /function stop_duplicate_injectors|stop_duplicate_injectors\(\)/);
   assert.match(supervisorSource, /Stopping duplicate Taskboard injector/);
   assert.match(supervisorSource, /targets_port = explicit_port \|\| !has_any_port/);
@@ -126,6 +192,15 @@ test("the login supervisor is passive and never requests a Codex restart", () =>
   assert.doesNotMatch(supervisorSource, /osascript/);
   assert.doesNotMatch(supervisorSource, /--launch/);
   assert.doesNotMatch(supervisorSource, /tell application/);
+});
+
+test("the macOS installer removes stale Taskboard LaunchAgents before installing the canonical one", () => {
+  assert.match(installerSource, /cleanup_conflicting_launch_agent/);
+  assert.match(installerSource, /\*taskboard\*\.plist/);
+  assert.match(installerSource, /ProgramArguments:1/);
+  assert.match(installerSource, /CODEX_TASKBOARD_DATA_DIR/);
+  assert.match(installerSource, /launchctl bootout/);
+  assert.match(installerSource, /rm -f "\$candidate"/);
 });
 
 test("attach reconciles the renderer against a hashed current injection source", () => {
@@ -149,6 +224,9 @@ test("a completed web build reloads the current injection source and iframe", ()
   assert.match(packageJson.scripts.build, /--refresh-if-running/);
   assert.match(packageJson.scripts["codex:refresh"], /--refresh/);
   assert.match(source, /async function refreshTaskboardFrames/);
+  assert.match(source, /const \{ source, sourceHash \} = await currentInjectionSource\(\)/);
+  assert.match(source, /const reconciled = await reconcileInjectionRuntime\(\{/);
+  assert.match(source, /sourceReplaced: reconciled\.replaced/);
   assert.match(source, /function codexDebuggingPorts/);
   assert.match(source, /--remote-debugging-port=/);
   assert.match(source, /taskboard\.reloadFrame\(\)/);
@@ -163,8 +241,23 @@ test("renderer recovery tolerates transient delays and reattaches without reload
   assert.match(source, /"cdp-heartbeat-delayed"/);
   assert.match(source, /"cdp-reconnect-required"/);
   assert.match(source, /classifyHeartbeatFailure/);
+  assert.match(source, /const closeInjectedTargets = \(\) =>/);
+  assert.match(source, /if \(!cdpReachable && options\.attachExisting\)/);
+  assert.match(source, /await waitUntilReachable\(cdpVersionUrl, 10_000\)/);
+  assert.match(source, /injectedTargets\.forEach\(\(connection\) => connection\.close\(\)\)/);
+  assert.match(source, /closeInjectedTargets\(\);\s*supervisor\.detach\(\);/);
   assert.match(source, /true,\s*options\.startupToken,/);
   assert.match(launcherSource, /--open --attach-existing/);
+});
+
+test("an explicit service restart has one timeout budget longer than backend cleanup and startup", () => {
+  assert.match(source, /forceAfterMs: 1_000/);
+  assert.match(source, /timeoutMs: 3_000/);
+  assert.match(injectionSource, /const SERVICE_RESTART_TIMEOUT_MS = 16_000/);
+  assert.match(
+    injectionSource,
+    /requestHost\("restart-service", \{\}, \{\s*requireLiveHeartbeat: false,\s*timeoutMs: SERVICE_RESTART_TIMEOUT_MS,/,
+  );
 });
 
 test("a fresh renderer performs one CSP bootstrap reload before loading Taskboard", () => {

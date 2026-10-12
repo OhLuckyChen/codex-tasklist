@@ -1,4 +1,4 @@
-import type { MouseEvent } from "react";
+import type { CSSProperties, MouseEvent } from "react";
 import { TASK_STATUSES, type CodexThreadProgress, type Task, type TaskPriority, type TaskStatus } from "../types";
 import { ActorAvatar } from "./ActorAvatar";
 import { LinearIcon, LinearPriorityIcon } from "./LinearIcon";
@@ -12,12 +12,31 @@ const PRIORITY_LABELS: Record<TaskPriority, string> = {
   low: "低优先级",
 };
 
+const PROJECT_COLORS = [
+  "#5e6ad2",
+  "#2f80ed",
+  "#00a88f",
+  "#e8701a",
+  "#d84c7f",
+  "#7a5af8",
+  "#0f8a4b",
+  "#c75c2a",
+  "#0086a8",
+  "#b454b8",
+] as const;
+
 function descriptionPreview(description: string) {
   return description
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function projectColor(projectId: string) {
+  let hash = 0;
+  for (const character of projectId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return PROJECT_COLORS[hash % PROJECT_COLORS.length];
 }
 
 interface TaskCardProps {
@@ -31,6 +50,7 @@ interface TaskCardProps {
   isSettling: boolean;
   isContextMenuOpen: boolean;
   isFavorite: boolean;
+  isUnread: boolean;
   onEdit: (task: Task) => void;
   onToggleFavorite: (task: Task) => void;
   onContextMenu: (task: Task, position: { x: number; y: number }) => void;
@@ -51,6 +71,7 @@ export function TaskCard({
   isSettling,
   isContextMenuOpen,
   isFavorite,
+  isUnread,
   onEdit,
   onToggleFavorite,
   onContextMenu,
@@ -68,6 +89,10 @@ export function TaskCard({
     issue.status !== "done" && issue.status !== "canceled" && issue.status !== "archived"
   )).length;
   const preview = descriptionPreview(task.description);
+  const cardStyle = {
+    ...(dragShift ? { transform: `translate3d(0, ${dragShift}px, 0)` } : {}),
+    "--task-project-color": projectColor(task.projectId),
+  } as CSSProperties;
 
   function stopThen(callback: () => void) {
     return (event: MouseEvent<HTMLButtonElement>) => {
@@ -79,7 +104,7 @@ export function TaskCard({
   return (
     <article
       className={`task-card priority-${task.priority}${isDragging ? " is-dragging" : ""}${dragShift ? " is-drag-shifted" : ""}${isMoving ? " is-moving" : ""}${isSettling ? " is-settling" : ""}${isContextMenuOpen ? " is-context-open" : ""}`}
-      style={dragShift ? { transform: `translate3d(0, ${dragShift}px, 0)` } : undefined}
+      style={cardStyle}
       draggable={!isMoving}
       aria-labelledby={`task-${task.id}-title`}
       data-task-id={task.id}
@@ -107,6 +132,7 @@ export function TaskCard({
       <div className="card-topline">
         <span className="card-reference">
           <span className="task-identifier">{task.identifier}</span>
+          {isUnread && <span className="task-card-unread-dot" aria-label="未读" />}
           {projectName && (
             <span className="task-project-name" title={`所属项目：${projectName}`}>
               <LinearIcon name="folder" />

@@ -3,13 +3,14 @@ import type { Task } from "../types";
 import { ActorAvatar } from "./ActorAvatar";
 import { STATUS_DETAILS } from "./BoardColumn";
 import { LinearIcon, LinearStatusIcon } from "./LinearIcon";
+import { safeLocalStorage } from "../safeStorage";
 
 const FAVORITE_PROJECT_ORDER_KEY = "taskboard.favoriteTaskProjectOrder.v1";
 const FAVORITE_TASK_ORDER_KEY = "taskboard.favoriteTaskOrderByProject.v1";
 
 function readStringList(key: string): string[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(key) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(key) ?? "[]");
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   } catch {
     return [];
@@ -18,7 +19,7 @@ function readStringList(key: string): string[] {
 
 function readTaskOrder(): Record<string, string[]> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(FAVORITE_TASK_ORDER_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(FAVORITE_TASK_ORDER_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     return Object.fromEntries(Object.entries(value).flatMap(([projectId, taskIds]) => (
       Array.isArray(taskIds)
@@ -109,7 +110,7 @@ export function FavoriteTaskList({
     const hiddenIds = projectOrder.filter((projectId) => !visibleIds.includes(projectId));
     const next = [...moveId(visibleIds, sourceProjectId, targetProjectId, after), ...hiddenIds];
     setProjectOrder(next);
-    window.localStorage.setItem(FAVORITE_PROJECT_ORDER_KEY, JSON.stringify(next));
+    safeLocalStorage.setItem(FAVORITE_PROJECT_ORDER_KEY, JSON.stringify(next));
   }
 
   function reorderTasks(projectId: string, sourceTaskId: string, targetTaskId: string, after: boolean) {
@@ -121,7 +122,7 @@ export function FavoriteTaskList({
     const nextOrder = [...moveId(visibleIds, sourceTaskId, targetTaskId, after), ...hiddenIds];
     setTaskOrderByProject((current) => {
       const next = { ...current, [projectId]: nextOrder };
-      window.localStorage.setItem(FAVORITE_TASK_ORDER_KEY, JSON.stringify(next));
+      safeLocalStorage.setItem(FAVORITE_TASK_ORDER_KEY, JSON.stringify(next));
       return next;
     });
   }

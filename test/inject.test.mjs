@@ -9,10 +9,11 @@ const sourceUrl = new URL("../inject/codex-taskboard.user.js", import.meta.url);
 const source = await readFile(sourceUrl, "utf8");
 const webStyles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 const webApp = await readFile(new URL("../web/src/App.tsx", import.meta.url), "utf8");
+const webApi = await readFile(new URL("../web/src/api.ts", import.meta.url), "utf8");
 
 test("injection is an idempotent IIFE guarded by its current source hash", () => {
   assert.match(source, /^\(\(\) => \{/);
-  assert.match(source, /const VERSION = "0\.6\.8"/);
+  assert.match(source, /const VERSION = "0\.6\.9"/);
   assert.match(source, /const SOURCE_HASH = window\.__CODEX_TASKBOARD_SOURCE_HASH__/);
   assert.match(source, /const SENTINEL_KEY = "__codexTaskboardInjection__"/);
   assert.match(source, /previous\?\.sourceHash === SOURCE_HASH/);
@@ -28,13 +29,29 @@ test("embedded page uses the local taskboard URL and supports a runtime override
   assert.match(source, /frameOrigin = taskboardUrl\.origin/);
 });
 
-test("entry clones the native Plugins row and the page covers the complete Codex workspace", () => {
+test("entry hides a native blank Taskboard row and the page covers the complete Codex workspace", () => {
   assert.match(source, /const PLUGIN_LABELS = \["插件", "plugins"\]/);
-  assert.match(source, /if \(siblings\.length >= 3\) return plugin;/);
-  assert.match(source, /return directButtons\.length >= 3/);
+  assert.match(source, /const TASKBOARD_ENTRY_LABELS = \["任务面板", "taskboard"\]/);
+  assert.match(source, /const DUPLICATE_ENTRY_ATTRIBUTE = "data-codex-taskboard-duplicate-entry-hidden"/);
+  assert.match(source, /\[\$\{DUPLICATE_ENTRY_ATTRIBUTE\}="true"\] \{/);
+  assert.match(source, /function hideDuplicateNativeTaskboardEntries\(\)/);
+  assert.match(source, /node\.setAttribute\(DUPLICATE_ENTRY_ATTRIBUTE, "true"\)/);
+  assert.match(source, /node\.setAttribute\("aria-hidden", "true"\)/);
+  assert.match(source, /function restoreDuplicateNativeTaskboardState\(\)/);
+  assert.match(source, /restoreNativeContent\(\);\s*ensureEntry\(\);/);
+  assert.doesNotMatch(source, /function clearDuplicateNativeTaskboardState\(\)/);
+  assert.doesNotMatch(source, /if \(hasNativeTaskboardEntry\(\)\) \{/);
+  assert.match(source, /return document\.querySelector\('button\[data-sidebar-destination="builtin:home"\]'\)/);
+  assert.match(source, /function findEntryAnchor\(reference\)/);
+  assert.match(source, /referenceParent\.children\.length === 1/);
+  assert.match(source, /referenceParent\.firstElementChild === reference/);
   assert.match(source, /const button = reference\.cloneNode\(true\)/);
-  assert.match(source, /reference\.after\(entry\)/);
-  assert.match(source, /document\.querySelector\("\.app-shell-main-content-frame"\)/);
+  assert.match(source, /anchor\.after\(entry\)/);
+  assert.match(source, /function nativeTaskboardEntries\(\)/);
+  assert.match(source, /topNavigationButton\(button, scroll, sectionTop\)/);
+  assert.match(source, /buttonMatches\(button, TASKBOARD_ENTRY_LABELS\)/);
+  assert.match(source, /function hasNativeTaskboardEntry\(\)/);
+  assert.match(source, /viewport\.querySelector\("\.app-shell-main-content-frame"\)/);
   assert.match(source, /const surface = viewport\?\.parentElement/);
   assert.match(source, /surface\.appendChild\(page\)/);
   assert.match(source, /#\$\{PAGE_ID\} \{[\s\S]*?top: 0;/);
@@ -122,6 +139,33 @@ test("opening asks the resident launcher to ensure the service and rebuilds fail
   assert.match(source, /HOST_HEARTBEAT_MAX_AGE_MS/);
   assert.match(source, /requireLiveHeartbeat !== false/);
   assert.match(source, /return requestHost\("ensure", \{\}, \{ requireLiveHeartbeat: false \}\)/);
+  assert.match(source, /function requestHostRestartService\(taskboardUrl\)/);
+  assert.match(
+    source,
+    /return requestHost\("restart-service", \{\}, \{\s*requireLiveHeartbeat: false,\s*timeoutMs: SERVICE_RESTART_TIMEOUT_MS,/,
+  );
+  assert.match(source, /openTaskboard\(\{ restartService: true \}\)/);
+  assert.match(source, /message\.type === "taskboard:restart-service"/);
+  assert.match(source, /message\.type === "taskboard:recover-service"/);
+  assert.match(source, /openTaskboard\(\{ recoverService: true \}\)/);
+  assert.match(source, /function removeTaskboardFrame\(\)/);
+  assert.match(source, /options\.restartService \|\| options\.recoverService[\s\S]*removeTaskboardFrame\(\)/);
+  assert.match(source, /options\.restartService[\s\S]*requestHostRestartService\(taskboardUrl\)[\s\S]*requestHostEnsure\(taskboardUrl\)/);
+  assert.match(webApp, /shouldRecoverService && requestTaskboardServiceRecovery\(\)/);
+  assert.match(webApp, /type: "taskboard:recover-service"/);
+  assert.match(webApp, /function isServiceUnavailableMessage/);
+  assert.match(webApp, /setActionError\(\(current\) => isServiceUnavailableMessage\(current\) \? null : current\)/);
+  assert.match(webApp, /setLoadError\(null\);\s*setServiceRecoveryNeeded\(false\);/);
+});
+
+test("the web API preserves service recovery diagnostics", () => {
+  assert.match(webApi, /readonly path\?: string/);
+  assert.match(webApi, /readonly serviceUnavailable: boolean/);
+  assert.match(webApi, /this\.serviceUnavailable = status === 0 \|\| this\.code === "SERVICE_UNAVAILABLE"/);
+  assert.match(webApi, /details: \{ path \}/);
+  assert.match(webApi, /new ApiError\(response\.status, body, \{ path \}\)/);
+  assert.match(webApi, /function isAbortError\(error: unknown\)/);
+  assert.doesNotMatch(webApi, /error instanceof Error && error\.name === "AbortError"/);
 });
 
 test("the injected iframe can be cache-busted without reloading the Codex shell", () => {
@@ -143,7 +187,7 @@ test("reopening reuses a ready cache-busted iframe without showing the startup p
   assert.match(prepareSource, /if \(canReuseFrame\) showFrame\(\);\s*else showLoading\(\);/);
   assert.match(
     prepareSource,
-    /if \(!frameReady \|\| result\.restarted \|\| !frameMatchesTaskboardUrl\(taskboardUrl\)\) \{\s*showLoading\(\);/,
+    /if \(!frameReady \|\| result\.restarted \|\| options\.recoverService \|\| !frameMatchesTaskboardUrl\(taskboardUrl\)\) \{\s*showLoading\(\);/,
   );
   assert.doesNotMatch(prepareSource, /async function prepareTaskboard\(generation\) \{\s*showLoading\(\);/);
 });
@@ -221,6 +265,16 @@ test("only a loopback Taskboard iframe can request native automation", () => {
   );
 });
 
+test("project creation registers local folders through Codex workspace-root add flow", () => {
+  const activateProjectSource = source.slice(
+    source.indexOf("async function activateProjectFromTaskboard"),
+    source.indexOf("async function createThreadForTask"),
+  );
+  assert.match(activateProjectSource, /type: "electron-add-new-workspace-root-option"/);
+  assert.match(activateProjectSource, /root: workspacePath/);
+  assert.doesNotMatch(activateProjectSource, /type: "electron-set-active-workspace-root"/);
+});
+
 test("issues submit a native Codex composer in the exact workspace with a Skill mention", () => {
   assert.match(source, /function createThreadForTask\(payload\)/);
   assert.match(source, /function activateProjectForThread\(payload, workspacePath, bridge\)/);
@@ -229,9 +283,14 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.match(source, /label === "停止" \|\| label === "stop"/);
   assert.match(source, /function assertNativeComposerCanStartTask\(\)/);
   assert.match(source, /assertNativeComposerCanStartTask\(\)/);
-  assert.match(source, /waitForActiveNativeProject\(activatedProject\.id\)/);
+  assert.match(source, /waitForActiveNativeProject\(project\.id\)/);
   assert.match(source, /function selectComposerProject\(project\)/);
-  assert.match(source, /activatedProject\.selectInComposer/);
+  assert.match(source, /function projectLabelCandidates\(project\)/);
+  assert.match(source, /project\?\.codexProjectName/);
+  assert.match(source, /project\?\.workspaceLabel/);
+  assert.match(source, /labels\.includes\(normalizedLabel\(candidate\.textContent\)\)/);
+  assert.match(source, /labels\.some\(\(candidate\) => label\.includes\(candidate\)\)/);
+  assert.match(source, /await selectComposerProject\(activatedProject\)/);
   assert.match(source, /skillName === "project-knowledge-builder"/);
   assert.match(source, /不要打开或使用 Codex 的 Skill 选择菜单/);
   assert.match(source, /skills\/manage-taskboard\/SKILL\.md/);
@@ -240,7 +299,7 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.doesNotMatch(source, /projectRowById\(snapshotProjectId\)/);
   assert.match(source, /\[data-app-action-sidebar-select-project\]/);
   assert.match(source, /type: "electron-set-active-workspace-root"/);
-  assert.match(source, /root: workspacePath/);
+  assert.match(source, /projectId,/);
   assert.doesNotMatch(source, /prefillPrompt: prompt/);
   assert.match(source, /requestHostTaskComposerPrefill\(\{/);
   assert.match(source, /requestHost\("prefill-task-composer"/);
@@ -265,6 +324,7 @@ test("issues submit a native Codex composer in the exact workspace with a Skill 
   assert.match(webApp, /skillName: skill\.name/);
   assert.match(webApp, /skillDisplayName: skill\.displayName/);
   assert.match(webApp, /skillPath: skill\.path/);
+  assert.match(webApp, /codexProjectName: codexProject\?\.name/);
   assert.match(webApp, /instruction,/);
   assert.match(webApp, /identifier: task\.identifier/);
   assert.match(webApp, /type: "taskboard:create-thread"/);
@@ -307,8 +367,10 @@ test("existing conversation follow-ups resume review only after the message is p
     source.indexOf("function buildAutomationHostPayload"),
   );
   assert.match(followUpSource, /const requestId = typeof payload\?\.requestId/);
+  assert.match(followUpSource, /const commentId = typeof payload\?\.commentId/);
   assert.match(followUpSource, /const marker = `\[taskboard-request:\$\{requestId\}\]`/);
   assert.match(followUpSource, /action: "follow-up"/);
+  assert.match(followUpSource, /\.\.\.\(commentId \? \{ commentId \} : \{\}\)/);
   assert.match(followUpSource, /instruction: correlatedInstruction/);
   assert.match(followUpSource, /submit: true/);
   assert.match(followUpSource, /persistPendingThreadLinkReceipt\(\{/);
@@ -326,7 +388,9 @@ test("existing conversation follow-ups resume review only after the message is p
 
 test("the standalone web page opens linked Codex tasks through the app deep link", () => {
   assert.match(webApp, /const normalizedThreadId = normalizeCodexThreadId\(threadId\)/);
-  assert.match(webApp, /window\.location\.assign\(`codex:\/\/threads\/\$\{encodeURIComponent\(normalizedThreadId\)\}`\)/);
+  assert.match(webApp, /function codexThreadUrl\(threadId: string, prompt\?: string\): string/);
+  assert.match(webApp, /window\.location\.assign\(codexThreadUrl\(normalizedThreadId\)\)/);
+  assert.match(webApp, /window\.location\.assign\(codexThreadUrl\(normalizedThreadId, taskThreadInstruction\(task, followUp\)\)\)/);
 });
 
 test("the standalone web page resolves historical thread runtime from every linked conversation", () => {
@@ -383,7 +447,7 @@ test("host context captures all Codex projects even when the sidebar section is 
   assert.match(source, /data-app-action-sidebar-section-collapsed/);
   assert.match(source, /async function captureHostContext\(\)/);
   assert.match(source, /while \(!section && Date\.now\(\) < sectionDeadline\)/);
-  assert.match(source, /requestHostEnsure\(taskboardUrl\),\s*captureHostContext\(\),/);
+  assert.match(source, /options\.restartService[\s\S]*requestHostRestartService\(taskboardUrl\)[\s\S]*requestHostEnsure\(taskboardUrl\),\s*captureHostContext\(\),/);
   assert.match(source, /let lastNativeThreadId = ""/);
   assert.match(source, /clickedThreadId.*lastNativeThreadId/s);
   assert.match(source, /activeThreadId \|\| lastNativeThreadId \|\| normalizeThreadId\(threadIdFromLocation\(\)\)/);

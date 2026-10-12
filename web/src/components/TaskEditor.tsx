@@ -4,6 +4,7 @@ import { ApiError } from "../api";
 import {
   TASK_PRIORITIES,
   TASK_STATUSES,
+  type AgentTemplate,
   type ActorIdentity,
   type DevelopmentContext,
   type DevelopmentScan,
@@ -61,6 +62,7 @@ interface TaskEditorProps {
   projectOptions?: Array<{ id: string; name: string }>;
   labels: string[];
   workflows: WorkflowOption[];
+  agents: AgentTemplate[];
   currentUser: ActorIdentity;
   developmentScan: DevelopmentScan;
   developmentScanLoading: boolean;
@@ -115,6 +117,7 @@ export function TaskEditor({
   projectOptions = [],
   labels: availableLabels,
   workflows,
+  agents,
   currentUser,
   developmentScan,
   developmentScanLoading,
@@ -136,6 +139,7 @@ export function TaskEditor({
   const [assignee, setAssignee] = useState<ActorIdentity>(task?.assignee ?? currentUser);
   const [selectedLabels, setSelectedLabels] = useState<string[]>(task?.labels ?? initialDraft?.labels ?? []);
   const [workflowId, setWorkflowId] = useState(task?.workflowId ?? initialDraft?.workflowId ?? "");
+  const [agentId, setAgentId] = useState(task?.agentId ?? initialDraft?.agentId ?? "");
   const [developmentContext, setDevelopmentContext] = useState<DevelopmentContext | null>(task?.developmentContext ?? initialDraft?.developmentContext ?? null);
   const [dueDate, setDueDate] = useState(task?.dueDate ?? initialDraft?.dueDate ?? "");
   const [startDate, setStartDate] = useState(task?.startDate ?? initialDraft?.startDate ?? "");
@@ -188,6 +192,7 @@ export function TaskEditor({
       labels: selectedLabels,
       ...(assigneeTarget ? { assigneeTarget } : {}),
       workflowId: workflowId || null,
+      agentId: agentId || null,
       developmentContext,
       dueDate: dueDate || null,
       startDate: startDate || null,
@@ -384,6 +389,17 @@ export function TaskEditor({
                 {!workflowAvailable && <option value={workflowId}>当前设备未找到此流程</option>}
                 {workflows.map((workflow) => (
                   <option value={workflow.id} key={workflow.id}>{workflow.name}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="property-control property-agent">
+              <LinearIcon name="file" />
+              <span className="sr-only">Agent</span>
+              <select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
+                <option value="">Agent</option>
+                {agents.map((agent) => (
+                  <option value={agent.id} key={agent.id}>{agent.name}</option>
                 ))}
               </select>
             </label>

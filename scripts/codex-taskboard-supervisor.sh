@@ -1,5 +1,9 @@
 #!/bin/zsh
 set -uo pipefail
+unsetopt BG_NICE
+if [[ -x /usr/sbin/taskpolicy ]]; then
+  /usr/sbin/taskpolicy -B -p $$ 2>/dev/null || true
+fi
 
 export CODEX_TASKBOARD_HOST="127.0.0.1"
 export CODEX_TASKBOARD_PORT="47823"
@@ -12,9 +16,13 @@ cdp_port="9229"
 cdp_version_url="http://127.0.0.1:${cdp_port}/json/version"
 child_pid=""
 attached_cdp_signature=""
+cdp_failure_count=0
+cdp_failure_threshold=6
 last_state=""
 node_path_file="$project_root/.data/node-path"
 codex_path_file="$project_root/.data/codex-path"
+lock_dir="$project_root/.data/codex-taskboard-supervisor.lock"
+owns_lock=false
 
 log() {
   /bin/echo "[$(/bin/date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -109,7 +117,9 @@ log_state_once() {
 }
 
 stop_child() {
+  local trigger="${1:-unspecified}"
   if [[ -n "$child_pid" ]] && /bin/kill -0 "$child_pid" 2>/dev/null; then
+    log "Stopping Taskboard injector pid $child_pid; trigger=$trigger; Taskboard service remains running"
     /bin/kill -TERM "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
   fi
@@ -118,18 +128,43 @@ stop_child() {
 }
 
 shutdown() {
-  stop_child
+  stop_child "supervisor-shutdown"
+  if [[ "$owns_lock" == true ]]; then
+    /bin/rm -rf "$lock_dir"
+  fi
   exit 0
 }
 
 trap shutdown INT TERM HUP
 
 cd "$project_root" || exit 1
+/bin/mkdir -p "$project_root/.data"
+if /bin/mkdir "$lock_dir" 2>/dev/null; then
+  owns_lock=true
+  /bin/echo "$$" > "$lock_dir/pid"
+else
+  lock_pid="$(/bin/cat "$lock_dir/pid" 2>/dev/null || true)"
+  if [[ -n "$lock_pid" ]] && ! /bin/kill -0 "$lock_pid" 2>/dev/null; then
+    /bin/rm -rf "$lock_dir"
+    if /bin/mkdir "$lock_dir" 2>/dev/null; then
+      owns_lock=true
+      /bin/echo "$$" > "$lock_dir/pid"
+    fi
+  fi
+fi
+
+if [[ "$owns_lock" != true ]]; then
+  log "Another Taskboard supervisor already owns $lock_dir; standing by"
+  while true; do
+    /bin/sleep 3600
+  done
+fi
 log "Codex Taskboard passive supervisor started"
 
 while true; do
   current_cdp_signature="$(cdp_signature || true)"
   if [[ -n "$current_cdp_signature" ]]; then
+    cdp_failure_count=0
     child_is_running=false
     if [[ -n "$child_pid" ]] && /bin/kill -0 "$child_pid" 2>/dev/null; then
       child_is_running=true
@@ -141,11 +176,17 @@ while true; do
       continue
     fi
 
-    stop_child
+    restart_trigger="initial-attach"
+    if [[ "$child_is_running" == true ]]; then
+      restart_trigger="cdp-signature-changed"
+    elif [[ -n "$attached_cdp_signature" ]]; then
+      restart_trigger="injector-exited"
+    fi
+    stop_child "$restart_trigger"
     stop_duplicate_injectors
     /bin/sleep 0.2
-    log "Detected a new Codex CDP instance on 127.0.0.1:${cdp_port}; starting a fresh Taskboard injector"
-    "$node_binary" "$injector" --port "$cdp_port" --watch --open --attach-existing &
+    log "Starting Taskboard injector on 127.0.0.1:${cdp_port}; trigger=$restart_trigger"
+    /usr/sbin/taskpolicy -a "$node_binary" "$injector" --port "$cdp_port" --watch --open --attach-existing &
     child_pid="$!"
     attached_cdp_signature="$current_cdp_signature"
     last_state="attached"
@@ -153,7 +194,15 @@ while true; do
     continue
   fi
 
-  stop_child
+  ((cdp_failure_count += 1))
+  if [[ -n "$child_pid" ]] && /bin/kill -0 "$child_pid" 2>/dev/null; then
+    if (( cdp_failure_count < cdp_failure_threshold )); then
+      log_state_once "cdp-delayed" "CDP probe delayed (${cdp_failure_count}/${cdp_failure_threshold}); keeping injector and Taskboard service running"
+      /bin/sleep 0.5
+      continue
+    fi
+    stop_child "cdp-unavailable-after-${cdp_failure_count}-probes"
+  fi
 
   if codex_is_running; then
     log_state_once "no-cdp" "Codex is running without CDP; waiting without restarting or quitting it"

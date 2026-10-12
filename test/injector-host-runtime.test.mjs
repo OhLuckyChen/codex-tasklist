@@ -5,6 +5,7 @@ import {
   classifyHeartbeatFailure,
   frameUrlMatches,
   findResidentInjectorPids,
+  findResidentTaskboardServerPids,
   handleHostBindingPayload,
   reconcileInjectionRuntime,
   rendererBootstrapReason,
@@ -122,6 +123,35 @@ test("a stale automation parser receives an immediate host error instead of timi
     ok: false,
     error: "自动认领配置暂时无法应用，请刷新后重试",
     diagnosticCode: "AUTOMATION_SCHEMA_MISMATCH",
+  }]);
+});
+
+test("the host bridge routes explicit service restarts separately from ensure", async () => {
+  const responses = [];
+  const result = await handleHostBindingPayload(
+    {
+      payload: JSON.stringify({
+        id: "restart-request-1",
+        action: "restart-service",
+      }),
+      executionContextId: 21,
+    },
+    {
+      parseAutomationRequest: () => null,
+      ensure: async () => assert.fail("ensure must not run"),
+      restartService: async () => ({ status: "ok", restarted: true }),
+      runAutomation: async () => assert.fail("automation must not run"),
+      prefill: async () => assert.fail("prefill must not run"),
+      sendResponse: async (_executionContextId, response) => responses.push(response),
+    },
+  );
+
+  assert.deepEqual(result, { responded: true, accepted: true });
+  assert.deepEqual(responses, [{
+    id: "restart-request-1",
+    ok: true,
+    status: "ok",
+    restarted: true,
   }]);
 });
 
@@ -368,6 +398,31 @@ test("resident discovery accepts this repository's absolute and relative launch 
     defaultPort: 9229,
     cwdForPid: (pid) => cwdByPid.get(pid) ?? null,
   }), [102, 105]);
+});
+
+test("taskboard server discovery accepts this repository's server process only", () => {
+  const projectRoot = "/workspace/codex-taskboard";
+  const serverPath = `${projectRoot}/server/index.mjs`;
+  const processList = [
+    `201 node ${serverPath}`,
+    "202 node server/index.mjs",
+    "203 node ./server/index.mjs",
+    "204 node server/index.mjs",
+    "205 node /workspace/other/server/index.mjs",
+  ].join("\n");
+  const cwdByPid = new Map([
+    [202, projectRoot],
+    [203, projectRoot],
+    [204, "/workspace/another-repository"],
+  ]);
+
+  assert.deepEqual(findResidentTaskboardServerPids({
+    processList,
+    currentPid: 999,
+    serverPath,
+    projectRoot,
+    cwdForPid: (pid) => cwdByPid.get(pid) ?? null,
+  }), [201, 202, 203]);
 });
 
 test("refresh stops every stale resident before starting one token-verified replacement", async () => {

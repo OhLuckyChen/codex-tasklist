@@ -1,4 +1,5 @@
 import type { WorkflowOption } from "./types";
+import { safeLocalStorage } from "./safeStorage";
 
 export const WORKFLOW_STATE_KEY_PREFIX = "taskboard.workflow.workspace.";
 export const INITIAL_WORKFLOW_ID = "issue-delivery";
@@ -13,7 +14,7 @@ export function workflowStorageKey(projectId: string): string {
 
 export function readLegacyWorkflowWorkspace(projectId: string): unknown | null {
   try {
-    const raw = window.localStorage.getItem(workflowStorageKey(projectId));
+    const raw = safeLocalStorage.getItem(workflowStorageKey(projectId));
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -21,7 +22,7 @@ export function readLegacyWorkflowWorkspace(projectId: string): unknown | null {
 }
 
 export function clearLegacyWorkflowWorkspace(projectId: string): void {
-  window.localStorage.removeItem(workflowStorageKey(projectId));
+  safeLocalStorage.removeItem(workflowStorageKey(projectId));
 }
 
 export function workflowOptionsFromWorkspace(workspace: unknown): WorkflowOption[] {

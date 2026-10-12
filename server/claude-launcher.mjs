@@ -2,8 +2,13 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, existsSync, symlinkSync, readlinkSync, statSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const RUNS_DIRNAME = "claude-runs";
+const DEFAULT_COMPLETION_HOOK = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../scripts/task-completion-stop-hook.mjs",
+);
 
 /**
  * Single-quote a string for safe interpolation into a POSIX shell command.
@@ -66,6 +71,7 @@ export function createClaudeLauncher(options = {}) {
   const runsDirectory = path.join(dataDirectory, RUNS_DIRNAME);
   const claudeBinary = resolveClaudeBinary(options.claudeExecutable);
   const skillSourceDir = options.skillSourceDir ?? null;
+  const completionHookPath = options.completionHookPath ?? DEFAULT_COMPLETION_HOOK;
   let supportedPlatform = process.platform === "darwin";
 
   function ensureRunsDirectory() {
@@ -113,6 +119,7 @@ export function createClaudeLauncher(options = {}) {
     const scriptPath = path.join(runsDirectory, `${sessionId}.sh`);
     const promptPath = path.join(runsDirectory, `${sessionId}.prompt`);
     writeFileSync(promptPath, payload.prompt, { encoding: "utf8" });
+    const guard = writeCompletionGuardFiles(sessionId, payload.taskId);
 
     const lines = [
       "#!/bin/zsh -l",
@@ -123,19 +130,48 @@ export function createClaudeLauncher(options = {}) {
       `export TASKBOARD_AGENT_RUNTIME='claude'`,
       ...connectorEnvLines(payload.connector, "ANTHROPIC_AUTH_TOKEN"),
       `cd -- ${shellSingleQuote(payload.workspacePath)}`,
-      `${shellSingleQuote(claudeBinary)} ${[...payload.claudeArgs, ...(connectorModelArg(payload.connector) ?? [])].join(" ")} "$(cat ${shellSingleQuote(promptPath)})"`,
+      `${shellSingleQuote(claudeBinary)} ${[...payload.claudeArgs, ...guard.claudeArgs, ...(connectorModelArg(payload.connector) ?? [])].join(" ")} "$(cat ${shellSingleQuote(promptPath)})"`,
       'echo "\\n[Claude Code 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
     writeFileSync(scriptPath, lines.join("\n"), { encoding: "utf8", mode: 0o755 });
-    return { scriptPath, promptPath };
+    return { scriptPath, promptPath, ...guard };
+  }
+
+  function writeCompletionGuardFiles(sessionId, taskId) {
+    const metadataPath = path.join(runsDirectory, `${sessionId}.taskboard.json`);
+    const settingsPath = path.join(runsDirectory, `${sessionId}.settings.json`);
+    if (taskId) {
+      writeFileSync(metadataPath, JSON.stringify({
+        taskId,
+        threadId: sessionId,
+        runtime: "claude",
+        taskboardUrl: process.env.CODEX_TASKBOARD_URL || "http://127.0.0.1:47823",
+      }, null, 2), { encoding: "utf8" });
+      writeFileSync(settingsPath, JSON.stringify({
+        hooks: {
+          Stop: [{
+            hooks: [{
+              type: "command",
+              command: `${shellSingleQuote(process.execPath)} ${shellSingleQuote(completionHookPath)} ${shellSingleQuote(metadataPath)}`,
+              timeout: 10,
+            }],
+          }],
+        },
+      }, null, 2), { encoding: "utf8" });
+    }
+    return {
+      metadataPath,
+      settingsPath,
+      claudeArgs: existsSync(settingsPath) ? ["--settings", shellSingleQuote(settingsPath)] : [],
+    };
   }
 
   /**
    * Launch a brand-new Claude Code session in a fresh Terminal.app window.
    * The session id is fixed via --session-id, so the caller already knows it.
    */
-  function launchSession({ workspacePath, sessionId, prompt, connector }) {
+  function launchSession({ workspacePath, sessionId, prompt, connector, taskId }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
@@ -147,6 +183,7 @@ export function createClaudeLauncher(options = {}) {
       prompt,
       claudeArgs,
       connector,
+      taskId,
     });
     const appleScript = `tell application "Terminal"
   activate
@@ -181,6 +218,10 @@ end tell`;
     const scriptPath = path.join(runsDirectory, `resume-${sessionId}.sh`);
     const promptArg = hasFollowUp ? ` "$(cat ${shellSingleQuote(writeFollowUpFile(sessionId, followUp))})"` : "";
     const modelArg = connector?.model ? ` --model ${shellSingleQuote(connector.model)}` : "";
+    const guard = writeCompletionGuardFiles(sessionId);
+    const settingsArg = guard.claudeArgs.length > 0
+      ? ` --settings ${shellSingleQuote(guard.settingsPath)}`
+      : "";
     const lines = [
       "#!/bin/zsh -l",
       "# taskboard-managed Claude Code resume launcher",
@@ -190,7 +231,7 @@ end tell`;
       `export TASKBOARD_AGENT_RUNTIME='claude'`,
       ...connectorEnvLines(connector, "ANTHROPIC_AUTH_TOKEN"),
       `cd -- ${shellSingleQuote(workspacePath)}`,
-      `${shellSingleQuote(claudeBinary)} --dangerously-skip-permissions --resume ${shellSingleQuote(sessionId)}${modelArg}${promptArg}`,
+      `${shellSingleQuote(claudeBinary)} --dangerously-skip-permissions --resume ${shellSingleQuote(sessionId)}${settingsArg}${modelArg}${promptArg}`,
       'echo "\\n[Claude Code 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -300,7 +341,7 @@ end tell`;
    * Best-effort cleanup of stale runner artifacts. Non-fatal.
    */
   function pruneSessionFiles(sessionId) {
-    for (const file of [`${sessionId}.sh`, `${sessionId}.prompt`, `resume-${sessionId}.sh`, `resume-${sessionId}.prompt`]) {
+    for (const file of [`${sessionId}.sh`, `${sessionId}.prompt`, `${sessionId}.taskboard.json`, `${sessionId}.settings.json`, `resume-${sessionId}.sh`, `resume-${sessionId}.prompt`]) {
       const full = path.join(runsDirectory, file);
       try { rmSync(full, { force: true }); } catch { /* ignore */ }
     }

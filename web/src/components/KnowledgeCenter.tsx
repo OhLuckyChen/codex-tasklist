@@ -6,11 +6,14 @@ import {
   ApiError,
   askProjectKnowledge,
   checkKnowledge,
+  createKnowledgeCandidate,
   createKnowledgeProposal,
   generateKnowledgeProposal,
+  getKnowledgeOverview,
   getKnowledgePage,
   getKnowledgeSourceVersions,
   listKnowledgeProposals,
+  listProjectInteractions,
   publishKnowledgeProposal,
   searchKnowledge,
   updateKnowledgeProposal,
@@ -32,10 +35,11 @@ import type {
   KnowledgeSearchResult,
   KnowledgeSourceType,
   KnowledgeQuestionnaire,
+  ProjectInteraction,
   Project,
 } from "../types";
 
-type KnowledgeSection = "published" | "pending" | "health" | "questionnaires";
+type KnowledgeSection = "published" | "pending" | "health" | "interactions" | "questionnaires";
 
 const SOURCE_LABELS: Record<KnowledgeSourceType, string> = {
   project_scan: "项目分析",
@@ -168,6 +172,7 @@ export function KnowledgeCenter({
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<KnowledgeAnswer | null>(null);
   const [questionnaires, setQuestionnaires] = useState<KnowledgeQuestionnaire[]>([]);
+  const [interactions, setInteractions] = useState<ProjectInteraction[]>([]);
   const [questionnaireTitle, setQuestionnaireTitle] = useState("");
   const [questionnaireScope, setQuestionnaireScope] = useState<"project" | "page" | "gap">("page");
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
@@ -211,8 +216,7 @@ export function KnowledgeCenter({
       setLoading(false);
       return;
     }
-    const versions = await getKnowledgeSourceVersions(project.id);
-    const next = await checkKnowledge(project.id, selectedWorkspace, versions);
+    const next = await getKnowledgeOverview(project.id, selectedWorkspace);
     setOverview(next);
     const nextPath = preferredPath
       ?? page?.path
@@ -237,6 +241,10 @@ export function KnowledgeCenter({
     ));
   }
 
+  async function loadInteractions() {
+    setInteractions(await listProjectInteractions(project.id, 80));
+  }
+
   useEffect(() => {
     setSelectedWorkspace(workspacePath ?? developmentScan.workspacePath ?? "");
     setSelectedContext(null);
@@ -251,14 +259,11 @@ export function KnowledgeCenter({
     setLoading(true);
     setError(null);
     void Promise.all([
-      localReady
-        ? getKnowledgeSourceVersions(project.id).then((versions) => (
-          checkKnowledge(project.id, selectedWorkspace, versions)
-        ))
-        : null,
+      localReady ? getKnowledgeOverview(project.id, selectedWorkspace) : null,
       listKnowledgeProposals(project.id),
       listKnowledgeQuestionnaires(project.id),
-    ]).then(async ([nextOverview, nextProposals, nextQuestionnaires]) => {
+      listProjectInteractions(project.id, 80),
+    ]).then(async ([nextOverview, nextProposals, nextQuestionnaires, nextInteractions]) => {
       if (cancelled) return;
       if (nextOverview) {
         setOverview(nextOverview);
@@ -272,6 +277,7 @@ export function KnowledgeCenter({
       }
       setProposals(nextProposals);
       setQuestionnaires(nextQuestionnaires);
+      setInteractions(nextInteractions);
       setSelectedProposalId((current) => (
         current && nextProposals.some((proposal) => proposal.id === current)
           ? current
@@ -390,6 +396,52 @@ export function KnowledgeCenter({
     }
   }
 
+  function proposalContentFromInteraction(interaction: ProjectInteraction) {
+    const sourceLines = interaction.sources.length > 0
+      ? [
+        "",
+        "## 可复查来源",
+        "",
+        ...interaction.sources.map((source) => `- ${source.title || source.type}: ${source.ref}`),
+      ]
+      : [];
+    return [
+      "## 用户问题",
+      "",
+      interaction.question,
+      "",
+      "## 已确认结论",
+      "",
+      interaction.answer,
+      ...sourceLines,
+    ].join("\n");
+  }
+
+  async function createCandidateFromInteraction(interaction: ProjectInteraction) {
+    if (busy) return;
+    setBusy(`interaction:${interaction.id}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const saved = await createKnowledgeCandidate(project.id, {
+        title: interaction.question.replace(/\s+/g, " ").slice(0, 80),
+        summary: `来自 ${interaction.channel} ${interaction.label}交互，需确认后发布为正式项目知识。`,
+        content: proposalContentFromInteraction(interaction),
+        interactionId: interaction.id,
+        sources: interaction.sources,
+      });
+      await loadProposals();
+      await loadInteractions();
+      setSelectedProposalId(saved.id);
+      setSection("pending");
+      setNotice("已整理为待确认知识提案，正式知识尚未修改。");
+    } catch (nextError) {
+      setError(messageFor(nextError));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function persistEdits(proposal: KnowledgeProposal): Promise<KnowledgeProposal> {
     const saved = await updateKnowledgeProposal(proposal, { changes: editedChanges });
     setProposals((current) => current.map((candidate) => candidate.id === saved.id ? saved : candidate));
@@ -417,8 +469,8 @@ export function KnowledgeCenter({
     try {
       const saved = await persistEdits(selectedProposal);
       const targetWorkspace = proposalWorkspace(saved, selectedWorkspace, developmentScan);
-      await publishKnowledgeProposal(project.id, saved, targetWorkspace);
-      const published = await updateKnowledgeProposal(saved, { status: "published" });
+      const publishedResult = await publishKnowledgeProposal(project.id, saved, targetWorkspace);
+      const published = publishedResult.proposal;
       setProposals((current) => current.map((candidate) => candidate.id === published.id ? published : candidate));
       setNotice("提案已发布，正式知识已更新。");
       setSection("published");
@@ -532,6 +584,7 @@ export function KnowledgeCenter({
         <button type="button" className={section === "health" ? "active" : ""} onClick={() => setSection("health")}>
           健康状态 {overview?.health.stale ? overview.health.stale : ""}
         </button>
+        <button type="button" className={section === "interactions" ? "active" : ""} onClick={() => setSection("interactions")}>交互记录 {interactions.length || ""}</button>
         <button type="button" className={section === "questionnaires" ? "active" : ""} onClick={() => setSection("questionnaires")}>缺口问卷 {questionnaires.length || ""}</button>
       </nav>
 
@@ -716,6 +769,53 @@ export function KnowledgeCenter({
               })}>生成修订提案</button>
             </article>
           ))}
+        </div>
+      )}
+
+      {!loading && section === "interactions" && (
+        <div className="knowledge-interactions">
+          <header>
+            <div>
+              <h3>交互记录</h3>
+              <p>企微问答的原始沉淀，只作为知识候选来源；确认发布前不会写入正式知识库。</p>
+            </div>
+            <button type="button" disabled={Boolean(busy)} onClick={() => void loadInteractions()}>刷新</button>
+          </header>
+          {interactions.map((interaction) => (
+            <article className="knowledge-interaction-card" key={interaction.id}>
+              <header>
+                <div>
+                  <span>{interaction.label}</span>
+                  <small>{interaction.channel} · {interaction.createdAt}</small>
+                </div>
+                <button
+                  type="button"
+                  disabled={Boolean(busy)}
+                  onClick={() => void createCandidateFromInteraction(interaction)}
+                >
+                  {busy === `interaction:${interaction.id}` ? "整理中…" : "整理为知识候选"}
+                </button>
+              </header>
+              <section>
+                <h4>问题</h4>
+                <p>{interaction.question}</p>
+              </section>
+              <section>
+                <h4>回答</h4>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{interaction.answer}</ReactMarkdown>
+              </section>
+              {interaction.sources.length > 0 && (
+                <ul>
+                  {interaction.sources.map((source) => (
+                    <li key={`${interaction.id}:${source.type}:${source.ref}`}>
+                      {source.title || source.type} · {source.ref}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </article>
+          ))}
+          {interactions.length === 0 && <p className="knowledge-detail-placeholder">暂无交互记录。</p>}
         </div>
       )}
 

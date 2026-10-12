@@ -24,6 +24,141 @@ function gitBlob(value) {
   return `git-blob:${createHash("sha1").update(`blob ${Buffer.byteLength(value)}\0${value}`).digest("hex")}`;
 }
 
+const initialKnowledgePages = [
+  ["docs/knowledge/index.md", "index", "Project knowledge", "index"],
+  ["docs/knowledge/project-overview.md", "project-overview", "Project overview", "overview"],
+  ["docs/knowledge/architecture.md", "architecture", "Architecture", "architecture"],
+  ["docs/knowledge/code-map.md", "code-map", "Code map", "code-map"],
+  ["docs/knowledge/key-flows.md", "key-flows", "Key flows", "flow"],
+  ["docs/knowledge/engineering-notes.md", "engineering-notes", "Engineering notes", "engineering"],
+  ["docs/knowledge/data-boundaries.md", "data-boundaries", "Data boundaries", "architecture"],
+  ["docs/knowledge/interfaces-and-entrypoints.md", "interfaces-and-entrypoints", "Interfaces and entrypoints", "code-map"],
+];
+
+function pageContent(id, title, kind) {
+  return `---
+id: ${id}
+title: ${title}
+kind: ${kind}
+updated_at: 2026-08-10T00:00:00.000Z
+sources:
+  - type: file
+    ref: package.json
+---
+# ${title}
+
+Evidence-backed project knowledge.
+`;
+}
+
+function initialAnalysis(overrides = {}) {
+  const evidence = [{ type: "file", ref: "src/app.ts" }];
+  const changes = [
+    ...initialKnowledgePages.map(([targetPath, id, title, kind]) => ({
+      targetPath,
+      operation: "create",
+      afterContent: pageContent(id, title, kind),
+    })),
+    {
+      targetPath: ".taskboard/knowledge-index/manifest.json",
+      operation: "create",
+      afterContent: JSON.stringify({
+        schemaVersion: "1.0.0",
+        generatedAt: "2026-08-10T00:00:00.000Z",
+        projectSummary: "Demo project",
+        scanScope: ["package.json", "src"],
+      }),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/files.json",
+      operation: "create",
+      afterContent: JSON.stringify([{ path: "src/app.ts", type: "source", language: "typescript", keywords: ["app"] }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/symbols.json",
+      operation: "create",
+      afterContent: JSON.stringify([{
+        path: "src/app.ts",
+        name: "createApp",
+        kind: "function",
+        line: 1,
+        importance: "critical",
+        evidenceStatus: "confirmed",
+        linkedKnowledge: ["docs/knowledge/code-map.md"],
+        keywords: ["app"],
+      }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/entrypoints.json",
+      operation: "create",
+      afterContent: JSON.stringify([{
+        path: "src/app.ts",
+        name: "createApp",
+        kind: "function",
+        line: 1,
+        importance: "critical",
+        evidenceStatus: "confirmed",
+        businessPurpose: "Start the app",
+        runtimePurpose: "Create runtime services",
+        successSemantics: "Runtime is ready",
+        linkedKnowledge: ["docs/knowledge/interfaces-and-entrypoints.md"],
+      }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/objects.json",
+      operation: "create",
+      afterContent: JSON.stringify(["Project", "Knowledge proposal", "Knowledge index"].map((name) => ({
+        name,
+        authority: "server/knowledge-service.mjs",
+        evidence,
+        confidence: "confirmed",
+      }))),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/flows.json",
+      operation: "create",
+      afterContent: JSON.stringify(["Initialize knowledge", "Review proposal", "Publish knowledge"].map((name) => ({
+        name,
+        trigger: "User action",
+        entrypoint: "createApp",
+        components: ["server", "knowledge"],
+        stateChanges: ["proposal state changes"],
+        successSemantics: "The proposal is ready for review",
+        failureSemantics: "The callback records an error",
+        evidence,
+        confidence: "confirmed",
+      }))),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/docs.json",
+      operation: "create",
+      afterContent: JSON.stringify([{
+        title: "README",
+        source: "README.md",
+        keywords: ["readme"],
+        summary: "Project README",
+      }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/recent.json",
+      operation: "create",
+      afterContent: JSON.stringify([{
+        path: "src/app.ts",
+        changed_at: "2026-08-10T00:00:00.000Z",
+        source: "git",
+        status: "recent",
+        reason: "Recently changed",
+      }]),
+    },
+  ];
+  return {
+    title: "Initial project knowledge",
+    summary: "Durable project orientation",
+    changes,
+    ...overrides,
+  };
+}
+
 test("knowledge pages expose readable bodies and deterministic source health", async () => {
   const root = await workspace();
   const source = "export const answer = 42;\n";
@@ -112,7 +247,7 @@ sources:
 
 test("generated proposals remain pending data until an idempotent safe publish", async () => {
   const root = await workspace();
-  const content = "---\nid: design.demo\ntitle: Demo\nkind: design\n---\n# Demo\n";
+  const content = pageContent("design.demo", "Demo", "design");
   const service = new KnowledgeService({
     analyze: async () => ({
       title: "Demo design",
@@ -164,8 +299,8 @@ test("knowledge proposals can publish bounded machine-readable pre-index files",
   });
 
   const proposal = await service.generateProposal(root, {
-    sourceType: "project_scan",
-    sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+    sourceType: "issue",
+    sourceSnapshot: { issueIdentifier: "DEMO-1" },
   });
   assert.equal(proposal.changes[0].targetPath, ".taskboard/knowledge-index/files.json");
 
@@ -174,6 +309,185 @@ test("knowledge proposals can publish bounded machine-readable pre-index files",
   assert.equal(
     await readFile(path.join(root, ".taskboard", "knowledge-index", "files.json"), "utf8"),
     indexContent,
+  );
+});
+
+test("initial scans require the complete knowledge protocol shape", async () => {
+  const root = await workspace();
+  const service = new KnowledgeService({ analyze: async () => initialAnalysis() });
+
+  const proposal = await service.generateProposal(root, {
+    sourceType: "project_scan",
+    sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+  });
+
+  assert.equal(proposal.changes.length, 16);
+  assert.equal(
+    proposal.changes.some((change) => change.targetPath === ".taskboard/knowledge-index/objects.json"),
+    true,
+  );
+});
+
+test("initial scans reject shallow proposals without core pages and indexes", async () => {
+  const root = await workspace();
+  const service = new KnowledgeService({
+    analyze: async () => ({
+      title: "Shallow init",
+      summary: "Only an overview",
+      changes: [{
+        targetPath: "docs/knowledge/index.md",
+        operation: "create",
+        afterContent: pageContent("index", "Project knowledge", "index"),
+      }],
+    }),
+  });
+
+  await assert.rejects(
+    service.generateProposal(root, {
+      sourceType: "project_scan",
+      sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+    }),
+    (error) => error.code === "INCOMPLETE_INITIAL_KNOWLEDGE",
+  );
+});
+
+test("initial scans reject empty ready proposals before the no-change shortcut", async () => {
+  const root = await workspace();
+  const service = new KnowledgeService({
+    analyze: async () => ({
+      title: "Empty init",
+      summary: "No changes",
+      changes: [],
+    }),
+  });
+
+  await assert.rejects(
+    service.generateProposal(root, {
+      sourceType: "project_scan",
+      sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+    }),
+    (error) => error.code === "INCOMPLETE_INITIAL_KNOWLEDGE",
+  );
+});
+
+test("initial scans reject critical entrypoints without linked knowledge", async () => {
+  const root = await workspace();
+  const analysis = initialAnalysis();
+  const entrypoint = analysis.changes.find((change) => change.targetPath === ".taskboard/knowledge-index/entrypoints.json");
+  entrypoint.afterContent = JSON.stringify([{
+    path: "src/app.ts",
+    name: "createApp",
+    kind: "function",
+    line: 1,
+    importance: "critical",
+    evidenceStatus: "confirmed",
+    successSemantics: "Runtime is ready",
+  }]);
+  const service = new KnowledgeService({ analyze: async () => analysis });
+
+  await assert.rejects(
+    service.generateProposal(root, {
+      sourceType: "project_scan",
+      sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+    }),
+    (error) => error.code === "INVALID_KNOWLEDGE_CONTRACT",
+  );
+});
+
+test("initial scans reject api routes without method, route, line, or request fields", async () => {
+  const root = await workspace();
+  const analysis = initialAnalysis();
+  const symbols = analysis.changes.find((change) => change.targetPath === ".taskboard/knowledge-index/symbols.json");
+  symbols.afterContent = JSON.stringify([{
+    path: "src/api.ts",
+    name: "createThing",
+    kind: "api_route",
+    importance: "critical",
+    evidenceStatus: "confirmed",
+    linkedKnowledge: ["docs/knowledge/interfaces-and-entrypoints.md"],
+    keywords: ["api"],
+  }]);
+  const service = new KnowledgeService({ analyze: async () => analysis });
+
+  await assert.rejects(
+    service.generateProposal(root, {
+      sourceType: "project_scan",
+      sourceSnapshot: { issueIdentifier: "DEMO-INIT" },
+    }),
+    (error) => error.code === "INVALID_KNOWLEDGE_CONTRACT",
+  );
+});
+
+test("publishing project-scan proposals rechecks the complete initial protocol", async () => {
+  const root = await workspace();
+  await writeFile(path.join(root, "docs", "knowledge", "index.md"), pageContent("index", "Project knowledge", "index"));
+  const service = new KnowledgeService({ analyze: async () => ({}) });
+
+  await assert.rejects(
+    service.publish(root, {
+      sourceType: "project_scan",
+      changes: [{
+        targetPath: "docs/knowledge/index.md",
+        operation: "update",
+        baseDigest: knowledgeInternals.sha256(pageContent("index", "Project knowledge", "index")),
+        beforeContent: pageContent("index", "Project knowledge", "index"),
+        afterContent: pageContent("index", "Project knowledge", "index"),
+      }],
+    }),
+    (error) => error.code === "INCOMPLETE_INITIAL_KNOWLEDGE",
+  );
+});
+
+test("knowledge pages reject missing sources and machine-local file references", async () => {
+  const root = await workspace();
+  const sourceService = new KnowledgeService({
+    analyze: async () => ({
+      title: "Bad source",
+      summary: "Create page with a local source",
+      changes: [{
+        targetPath: "docs/knowledge/designs/demo.md",
+        operation: "create",
+        afterContent: `---
+id: design.demo
+title: Demo
+kind: design
+updated_at: 2026-08-10T00:00:00.000Z
+sources:
+  - type: file
+    ref: /Users/lincya/project/source.ts
+---
+# Demo
+`,
+      }],
+    }),
+  });
+
+  await assert.rejects(
+    sourceService.generateProposal(root, {
+      sourceType: "issue",
+      sourceSnapshot: { issueIdentifier: "DEMO-1" },
+    }),
+    (error) => error.code === "INVALID_KNOWLEDGE_CONTRACT",
+  );
+
+  const bodyService = new KnowledgeService({
+    analyze: async () => ({
+      title: "Bad body",
+      summary: "Create page with a local path in the body",
+      changes: [{
+        targetPath: "docs/knowledge/designs/body.md",
+        operation: "create",
+        afterContent: `${pageContent("design.body", "Body", "design")}\n本机路径 /Users/lincya/project/source.ts 不应进入知识正文。\n`,
+      }],
+    }),
+  });
+
+  await assert.rejects(
+    bodyService.generateProposal(root, {
+      sourceType: "issue",
+      sourceSnapshot: { issueIdentifier: "DEMO-1" },
+    }),
+    (error) => error.code === "INVALID_KNOWLEDGE_CONTRACT",
   );
 });
 

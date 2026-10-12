@@ -41,6 +41,7 @@ import {
   getWorkflowWorkspace,
   getTaskboardMetadata,
   linkTaskThread as linkTaskThreadRequest,
+  listAgentTemplates,
   listKnowledgeProposals,
   unlinkTaskThread as unlinkTaskThreadRequest,
   listComments,
@@ -49,9 +50,11 @@ import {
   listDeviceWorkspaces,
   setDeviceWorkspace,
   listProjects,
+  listProjectAgentIds,
   listTasks,
   moveTask as moveTaskRequest,
   removeTaskRelation,
+  resolveAgentInstruction,
   setCurrentUserActor,
   transferTaskProject as transferTaskProjectRequest,
   uploadAttachment,
@@ -65,6 +68,7 @@ import {
 } from "./actors";
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
+import { AgentManager } from "./components/AgentManager";
 import { ConnectorsPanel } from "./components/ConnectorsPanel";
 import { DraftBox } from "./components/DraftBox";
 import { FavoriteTaskList } from "./components/FavoriteTaskList";
@@ -81,6 +85,7 @@ import { TaskContextMenu } from "./components/TaskContextMenu";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskEditor } from "./components/TaskEditor";
 import { TaskFilterMenu } from "./components/TaskFilterMenu";
+import { UnreadStatusMenu } from "./components/UnreadStatusMenu";
 import { buildIssueUrl, readIssueIdentifier } from "./issueRoute";
 import { DEFAULT_LABELS } from "./labels";
 import {
@@ -94,9 +99,11 @@ import {
 import {
   taskThreadRuntime,
 } from "./taskConversations";
+import { safeLocalStorage } from "./safeStorage";
 import {
   TASK_STATUSES,
   type ActorIdentity,
+  type AgentTemplate,
   type CodexThreadSummary,
   type Comment,
   type DevelopmentScan,
@@ -280,6 +287,8 @@ const COLUMN_ORDER_KEY = "taskboard.columnOrder.v1";
 const PROJECT_BOARD_VIEW_KEY = "taskboard.projectBoardView.v1";
 const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
 const ISSUE_DRAFTS_KEY = "taskboard.issueDrafts.v1";
+const READ_TASK_TOKENS_KEY = "taskboard.readTaskTokens.v1";
+const UNREAD_STATUS_KEY = "taskboard.unreadStatuses.v1";
 const DEFAULT_AUTOMATION_OPTIONS = {
   enabledByUser: false,
   quotaAware: false,
@@ -313,14 +322,14 @@ function isTheme(value: unknown): value is Theme {
 function getInitialTheme(): Theme {
   const fromQuery = new URLSearchParams(window.location.search).get("theme");
   if (isTheme(fromQuery)) return fromQuery;
-  const stored = window.localStorage.getItem("taskboard.theme");
+  const stored = safeLocalStorage.getItem("taskboard.theme");
   if (isTheme(stored)) return stored;
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function readFavoriteProjectIds(): Set<string> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(FAVORITE_PROJECTS_KEY) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(FAVORITE_PROJECTS_KEY) ?? "[]");
     return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
   } catch {
     return new Set();
@@ -329,20 +338,46 @@ function readFavoriteProjectIds(): Set<string> {
 
 function readFavoriteTaskIds(): Set<string> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(FAVORITE_TASKS_KEY) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(FAVORITE_TASKS_KEY) ?? "[]");
     return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
   } catch {
     return new Set();
   }
 }
 
+function taskReadToken(task: Pick<Task, "version" | "updatedAt">): string {
+  return `${task.version}:${task.updatedAt}`;
+}
+
+function readTaskReadTokens(): Record<string, string> {
+  try {
+    const value = JSON.parse(safeLocalStorage.getItem(READ_TASK_TOKENS_KEY) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => (
+      typeof entry[0] === "string" && typeof entry[1] === "string"
+    )));
+  } catch {
+    return {};
+  }
+}
+
+function readUnreadStatuses(): Set<TaskStatus> {
+  try {
+    const value = JSON.parse(safeLocalStorage.getItem(UNREAD_STATUS_KEY) ?? "null");
+    if (!Array.isArray(value)) return new Set<TaskStatus>(["in_review"]);
+    return new Set(value.filter((status): status is TaskStatus => TASK_STATUSES.includes(status as TaskStatus)));
+  } catch {
+    return new Set<TaskStatus>(["in_review"]);
+  }
+}
+
 function readFavoriteViewMode(): "list" | "board" {
-  return window.localStorage.getItem(FAVORITE_VIEW_MODE_KEY) === "list" ? "list" : "board";
+  return safeLocalStorage.getItem(FAVORITE_VIEW_MODE_KEY) === "list" ? "list" : "board";
 }
 
 function readProjectAliases(): Record<string, string> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(PROJECT_ALIASES_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(PROJECT_ALIASES_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => (
       typeof entry[1] === "string" && entry[1].trim().length > 0
@@ -354,7 +389,7 @@ function readProjectAliases(): Record<string, string> {
 
 function readProjectOrder(): string[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(PROJECT_ORDER_KEY) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(PROJECT_ORDER_KEY) ?? "[]");
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   } catch {
     return [];
@@ -363,7 +398,7 @@ function readProjectOrder(): string[] {
 
 function readArchivedProjectIds(): Set<string> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(ARCHIVED_PROJECTS_KEY) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(ARCHIVED_PROJECTS_KEY) ?? "[]");
     return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
   } catch {
     return new Set();
@@ -371,13 +406,13 @@ function readArchivedProjectIds(): Set<string> {
 }
 
 function readProjectHomeMode(): "groups" | "priority" {
-  return window.localStorage.getItem(PROJECT_HOME_MODE_KEY) === "priority" ? "priority" : "groups";
+  return safeLocalStorage.getItem(PROJECT_HOME_MODE_KEY) === "priority" ? "priority" : "groups";
 }
 
 function readPendingThreadRequests(): Map<string, PendingThreadRequest> {
   const result = new Map<string, PendingThreadRequest>();
   try {
-    const value = JSON.parse(window.localStorage.getItem(PENDING_THREAD_REQUESTS_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(PENDING_THREAD_REQUESTS_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return result;
     const cutoff = Date.now() - PENDING_THREAD_REQUEST_TTL_MS;
     for (const [requestId, request] of Object.entries(value)) {
@@ -403,18 +438,26 @@ function readPendingThreadRequests(): Map<string, PendingThreadRequest> {
 
 function writePendingThreadRequests(requests: Map<string, PendingThreadRequest>): void {
   if (requests.size === 0) {
-    window.localStorage.removeItem(PENDING_THREAD_REQUESTS_KEY);
+    safeLocalStorage.removeItem(PENDING_THREAD_REQUESTS_KEY);
     return;
   }
-  window.localStorage.setItem(
+  safeLocalStorage.setItem(
     PENDING_THREAD_REQUESTS_KEY,
     JSON.stringify(Object.fromEntries(requests)),
   );
 }
 
+function codexThreadUrl(threadId: string, prompt?: string): string {
+  const url = `codex://threads/${encodeURIComponent(threadId)}`;
+  const normalizedPrompt = prompt?.trim();
+  if (!normalizedPrompt) return url;
+  const query = new URLSearchParams({ prompt: normalizedPrompt });
+  return `${url}?${query.toString().replace(/\+/g, "%20")}`;
+}
+
 function readDeviceWorkspacePaths(): Record<string, string> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(DEVICE_WORKSPACE_PATHS_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(DEVICE_WORKSPACE_PATHS_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => (
       typeof entry[1] === "string" && entry[1].trim().length > 0
@@ -425,12 +468,12 @@ function readDeviceWorkspacePaths(): Record<string, string> {
 }
 
 function readShowEmptyColumns(): boolean {
-  return window.localStorage.getItem(SHOW_EMPTY_COLUMNS_KEY) === "true";
+  return safeLocalStorage.getItem(SHOW_EMPTY_COLUMNS_KEY) === "true";
 }
 
 function readProjectAutomations(): ProjectAutomations {
   try {
-    const value = JSON.parse(window.localStorage.getItem(PROJECT_AUTOMATIONS_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(PROJECT_AUTOMATIONS_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     const result: ProjectAutomations = {};
     for (const [projectId, record] of Object.entries(value)) {
@@ -511,7 +554,7 @@ function intervalMinutesFromRrule(value: string): AutomationIntervalMinutes | nu
 
 function readColumnVisibilityByProject(): ColumnVisibilityByProject {
   try {
-    const value = JSON.parse(window.localStorage.getItem(COLUMN_VISIBILITY_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(COLUMN_VISIBILITY_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     const result: ColumnVisibilityByProject = {};
     for (const [projectId, visibilityValue] of Object.entries(value)) {
@@ -531,7 +574,7 @@ function readColumnVisibilityByProject(): ColumnVisibilityByProject {
 
 function readGlobalColumnVisibility(): Partial<Record<TaskStatus, boolean>> | null {
   try {
-    const raw = window.localStorage.getItem(GLOBAL_COLUMN_VISIBILITY_KEY);
+    const raw = safeLocalStorage.getItem(GLOBAL_COLUMN_VISIBILITY_KEY);
     if (raw === null) return null;
     const value = JSON.parse(raw);
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -548,7 +591,7 @@ function readGlobalColumnVisibility(): Partial<Record<TaskStatus, boolean>> | nu
 
 function readColumnOrder(): TaskStatus[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(COLUMN_ORDER_KEY) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(COLUMN_ORDER_KEY) ?? "[]");
     if (!Array.isArray(value)) return [...TASK_STATUSES];
     const stored = value.filter(
       (status, index): status is TaskStatus => (
@@ -563,7 +606,7 @@ function readColumnOrder(): TaskStatus[] {
 
 function readIssueDrafts(): IssueDraft[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(ISSUE_DRAFTS_KEY) ?? "[]");
+    const value = JSON.parse(safeLocalStorage.getItem(ISSUE_DRAFTS_KEY) ?? "[]");
     if (!Array.isArray(value)) return [];
     return value.filter((candidate): candidate is IssueDraft => {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
@@ -587,7 +630,7 @@ function readIssueDrafts(): IssueDraft[] {
 }
 
 function persistIssueDrafts(drafts: IssueDraft[]) {
-  window.localStorage.setItem(ISSUE_DRAFTS_KEY, JSON.stringify(drafts));
+  safeLocalStorage.setItem(ISSUE_DRAFTS_KEY, JSON.stringify(drafts));
 }
 
 function workspaceName(path?: string): string | null {
@@ -604,6 +647,14 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return "Something went wrong while loading your issues.";
+}
+
+function isServiceUnavailable(error: unknown): boolean {
+  return error instanceof ApiError && error.serviceUnavailable;
+}
+
+function isServiceUnavailableMessage(message: string | null): boolean {
+  return Boolean(message?.includes("无法连接本地 Taskboard 服务"));
 }
 
 function isAutomationHostItem(value: unknown): value is AutomationHostItem {
@@ -645,7 +696,7 @@ function isProjectBoardView(value: string | null): value is BoardView {
 
 function readProjectBoardViews(): Record<string, BoardView> {
   try {
-    const value = JSON.parse(window.localStorage.getItem(PROJECT_BOARD_VIEW_KEY) ?? "{}");
+    const value = JSON.parse(safeLocalStorage.getItem(PROJECT_BOARD_VIEW_KEY) ?? "{}");
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, BoardView] => (
       typeof entry[0] === "string" && isProjectBoardView(typeof entry[1] === "string" ? entry[1] : null)
@@ -662,7 +713,7 @@ function readProjectBoardView(projectId: string): BoardView {
 function writeProjectBoardView(projectId: string, view: BoardView) {
   if (!projectId || projectId === GLOBAL_PROJECT_ID) return;
   const next = { ...readProjectBoardViews(), [projectId]: view };
-  window.localStorage.setItem(PROJECT_BOARD_VIEW_KEY, JSON.stringify(next));
+  safeLocalStorage.setItem(PROJECT_BOARD_VIEW_KEY, JSON.stringify(next));
 }
 
 function taskToDraft(task: Task): TaskDraft {
@@ -673,6 +724,7 @@ function taskToDraft(task: Task): TaskDraft {
     priority: task.priority,
     labels: task.labels,
     workflowId: task.workflowId,
+    agentId: task.agentId,
     developmentContext: task.developmentContext,
     dueDate: task.dueDate,
     startDate: task.startDate,
@@ -821,6 +873,10 @@ export function App() {
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [showConnectorsPanel, setShowConnectorsPanel] = useState(false);
+  const [agents, setAgents] = useState<AgentTemplate[]>([]);
+  const [projectAgentIds, setProjectAgentIdsState] = useState<string[]>([]);
+  const [editorProjectAgentIds, setEditorProjectAgentIds] = useState<string[]>([]);
+  const [showAgentManager, setShowAgentManager] = useState(false);
   const [localKnowledgeAvailable, setLocalKnowledgeAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -833,6 +889,7 @@ export function App() {
   const [hasLoadedTasks, setHasLoadedTasks] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [serviceRecoveryNeeded, setServiceRecoveryNeeded] = useState(false);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState(readTaskFilters);
@@ -872,6 +929,8 @@ export function App() {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
   const [favoriteTaskIds, setFavoriteTaskIds] = useState(readFavoriteTaskIds);
+  const [taskReadTokens, setTaskReadTokens] = useState(readTaskReadTokens);
+  const [unreadStatuses, setUnreadStatuses] = useState(readUnreadStatuses);
   const [favoriteTasksOnly, setFavoriteTasksOnly] = useState(false);
   const [favoriteViewMode, setFavoriteViewMode] = useState(readFavoriteViewMode);
   const [projectAliases, setProjectAliases] = useState(readProjectAliases);
@@ -906,6 +965,28 @@ export function App() {
   const pendingKnowledgeThreadsRef = useRef(new Map<string, PendingKnowledgeThread>());
   const automationRequestInFlightRef = useRef(false);
   const projectAutomationsRef = useRef(projectAutomations);
+
+  const clearServiceError = useCallback(() => {
+    setServiceRecoveryNeeded(false);
+    setLoadError(null);
+    setActionError((current) => isServiceUnavailableMessage(current) ? null : current);
+  }, []);
+
+  const recordLoadError = useCallback((error: unknown) => {
+    setServiceRecoveryNeeded(isServiceUnavailable(error));
+    setLoadError(errorMessage(error));
+  }, []);
+
+  const recordActionError = useCallback((error: unknown) => {
+    if (isServiceUnavailable(error)) setServiceRecoveryNeeded(true);
+    setActionError(errorMessage(error));
+  }, []);
+
+  const requestTaskboardServiceRecovery = useCallback(() => {
+    if (!embedded || window.parent === window) return false;
+    window.parent.postMessage({ type: "taskboard:recover-service" }, "*");
+    return true;
+  }, [embedded]);
 
   const setAnnouncement = useCallback((message: string) => {
     setUndoNotice(null);
@@ -1004,7 +1085,7 @@ export function App() {
       const next = { ...current };
       if (normalizedPath) next[projectId] = normalizedPath;
       else delete next[projectId];
-      window.localStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
+      safeLocalStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
       return next;
     });
   }, []);
@@ -1021,12 +1102,23 @@ export function App() {
       rememberDeviceWorkspacePath(projectId, normalizedPath);
       setAnnouncement("本地项目目录已保存。");
     } catch (error) {
-      setActionError(errorMessage(error));
+      recordActionError(error);
     }
-  }, [rememberDeviceWorkspacePath]);
+  }, [recordActionError, rememberDeviceWorkspacePath]);
 
   const isGlobalBoard = selectedProjectId === GLOBAL_PROJECT_ID;
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
+  const availableAgents = useMemo(
+    () => agents.filter((agent) => projectAgentIds.includes(agent.id)),
+    [agents, projectAgentIds],
+  );
+  const editorAgents = useMemo(() => {
+    if (!editor) return [];
+    const allowedIds = editor.projectId === selectedProjectId
+      ? projectAgentIds
+      : editorProjectAgentIds;
+    return agents.filter((agent) => allowedIds.includes(agent.id));
+  }, [agents, editor, editorProjectAgentIds, projectAgentIds, selectedProjectId]);
   const projectNames = useMemo(
     () => Object.fromEntries(projects.map((project) => [
       project.id,
@@ -1187,6 +1279,7 @@ export function App() {
       labels: ["项目知识库"],
       assigneeTarget: "codex-agent",
       workflowId: null,
+      agentId: null,
       developmentContext: null,
       dueDate: null,
       startDate: null,
@@ -1320,7 +1413,7 @@ export function App() {
       if (record) next[projectId] = record;
       else delete next[projectId];
       projectAutomationsRef.current = next;
-      window.localStorage.setItem(PROJECT_AUTOMATIONS_KEY, JSON.stringify(next));
+      safeLocalStorage.setItem(PROJECT_AUTOMATIONS_KEY, JSON.stringify(next));
       return next;
     });
   }, []);
@@ -1506,10 +1599,20 @@ export function App() {
   function openTaskDetail(task: Pick<Task, "identifier" | "projectId">) {
     closeContextMenu();
     setProjectMenuOpen(false);
+    const openedTask = tasks.find((candidate) => (
+      candidate.identifier === task.identifier && candidate.projectId === task.projectId
+    ));
+    if (openedTask) {
+      setTaskReadTokens((current) => {
+        const next = { ...current, [openedTask.id]: taskReadToken(openedTask) };
+        safeLocalStorage.setItem(READ_TASK_TOKENS_KEY, JSON.stringify(next));
+        return next;
+      });
+    }
     const fromGlobalBoard = selectedProjectId === GLOBAL_PROJECT_ID;
     if (fromGlobalBoard) {
       setSelectedProjectId(task.projectId);
-      window.localStorage.setItem(LAST_PROJECT_KEY, task.projectId);
+      safeLocalStorage.setItem(LAST_PROJECT_KEY, task.projectId);
     }
     setDetailTaskIdentifier(task.identifier);
     const currentIssue = readIssueIdentifier(window.location.search);
@@ -1541,7 +1644,7 @@ export function App() {
     if (returnToGlobal) {
       setBoardView("issues");
       setSelectedProjectId(GLOBAL_PROJECT_ID);
-      window.localStorage.removeItem(LAST_PROJECT_KEY);
+      safeLocalStorage.removeItem(LAST_PROJECT_KEY);
     }
     const url = buildIssueUrl(
       window.location.href,
@@ -1564,8 +1667,8 @@ export function App() {
       if (routeProjectId === selectedProjectId) return;
       setBoardView(routeProjectId === GLOBAL_PROJECT_ID ? "issues" : readProjectBoardView(routeProjectId));
       setSelectedProjectId(routeProjectId);
-      if (routeProjectId) window.localStorage.setItem(LAST_PROJECT_KEY, routeProjectId);
-      else window.localStorage.removeItem(LAST_PROJECT_KEY);
+      if (routeProjectId) safeLocalStorage.setItem(LAST_PROJECT_KEY, routeProjectId);
+      else safeLocalStorage.removeItem(LAST_PROJECT_KEY);
     }
 
     window.addEventListener("popstate", syncRouteFromLocation);
@@ -1576,7 +1679,7 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.embedded = String(embedded);
     document.documentElement.style.colorScheme = theme;
-    if (!embedded) window.localStorage.setItem("taskboard.theme", theme);
+    if (!embedded) safeLocalStorage.setItem("taskboard.theme", theme);
   }, [embedded, theme]);
 
   useEffect(() => {
@@ -1748,6 +1851,7 @@ export function App() {
         const payload = message.payload as {
           requestId?: unknown;
           taskId?: unknown;
+          commentId?: unknown;
           threadId?: unknown;
         };
         if (
@@ -1796,7 +1900,12 @@ export function App() {
             }
             window.parent.postMessage({
               type: "taskboard:thread-link-ack",
-              payload: { requestId: payload.requestId, taskId: payload.taskId, threadId },
+              payload: {
+                requestId: payload.requestId,
+                taskId: payload.taskId,
+                commentId: pendingRequest.commentId,
+                threadId,
+              },
             }, "*");
           } catch (error) {
             setActionError(`跟进消息已发送，但状态尚未更新：${errorMessage(error)} 将自动重试。`);
@@ -1858,7 +1967,7 @@ export function App() {
 
   const loadProjectList = useCallback(async (signal?: AbortSignal) => {
     setProjectsLoading(true);
-    setLoadError(null);
+    clearServiceError();
     try {
       const [nextProjects, metadata, workspaces] = await Promise.all([
         listProjects(signal),
@@ -1881,7 +1990,7 @@ export function App() {
       setDeviceWorkspacePaths((current) => {
         const next = workspaces;
         if (JSON.stringify(next) === JSON.stringify(current)) return current;
-        window.localStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
+        safeLocalStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
         return next;
       });
       setProjects(nextProjects);
@@ -1890,7 +1999,7 @@ export function App() {
         const fromQuery = route.get("project");
         const fromGlobalView = !readIssueIdentifier(route.toString())
           && route.get(GLOBAL_VIEW_QUERY_PARAM) === GLOBAL_VIEW_QUERY_VALUE;
-        const remembered = window.localStorage.getItem(LAST_PROJECT_KEY);
+        const remembered = safeLocalStorage.getItem(LAST_PROJECT_KEY);
         if (fromQuery && nextProjects.some((project) => project.id === fromQuery)) return fromQuery;
         if (fromGlobalView) return GLOBAL_PROJECT_ID;
         if (current === GLOBAL_PROJECT_ID) return current;
@@ -1899,11 +2008,11 @@ export function App() {
         return "";
       });
     } catch (error) {
-      if ((error as Error).name !== "AbortError") setLoadError(errorMessage(error));
+      if ((error as Error).name !== "AbortError") recordLoadError(error);
     } finally {
       setProjectsLoading(false);
     }
-  }, []);
+  }, [clearServiceError, recordLoadError]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1914,10 +2023,11 @@ export function App() {
   const refreshProjectList = useCallback(async () => {
     try {
       setProjects(await listProjects());
+      clearServiceError();
     } catch (error) {
-      setLoadError(errorMessage(error));
+      recordLoadError(error);
     }
-  }, []);
+  }, [clearServiceError, recordLoadError]);
 
   const refreshTasks = useCallback(async (
     projectId: string,
@@ -1925,7 +2035,7 @@ export function App() {
   ) => {
     const requestId = ++tasksRequestRef.current;
     if (!options.quiet) setTasksLoading(true);
-    setLoadError(null);
+    clearServiceError();
     try {
       const nextTasks = await listTasks(
         projectId === GLOBAL_PROJECT_ID ? undefined : projectId,
@@ -1936,12 +2046,32 @@ export function App() {
       setHasLoadedTasks(true);
     } catch (error) {
       if ((error as Error).name !== "AbortError" && requestId === tasksRequestRef.current) {
-        setLoadError(errorMessage(error));
+        recordLoadError(error);
       }
     } finally {
       if (!options.quiet && requestId === tasksRequestRef.current) setTasksLoading(false);
     }
-  }, []);
+  }, [clearServiceError, recordLoadError]);
+
+  const retryAfterError = useCallback(() => {
+    const shouldRecoverService = serviceRecoveryNeeded
+      || isServiceUnavailableMessage(actionError)
+      || isServiceUnavailableMessage(loadError);
+    setActionError(null);
+    setLoadError(null);
+    setServiceRecoveryNeeded(false);
+    if (shouldRecoverService && requestTaskboardServiceRecovery()) return;
+    if (selectedProjectId) void refreshTasks(selectedProjectId);
+    else void loadProjectList();
+  }, [
+    actionError,
+    loadProjectList,
+    loadError,
+    refreshTasks,
+    requestTaskboardServiceRecovery,
+    selectedProjectId,
+    serviceRecoveryNeeded,
+  ]);
 
   useEffect(() => {
     if (!selectedProjectId) {
@@ -1954,6 +2084,39 @@ export function App() {
     void refreshTasks(selectedProjectId, { signal: controller.signal });
     return () => controller.abort();
   }, [refreshTasks, selectedProjectId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void listAgentTemplates(controller.signal)
+      .then(setAgents)
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") recordActionError(error);
+      });
+    if (!selectedProjectId || selectedProjectId === GLOBAL_PROJECT_ID) {
+      setProjectAgentIdsState([]);
+      return () => controller.abort();
+    }
+    void listProjectAgentIds(selectedProjectId, controller.signal)
+      .then(setProjectAgentIdsState)
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") recordActionError(error);
+      });
+    return () => controller.abort();
+  }, [recordActionError, selectedProjectId]);
+
+  useEffect(() => {
+    if (!editor || !editor.projectId || editor.projectId === selectedProjectId) {
+      setEditorProjectAgentIds([]);
+      return;
+    }
+    const controller = new AbortController();
+    void listProjectAgentIds(editor.projectId, controller.signal)
+      .then(setEditorProjectAgentIds)
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") recordActionError(error);
+      });
+    return () => controller.abort();
+  }, [editor?.projectId, recordActionError, selectedProjectId]);
 
   const refreshWorkflowOptions = useCallback(async (projectId: string, signal?: AbortSignal) => {
     const record = await getWorkflowWorkspace<unknown>(projectId, signal);
@@ -2109,6 +2272,17 @@ export function App() {
   );
 
   const activeFilterCount = taskFilterCount(filters);
+  const unreadTaskIds = useMemo(() => new Set(tasks
+    .filter((task) => unreadStatuses.has(task.status) && taskReadTokens[task.id] !== taskReadToken(task))
+    .map((task) => task.id)), [taskReadTokens, tasks, unreadStatuses]);
+  const unreadTaskCount = unreadTaskIds.size;
+
+  function updateUnreadStatuses(statuses: Set<TaskStatus>) {
+    const ordered = TASK_STATUSES.filter((status) => statuses.has(status));
+    const next = new Set(ordered);
+    setUnreadStatuses(next);
+    safeLocalStorage.setItem(UNREAD_STATUS_KEY, JSON.stringify(ordered));
+  }
 
   // Poll Codex session plan-progress for in_progress tasks linked to a Codex
   // thread. Non-codex (claude/omp) threads return null from the backend and are
@@ -2195,7 +2369,7 @@ export function App() {
       const targetIndex = next.indexOf(target);
       if (targetIndex < 0) return current;
       next.splice(targetIndex + (position === "after" ? 1 : 0), 0, source);
-      window.localStorage.setItem(COLUMN_ORDER_KEY, JSON.stringify(next));
+      safeLocalStorage.setItem(COLUMN_ORDER_KEY, JSON.stringify(next));
       return next;
     });
     setDraggedColumnStatus(null);
@@ -2206,7 +2380,7 @@ export function App() {
     if (globalColumnVisibility !== null) {
       setGlobalColumnVisibility((current) => {
         const next = { ...(current ?? {}), [status]: visible };
-        window.localStorage.setItem(GLOBAL_COLUMN_VISIBILITY_KEY, JSON.stringify(next));
+        safeLocalStorage.setItem(GLOBAL_COLUMN_VISIBILITY_KEY, JSON.stringify(next));
         return next;
       });
       return;
@@ -2220,7 +2394,7 @@ export function App() {
           [status]: visible,
         },
       };
-      window.localStorage.setItem(COLUMN_VISIBILITY_KEY, JSON.stringify(next));
+      safeLocalStorage.setItem(COLUMN_VISIBILITY_KEY, JSON.stringify(next));
       return next;
     });
   }
@@ -2228,14 +2402,14 @@ export function App() {
   function updateGlobalColumnVisibility(enabled: boolean) {
     if (!enabled) {
       setGlobalColumnVisibility(null);
-      window.localStorage.removeItem(GLOBAL_COLUMN_VISIBILITY_KEY);
+      safeLocalStorage.removeItem(GLOBAL_COLUMN_VISIBILITY_KEY);
       return;
     }
     const next = Object.fromEntries(
       TASK_STATUSES.map((status) => [status, visibleStatuses.includes(status)]),
     ) as Record<TaskStatus, boolean>;
     setGlobalColumnVisibility(next);
-    window.localStorage.setItem(GLOBAL_COLUMN_VISIBILITY_KEY, JSON.stringify(next));
+    safeLocalStorage.setItem(GLOBAL_COLUMN_VISIBILITY_KEY, JSON.stringify(next));
   }
 
   function selectBoardView(view: BoardView) {
@@ -2632,7 +2806,7 @@ export function App() {
       setSearch("");
       setFilters(EMPTY_TASK_FILTERS);
       setFavoriteTasksOnly(false);
-      window.localStorage.setItem(LAST_PROJECT_KEY, projectId);
+      safeLocalStorage.setItem(LAST_PROJECT_KEY, projectId);
       const url = buildIssueUrl(window.location.href, projectId, result.task.identifier);
       url.searchParams.delete(GLOBAL_VIEW_QUERY_PARAM);
       window.history.replaceState(window.history.state, "", url);
@@ -2724,7 +2898,7 @@ export function App() {
         setTasks((tasks) => sortTasks(tasks.map((item) => item.id === archived.id ? archived : item)));
       });
     } catch (error) {
-      setActionError(errorMessage(error));
+      recordActionError(error);
     }
   }
 
@@ -2764,9 +2938,7 @@ export function App() {
         setActionError("该任务所属项目尚未映射本地目录，无法打开 Claude 会话。");
         return;
       }
-      void resumeClaudeSession({ threadId: normalizedThreadId, workspacePath }).catch((error) => {
-        setActionError(errorMessage(error));
-      });
+      void resumeClaudeSession({ threadId: normalizedThreadId, workspacePath }).catch(recordActionError);
       return;
     }
     if (resolvedRuntime === "omp") {
@@ -2775,9 +2947,7 @@ export function App() {
         setActionError("该任务所属项目尚未映射本地目录，无法打开 Oh My Pi 会话。");
         return;
       }
-      void resumeOmpSession({ threadId: normalizedThreadId, workspacePath }).catch((error) => {
-        setActionError(errorMessage(error));
-      });
+      void resumeOmpSession({ threadId: normalizedThreadId, workspacePath }).catch(recordActionError);
       return;
     }
     if (embedded && window.parent !== window) {
@@ -2788,7 +2958,7 @@ export function App() {
       return;
     }
 
-    window.location.assign(`codex://threads/${encodeURIComponent(normalizedThreadId)}`);
+    window.location.assign(codexThreadUrl(normalizedThreadId));
   }
 
   function expandCodexSidebar() {
@@ -2923,14 +3093,39 @@ export function App() {
     }
   }
 
-  function openTaskInThread(task: Task, followUp?: string, comment?: Comment, runtime: TaskRuntime = "codex") {
+  function codexProjectForTask(taskProject: Project, workspacePath: string) {
+    return hostContext?.projects?.find((project) => project.id === taskProject.id)
+      ?? hostContext?.projects?.find((project) => deviceWorkspacePaths[project.id] === workspacePath)
+      ?? (
+        hostContext?.workspacePath === workspacePath && hostContext.projectId
+          ? hostContext.projects?.find((project) => project.id === hostContext.projectId)
+            ?? { id: hostContext.projectId, name: workspaceName(workspacePath) ?? taskProject.name }
+          : undefined
+      );
+  }
+
+  async function openTaskInThread(task: Task, followUp?: string, comment?: Comment, runtime: TaskRuntime = "codex") {
     const taskProject = projects.find((project) => project.id === task.projectId) ?? null;
     const workspacePath = resolveTaskWorkspacePath(task);
     if (!taskProject || !workspacePath) {
       setActionError("该任务所属项目尚未映射本地目录，无法创建正确归属的会话。");
       return;
     }
-    const instruction = taskThreadInstruction(task, followUp);
+    const baseInstruction = taskThreadInstruction(task, followUp);
+    let instruction = baseInstruction;
+    if (task.agentId || comment?.agentId) {
+      try {
+        instruction = await resolveAgentInstruction({
+          taskId: task.id,
+          commentId: comment?.id,
+          workspacePath,
+          instruction: baseInstruction,
+        });
+      } catch (error) {
+        setActionError(errorMessage(error) || "无法装配 Agent 模板。");
+        return;
+      }
+    }
 
     if (runtime === "claude") {
       if (!claudeRuntimeSupported) {
@@ -3039,8 +3234,7 @@ export function App() {
     }
     if (openingThreadTaskId) return;
     const requestId = crypto.randomUUID();
-    const codexProject = hostContext?.projects?.find((project) => project.id === task.projectId)
-      ?? hostContext?.projects?.find((project) => deviceWorkspacePaths[project.id] === workspacePath);
+    const codexProject = codexProjectForTask(taskProject, workspacePath);
     pendingThreadRequestsRef.current.set(requestId, {
       taskId: task.id,
       projectId: task.projectId,
@@ -3064,6 +3258,7 @@ export function App() {
         skillDisplayName: skill.displayName,
         skillPath: skill.path,
         codexProjectId: codexProject?.id ?? taskProject.id,
+        codexProjectName: codexProject?.name,
         projectName: taskProject.name,
         workspacePath,
         workspaceLabel: workspaceName(workspacePath),
@@ -3071,7 +3266,13 @@ export function App() {
     }, "*");
   }
 
-  function followUpTaskInThread(task: Task, threadId: string, followUp: string, runtime: TaskRuntime = task.runtime) {
+  function followUpTaskInThread(
+    task: Task,
+    threadId: string,
+    followUp: string,
+    runtime: TaskRuntime = task.runtime,
+    comment?: Comment,
+  ) {
     const normalizedThreadId = normalizeCodexThreadId(threadId);
     if (!normalizedThreadId) {
       setActionError("该议题关联的是旧版临时会话 ID，无法继续跟进。");
@@ -3088,9 +3289,13 @@ export function App() {
         threadId: normalizedThreadId,
         workspacePath,
         followUp: taskThreadInstruction(task, followUp),
-      }).catch((error) => {
-        setActionError(errorMessage(error));
-      });
+      }).then(async () => {
+        try {
+          await resumeReviewedTaskAfterFollowUp(task, normalizedThreadId);
+        } catch (error) {
+          setActionError(`Claude 跟进会话已启动，但状态尚未更新：${errorMessage(error)}`);
+        }
+      }).catch(recordActionError);
       return;
     }
     if (runtime === "omp") {
@@ -3104,9 +3309,13 @@ export function App() {
         threadId: normalizedThreadId,
         workspacePath,
         followUp: taskThreadInstruction(task, followUp),
-      }).catch((error) => {
-        setActionError(errorMessage(error));
-      });
+      }).then(async () => {
+        try {
+          await resumeReviewedTaskAfterFollowUp(task, normalizedThreadId);
+        } catch (error) {
+          setActionError(`Oh My Pi 跟进会话已启动，但状态尚未更新：${errorMessage(error)}`);
+        }
+      }).catch(recordActionError);
       return;
     }
     const skill = taskSkill(task);
@@ -3115,7 +3324,7 @@ export function App() {
       return;
     }
     if (!embedded || window.parent === window) {
-      openThread(normalizedThreadId, task);
+      window.location.assign(codexThreadUrl(normalizedThreadId, taskThreadInstruction(task, followUp)));
       return;
     }
     if (openingThreadTaskId) return;
@@ -3124,6 +3333,7 @@ export function App() {
       taskId: task.id,
       projectId: task.projectId,
       identifier: task.identifier,
+      commentId: comment?.id,
       action: "follow-up",
       threadId: normalizedThreadId,
       createdAt: Date.now(),
@@ -3136,6 +3346,7 @@ export function App() {
       payload: {
         requestId,
         taskId: task.id,
+        commentId: comment?.id,
         threadId: normalizedThreadId,
         identifier: task.identifier,
         instruction: taskThreadInstruction(task, followUp),
@@ -3146,13 +3357,41 @@ export function App() {
     }, "*");
   }
 
+  async function resumeReviewedTaskAfterFollowUp(task: Task, threadId: string) {
+    if (task.status !== "in_review") return task;
+    let current = task;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const resumed = await moveTaskRequest(current, "in_progress", undefined, threadId);
+        if (selectedProjectIdRef.current === resumed.projectId) {
+          setTasks((previous) => sortTasks(
+            previous.map((candidate) => candidate.id === resumed.id ? resumed : candidate),
+          ));
+        }
+        setAnnouncement(`${resumed.identifier} 已恢复为进行中。`);
+        return resumed;
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT" || attempt > 0) {
+          throw error;
+        }
+        const latestTasks = await listTasks(task.projectId);
+        const latest = latestTasks.find((candidate) => candidate.id === task.id);
+        if (!latest) throw new Error("没有找到需要继续跟进的议题。");
+        if (selectedProjectIdRef.current === task.projectId) setTasks(sortTasks(latestTasks));
+        if (latest.status !== "in_review") return latest;
+        current = latest;
+      }
+    }
+    return current;
+  }
+
   function changeProject(projectId: string) {
     closeContextMenu();
     setProjectMenuOpen(false);
     setDetailTaskIdentifier(null);
     setBoardView(readProjectBoardView(projectId));
     setSelectedProjectId(projectId);
-    window.localStorage.setItem(LAST_PROJECT_KEY, projectId);
+    safeLocalStorage.setItem(LAST_PROJECT_KEY, projectId);
     setSearch("");
     setFilters(EMPTY_TASK_FILTERS);
     setFavoriteTasksOnly(false);
@@ -3170,7 +3409,7 @@ export function App() {
     setDetailTaskIdentifier(null);
     setSelectedProjectId(GLOBAL_PROJECT_ID);
     setBoardView(view);
-    window.localStorage.removeItem(LAST_PROJECT_KEY);
+    safeLocalStorage.removeItem(LAST_PROJECT_KEY);
     setSearch("");
     setFilters(EMPTY_TASK_FILTERS);
     setFavoriteTasksOnly(false);
@@ -3185,7 +3424,7 @@ export function App() {
     setProjectMenuOpen(false);
     setDetailTaskIdentifier(null);
     setSelectedProjectId("");
-    window.localStorage.removeItem(LAST_PROJECT_KEY);
+    safeLocalStorage.removeItem(LAST_PROJECT_KEY);
     setSearch("");
     setFilters(EMPTY_TASK_FILTERS);
     setFavoriteTasksOnly(false);
@@ -3204,7 +3443,7 @@ export function App() {
       const next = new Set(current);
       if (shouldFavorite) next.add(projectId);
       else next.delete(projectId);
-      window.localStorage.setItem(FAVORITE_PROJECTS_KEY, JSON.stringify([...next]));
+      safeLocalStorage.setItem(FAVORITE_PROJECTS_KEY, JSON.stringify([...next]));
       return next;
     });
     setAnnouncement(`${projectName}${shouldFavorite ? "已收藏。" : "已取消收藏。"}`);
@@ -3216,7 +3455,7 @@ export function App() {
       const next = new Set(current);
       if (shouldFavorite) next.add(task.id);
       else next.delete(task.id);
-      window.localStorage.setItem(FAVORITE_TASKS_KEY, JSON.stringify([...next]));
+      safeLocalStorage.setItem(FAVORITE_TASKS_KEY, JSON.stringify([...next]));
       return next;
     });
     setAnnouncement(`${task.identifier}${shouldFavorite ? "已添加到收藏夹。" : "已取消收藏。"}`);
@@ -3241,12 +3480,12 @@ export function App() {
         if (!(project.id in current)) return current;
         const next = { ...current };
         delete next[project.id];
-        window.localStorage.setItem("taskboard.projectAliases.v1", JSON.stringify(next));
+        safeLocalStorage.setItem("taskboard.projectAliases.v1", JSON.stringify(next));
         return next;
       });
       setAnnouncement(`${project.name} 已重命名为 ${nextName}，项目目录未改变。`);
     } catch (error) {
-      setActionError(errorMessage(error));
+      recordActionError(error);
     }
   }
 
@@ -3255,7 +3494,7 @@ export function App() {
       const next = new Set(current);
       if (archived) next.add(project.id);
       else next.delete(project.id);
-      window.localStorage.setItem(ARCHIVED_PROJECTS_KEY, JSON.stringify([...next]));
+      safeLocalStorage.setItem(ARCHIVED_PROJECTS_KEY, JSON.stringify([...next]));
       return next;
     });
     setAnnouncement(`${project.name}${archived ? "已归档。" : "已恢复。"}`);
@@ -3277,7 +3516,7 @@ export function App() {
     setProjectOrder((current) => {
       const groupSet = new Set(groupIds);
       const next = [...current.filter((projectId) => !groupSet.has(projectId)), ...groupIds];
-      window.localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next));
+      safeLocalStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next));
       return next;
     });
     setAnnouncement(`${dragged.name} 的顺序已调整。`);
@@ -3341,6 +3580,7 @@ export function App() {
       setActionError(error instanceof ApiError && error.code === "PROJECT_EXISTS"
         ? "该项目已经存在，可直接从项目列表打开。"
         : errorMessage(error));
+      if (isServiceUnavailable(error)) setServiceRecoveryNeeded(true);
     } finally {
       setProjectCreatePending(false);
     }
@@ -3351,7 +3591,7 @@ export function App() {
     try {
       return await chooseLocalDirectory();
     } catch (error) {
-      setActionError(errorMessage(error));
+      recordActionError(error);
       return null;
     }
   }
@@ -3380,7 +3620,7 @@ export function App() {
       }
       changeProject(project.id);
     } catch (error) {
-      setActionError(errorMessage(error));
+      recordActionError(error);
     } finally {
       setOpeningProjectId(null);
     }
@@ -3636,6 +3876,20 @@ export function App() {
                   {projectMenuOpen && (
                     <div className="header-project-menu" role="menu" aria-label="项目">
                       <span>切换项目</span>
+                      <button
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={isGlobalBoard}
+                        disabled={openingProjectId !== null}
+                        onClick={() => {
+                          if (isGlobalBoard) setProjectMenuOpen(false);
+                          else openGlobalBoard("issues");
+                        }}
+                      >
+                        <span className="project-avatar" aria-hidden="true">全</span>
+                        <span>全局任务</span>
+                        {isGlobalBoard && <span className="project-menu-check" aria-hidden="true"><LinearIcon name="check" /></span>}
+                      </button>
                       {activeProjectChoices.map((project) => (
                         <button
                           type="button"
@@ -3711,6 +3965,17 @@ export function App() {
                 onOpen={() => void reconcileProjectAutomation()}
                 onChange={(options) => void saveProjectAutomation(options)}
               />
+            )}
+            {selectedProject && (
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => setShowAgentManager(true)}
+                aria-label="Agent 模板"
+                title="Agent 模板"
+              >
+                <LinearIcon name="file" />
+              </button>
             )}
             {selectedProjectId && boardView === "issues" && (
               <button
@@ -3795,7 +4060,7 @@ export function App() {
                   aria-pressed={favoriteViewMode === "list"}
                   onClick={() => {
                     setFavoriteViewMode("list");
-                    window.localStorage.setItem(FAVORITE_VIEW_MODE_KEY, "list");
+                    safeLocalStorage.setItem(FAVORITE_VIEW_MODE_KEY, "list");
                   }}
                 >
                   <LinearIcon name="myIssues" />
@@ -3807,7 +4072,7 @@ export function App() {
                   aria-pressed={favoriteViewMode === "board"}
                   onClick={() => {
                     setFavoriteViewMode("board");
-                    window.localStorage.setItem(FAVORITE_VIEW_MODE_KEY, "board");
+                    safeLocalStorage.setItem(FAVORITE_VIEW_MODE_KEY, "board");
                   }}
                 >
                   <LinearIcon name="dashboard" />
@@ -3833,6 +4098,11 @@ export function App() {
               labels={availableLabels}
               filters={filters}
               onChange={setFilters}
+            />
+            <UnreadStatusMenu
+              statuses={unreadStatuses}
+              unreadCount={unreadTaskCount}
+              onChange={updateUnreadStatuses}
             />
             <BoardSettingsMenu
               visibleStatuses={visibleStatuses}
@@ -3868,11 +4138,7 @@ export function App() {
             <div><strong>Taskboard needs attention</strong><p>{actionError ?? loadError}</p></div>
             <button
               type="button"
-              onClick={() => {
-                setActionError(null);
-                if (selectedProjectId) void refreshTasks(selectedProjectId);
-                else void loadProjectList();
-              }}
+              onClick={retryAfterError}
             >
               Try again
             </button>
@@ -3913,7 +4179,7 @@ export function App() {
                       aria-pressed={projectHomeMode === "groups"}
                       onClick={() => {
                         setProjectHomeMode("groups");
-                        window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "groups");
+                        safeLocalStorage.setItem(PROJECT_HOME_MODE_KEY, "groups");
                       }}
                     >分类</button>
                     <button
@@ -3922,7 +4188,7 @@ export function App() {
                       aria-pressed={projectHomeMode === "priority"}
                       onClick={() => {
                         setProjectHomeMode("priority");
-                        window.localStorage.setItem(PROJECT_HOME_MODE_KEY, "priority");
+                        safeLocalStorage.setItem(PROJECT_HOME_MODE_KEY, "priority");
                       }}
                     >收藏排序</button>
                   </div>
@@ -3933,6 +4199,15 @@ export function App() {
                   >
                     <LinearIcon name="myIssues" />
                     全局任务视角
+                  </button>
+                  <button
+                    className="project-create-trigger"
+                    type="button"
+                    aria-label="Agent 模板"
+                    onClick={() => setShowAgentManager(true)}
+                  >
+                    <LinearIcon name="file" />
+                    Agent
                   </button>
                   <button
                     className="project-create-trigger"
@@ -4051,6 +4326,7 @@ export function App() {
             currentUser={currentUser}
             availableLabels={availableLabels}
             workflows={workflowOptions}
+            agents={availableAgents}
             developmentScan={developmentScan}
             developmentScanLoading={developmentScanLoading}
             commentsRevision={commentsRevision}
@@ -4089,6 +4365,7 @@ export function App() {
             onOpenThread={openThread}
             currentCodexThreadId={hostContext?.threadId}
             codexThreads={projectCodexThreads}
+            allCodexThreads={hostContext?.threads ?? []}
             onLinkThread={linkTaskToThread}
             onUnlinkThread={unlinkTaskFromThread}
             onOpenInThread={openTaskInThread}
@@ -4165,6 +4442,7 @@ export function App() {
                   settlingTaskId={settlingTaskId}
                   contextMenuTaskId={contextMenu?.taskId ?? null}
                   favoriteTaskIds={favoriteTaskIds}
+                  unreadTaskIds={unreadTaskIds}
                   onCreate={(initialStatus) => openNewIssue(initialStatus)}
                   onEdit={openTaskDetail}
                   onToggleFavorite={toggleFavoriteTask}
@@ -4231,6 +4509,7 @@ export function App() {
             : []}
           labels={availableLabels}
           workflows={workflowOptions}
+          agents={editorAgents}
           currentUser={currentUser}
           developmentScan={developmentScan}
           developmentScanLoading={developmentScanLoading}
@@ -4263,6 +4542,21 @@ export function App() {
           onCopy={(text, message) => void copyText(text, message)}
           onOpenInThread={openTaskInThread}
           onArchive={(task) => void archiveTask(task)}
+        />
+      )}
+
+      {showAgentManager && (
+        <AgentManager
+          projectId={selectedProject?.id}
+          projectName={selectedProject ? projectNames[selectedProject.id] ?? selectedProject.name : undefined}
+          onChanged={(nextAgents, nextProjectAgentIds) => {
+            setAgents(nextAgents);
+            if (selectedProject) {
+              setProjectAgentIdsState(nextProjectAgentIds);
+              void refreshTasks(selectedProject.id, { quiet: true });
+            }
+          }}
+          onClose={() => setShowAgentManager(false)}
         />
       )}
 

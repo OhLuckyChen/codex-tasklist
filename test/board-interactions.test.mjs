@@ -39,11 +39,16 @@ test("project knowledge keeps confirmed files separate from reviewable issue and
   assert.match(knowledgeSource, /已发布/);
   assert.match(knowledgeSource, /待确认/);
   assert.match(knowledgeSource, /健康状态/);
+  assert.match(knowledgeSource, /交互记录/);
+  assert.match(knowledgeSource, /整理为知识候选/);
   assert.match(knowledgeSource, /knowledge-line-diff/);
   assert.match(knowledgeSource, /保存为知识提案/);
   assert.match(apiSource, /\/knowledge-source-versions/);
+  assert.match(apiSource, /\/interactions\?/);
+  assert.match(apiSource, /\/knowledge-candidates/);
   assert.match(typesSource, /type KnowledgeProposalStatus = "generating" \| "ready" \| "published"/);
   assert.match(styles, /\.knowledge-published-layout/);
+  assert.match(styles, /\.knowledge-interaction-card/);
   assert.match(styles, /\.comment-knowledge-toolbar/);
 });
 
@@ -273,10 +278,15 @@ test("comments publish before a conversation is associated", () => {
   assert.match(detailSource, /新建 Codex 会话/);
   assert.match(detailSource, /关联已有会话/);
   assert.match(detailSource, /在关联会话处理/);
+  assert.match(detailSource, /taskThreadRuntime\(currentTask, comment\.threadId\),\s*comment,/);
+  assert.match(appSource, /function followUpTaskInThread\([\s\S]*?comment\?: Comment/);
+  assert.match(appSource, /commentId: comment\?\.id/);
   assert.match(detailSource, /在当前会话处理/);
   assert.match(detailSource, /需要处理时，请点击“在关联会话处理”/);
-  assert.match(detailSource, /const commentThreadOptions = \[/);
-  assert.match(detailSource, /\.\.\.linkedThreadIds/);
+  assert.match(detailSource, /const issueLinkedCodexThreads = linkedThreadIds/);
+  assert.match(detailSource, /const projectCodexThreadOptions = \[\.\.\.projectThreadById\.values\(\)\]/);
+  assert.match(detailSource, /const otherCodexThreadOptions = allCodexThreads\.filter/);
+  assert.match(detailSource, /issueLinkedCodexThreads\.length/);
   assert.match(apiSource, /Array\.isArray\(data\.comments\)/);
   assert.match(apiSource, /attachments: Array\.isArray\(comment\.attachments\)/);
 });
@@ -284,13 +294,14 @@ test("comments publish before a conversation is associated", () => {
 test("a sent follow-up resumes an issue under review without changing it on prefill", () => {
   assert.match(appSource, /action: "follow-up"/);
   assert.match(appSource, /type: "taskboard:follow-up-thread"/);
+  assert.match(appSource, /codexThreadUrl\(normalizedThreadId, taskThreadInstruction\(task, followUp\)\)/);
   assert.match(appSource, /message\.type === "taskboard:thread-followed-up"/);
   assert.match(appSource, /task\.status === "in_review"/);
   assert.match(appSource, /moveTaskRequest\(task, "in_progress", undefined, threadId\)/);
   assert.doesNotMatch(
     appSource.slice(
       appSource.indexOf("function followUpTaskInThread"),
-      appSource.indexOf("function changeProject"),
+      appSource.indexOf("async function resumeReviewedTaskAfterFollowUp"),
     ),
     /moveTaskRequest/,
   );

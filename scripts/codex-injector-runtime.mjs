@@ -19,7 +19,9 @@ function parseHostRequest(payload, parseAutomationRequest) {
     && /^[a-z0-9-]{1,80}$/i.test(request.id)
   ) ? request.id : null;
   if (!id) return { id: null, request: null, error: HOST_REQUEST_ERROR };
-  if (request.action === "ensure") return { id, request, error: null };
+  if (request.action === "ensure" || request.action === "restart-service") {
+    return { id, request, error: null };
+  }
   if (
     request.action === "resolve-task-thread"
     && typeof request.marker === "string"
@@ -39,6 +41,16 @@ function parseHostRequest(payload, parseAutomationRequest) {
     && request.name.length > 0
     && request.name.length <= 200
     && !/[\u0000-\u001f\u007f]/.test(request.name)
+  ) {
+    return { id, request, error: null };
+  }
+  if (
+    request.action === "task-completion-check"
+    && typeof request.taskId === "string"
+    && request.taskId.length > 0
+    && request.taskId.length <= 128
+    && typeof request.threadId === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.threadId)
   ) {
     return { id, request, error: null };
   }
@@ -99,12 +111,16 @@ export async function handleHostBindingPayload(params, handlers) {
     let result;
     if (parsed.request.action === "ensure") {
       result = await handlers.ensure();
+    } else if (parsed.request.action === "restart-service") {
+      result = await handlers.restartService();
     } else if (parsed.request.action === "automation") {
       result = await handlers.runAutomation(parsed.request, params.executionContextId);
     } else if (parsed.request.action === "resolve-task-thread") {
       result = await handlers.resolveTaskThread(parsed.request);
     } else if (parsed.request.action === "rename-thread") {
       result = await handlers.renameThread(parsed.request, params.executionContextId);
+    } else if (parsed.request.action === "task-completion-check") {
+      result = await handlers.checkTaskCompletion(parsed.request);
     } else {
       result = await handlers.prefill(parsed.request, params.executionContextId);
     }
@@ -220,6 +236,32 @@ export function findResidentInjectorPids({
       || (relativeScript.test(command) && cwdForPid(pid) === projectRoot);
     if (!scriptMatches || commandPort(command, defaultPort) !== port) continue;
     residents.push(pid);
+  }
+  return residents;
+}
+
+export function findResidentTaskboardServerPids({
+  processList,
+  currentPid,
+  serverPath,
+  projectRoot,
+  cwdForPid,
+}) {
+  const absoluteScript = new RegExp(
+    `(?:^|\\s)${escapeRegExp(serverPath)}(?=\\s|$)`,
+  );
+  const relativeScript = /(?:^|\s)(?:\.\/)?server\/index\.mjs(?=\s|$)/;
+  const residents = [];
+
+  for (const line of processList.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const command = match[2];
+    if (pid === currentPid) continue;
+    const scriptMatches = absoluteScript.test(command)
+      || (relativeScript.test(command) && cwdForPid(pid) === projectRoot);
+    if (scriptMatches) residents.push(pid);
   }
   return residents;
 }

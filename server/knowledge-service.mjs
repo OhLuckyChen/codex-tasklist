@@ -27,6 +27,26 @@ const MAX_PAGE_BYTES = 1024 * 1024;
 const MAX_PROPOSAL_CHANGES = 50;
 const MAX_PROPOSAL_BYTES = 5 * 1024 * 1024;
 const ANALYSIS_TIMEOUT_MS = 10 * 60 * 1000;
+const INITIAL_KNOWLEDGE_PAGES = [
+  "docs/knowledge/index.md",
+  "docs/knowledge/project-overview.md",
+  "docs/knowledge/architecture.md",
+  "docs/knowledge/code-map.md",
+  "docs/knowledge/key-flows.md",
+  "docs/knowledge/engineering-notes.md",
+  "docs/knowledge/data-boundaries.md",
+  "docs/knowledge/interfaces-and-entrypoints.md",
+];
+const INITIAL_INDEX_FILES = [
+  ".taskboard/knowledge-index/manifest.json",
+  ".taskboard/knowledge-index/files.json",
+  ".taskboard/knowledge-index/symbols.json",
+  ".taskboard/knowledge-index/entrypoints.json",
+  ".taskboard/knowledge-index/objects.json",
+  ".taskboard/knowledge-index/flows.json",
+  ".taskboard/knowledge-index/docs.json",
+  ".taskboard/knowledge-index/recent.json",
+];
 const ALLOWED_SOURCE_TYPES = new Set([
   "project_scan",
   "issue",
@@ -121,12 +141,235 @@ function isKnowledgeIndexTarget(relativePath) {
   return relativePath.startsWith(prefix) && relativePath.endsWith(".json");
 }
 
-function assertValidKnowledgeIndexJson(relativePath, content) {
+function isLocalOrAbsolutePath(value) {
+  const text = String(value ?? "");
+  return path.posix.isAbsolute(text)
+    || /^[a-zA-Z]:[\\/]/.test(text)
+    || text.startsWith("~/")
+    || text.startsWith("file:")
+    || text.includes("/Users/")
+    || text.includes("/tmp/")
+    || text.includes("/var/folders/");
+}
+
+function assertProjectRelativeValue(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label} must be a non-empty string`);
+  }
+  if (value.includes("\0") || isLocalOrAbsolutePath(value) || value.split(/[\\/]/).includes("..")) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label} must be project-relative and portable`);
+  }
+}
+
+function assertNonEmptyString(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label} must be a non-empty string`);
+  }
+}
+
+function assertNonEmptyArray(value, label) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label} must be a non-empty array`);
+  }
+}
+
+function assertEvidenceStatus(value, label) {
+  if (!["confirmed", "inferred", "pending"].includes(value)) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label} must be confirmed, inferred, or pending`);
+  }
+}
+
+function assertEvidence(value, label) {
+  assertNonEmptyArray(value, label);
+  for (const [index, evidence] of value.entries()) {
+    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label}[${index}] must be an object`);
+    }
+    assertNonEmptyString(evidence.type, `${label}[${index}].type`);
+    assertProjectRelativeValue(evidence.ref, `${label}[${index}].ref`);
+  }
+}
+
+function assertLinkedKnowledge(entry, label) {
+  if (entry.importance !== "critical") return;
+  assertNonEmptyArray(entry.linkedKnowledge, `${label}.linkedKnowledge`);
+  for (const [index, target] of entry.linkedKnowledge.entries()) {
+    assertProjectRelativeValue(target, `${label}.linkedKnowledge[${index}]`);
+    if (!String(target).startsWith("docs/knowledge/") || !String(target).endsWith(".md")) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label}.linkedKnowledge[${index}] must point to a knowledge page`);
+    }
+  }
+}
+
+function assertPositiveInteger(value, label) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label} must be a positive integer`);
+  }
+}
+
+function assertMethodSet(value, label) {
+  const methods = Array.isArray(value) ? value : [value];
+  assertNonEmptyArray(methods, label);
+  for (const [index, method] of methods.entries()) {
+    assertNonEmptyString(method, `${label}[${index}]`);
+    if (!/^[A-Z]+$/.test(String(method))) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label}[${index}] must be an HTTP method`);
+    }
+  }
+}
+
+function assertRequestFields(value, label) {
+  assertNonEmptyArray(value, label);
+  for (const [index, field] of value.entries()) {
+    if (typeof field === "string") {
+      assertNonEmptyString(field, `${label}[${index}]`);
+      continue;
+    }
+    if (!field || typeof field !== "object" || Array.isArray(field)) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${label}[${index}] must be a string or object`);
+    }
+    assertNonEmptyString(field.name, `${label}[${index}].name`);
+  }
+}
+
+function parseKnowledgeIndexJson(relativePath, content) {
   if (!isKnowledgeIndexTarget(relativePath)) return;
   try {
-    JSON.parse(content);
+    return JSON.parse(content);
   } catch {
     throw new ApiError(400, "INVALID_KNOWLEDGE_INDEX_JSON", `Knowledge index '${relativePath}' must be valid JSON`);
+  }
+}
+
+function assertValidKnowledgeIndexJson(relativePath, content) {
+  parseKnowledgeIndexJson(relativePath, content);
+}
+
+function assertInitialKnowledgeIndex(relativePath, value) {
+  const name = path.posix.basename(relativePath);
+  if (name === "manifest.json") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", "manifest.json must be an object");
+    }
+    assertNonEmptyString(value.schemaVersion ?? value.schema_version, "manifest.schemaVersion");
+    assertNonEmptyString(value.generatedAt ?? value.generated_at, "manifest.generatedAt");
+    assertNonEmptyString(value.projectSummary ?? value.project_summary ?? value.summary, "manifest.projectSummary");
+    assertNonEmptyArray(value.scanScope ?? value.scan_scope, "manifest.scanScope");
+    return;
+  }
+  if (!Array.isArray(value)) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${name} must be an array`);
+  }
+  if (name !== "recent.json" && value.length === 0) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${name} must not be empty for an initial scan`);
+  }
+  if (name === "objects.json" && value.length < 3) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", "objects.json must contain at least 3 core objects");
+  }
+  if (name === "flows.json" && value.length < 3) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", "flows.json must contain at least 3 core flows");
+  }
+  for (const [index, entry] of value.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${name}[${index}] must be an object`);
+    }
+    if (entry.path) assertProjectRelativeValue(entry.path, `${name}[${index}].path`);
+    if (name === "files.json") {
+      assertProjectRelativeValue(entry.path, `files[${index}].path`);
+      assertNonEmptyString(entry.type, `files[${index}].type`);
+      assertNonEmptyArray(entry.keywords, `files[${index}].keywords`);
+    }
+    if (name === "symbols.json" || name === "entrypoints.json") {
+      assertProjectRelativeValue(entry.path, `${name}[${index}].path`);
+      assertNonEmptyString(entry.name, `${name}[${index}].name`);
+      assertNonEmptyString(entry.kind ?? entry.contractType, `${name}[${index}].kind`);
+      assertNonEmptyString(entry.importance, `${name}[${index}].importance`);
+      assertEvidenceStatus(entry.evidenceStatus, `${name}[${index}].evidenceStatus`);
+      assertLinkedKnowledge(entry, `${name}[${index}]`);
+      assertPositiveInteger(entry.line, `${name}[${index}].line`);
+      const contractKind = String(entry.kind ?? entry.contractType);
+      if (contractKind === "api_route") {
+        assertNonEmptyString(entry.route, `${name}[${index}].route`);
+        assertMethodSet(entry.method ?? entry.methods, `${name}[${index}].method`);
+        assertRequestFields(entry.requestFields ?? entry.params, `${name}[${index}].requestFields`);
+      }
+    }
+    if (name === "objects.json") {
+      assertNonEmptyString(entry.name, `objects[${index}].name`);
+      assertNonEmptyString(entry.authority, `objects[${index}].authority`);
+      assertEvidence(entry.evidence, `objects[${index}].evidence`);
+      assertNonEmptyString(entry.confidence ?? entry.evidenceStatus, `objects[${index}].confidence`);
+    }
+    if (name === "flows.json") {
+      assertNonEmptyString(entry.name, `flows[${index}].name`);
+      assertNonEmptyString(entry.trigger, `flows[${index}].trigger`);
+      assertNonEmptyString(entry.entrypoint, `flows[${index}].entrypoint`);
+      assertNonEmptyArray(entry.components, `flows[${index}].components`);
+      assertNonEmptyArray(entry.stateChanges, `flows[${index}].stateChanges`);
+      assertNonEmptyString(entry.successSemantics, `flows[${index}].successSemantics`);
+      assertEvidence(entry.evidence, `flows[${index}].evidence`);
+      assertNonEmptyString(entry.confidence ?? entry.evidenceStatus, `flows[${index}].confidence`);
+    }
+    if (name === "docs.json") {
+      assertNonEmptyString(entry.title, `docs[${index}].title`);
+      assertNonEmptyString(entry.source, `docs[${index}].source`);
+      assertNonEmptyArray(entry.keywords, `docs[${index}].keywords`);
+      assertNonEmptyString(entry.summary, `docs[${index}].summary`);
+    }
+    if (name === "recent.json" && value.length > 0) {
+      assertProjectRelativeValue(entry.path, `recent[${index}].path`);
+      assertNonEmptyString(entry.changed_at ?? entry.changedAt, `recent[${index}].changed_at`);
+      assertNonEmptyString(entry.reason, `recent[${index}].reason`);
+    }
+  }
+}
+
+function assertKnowledgePageContract(relativePath, content) {
+  if (!relativePath.startsWith("docs/knowledge/") || !relativePath.endsWith(".md")) return;
+  const parsed = parseFrontmatter(content);
+  for (const key of ["id", "title", "kind", "updated_at"]) {
+    assertNonEmptyString(parsed.attributes[key], `${relativePath} frontmatter ${key}`);
+  }
+  assertNonEmptyArray(parsed.sources, `${relativePath} sources`);
+  for (const [index, source] of parsed.sources.entries()) {
+    assertNonEmptyString(source.type, `${relativePath} sources[${index}].type`);
+    assertNonEmptyString(source.ref, `${relativePath} sources[${index}].ref`);
+    if (source.type === "file") assertProjectRelativeValue(source.ref, `${relativePath} sources[${index}].ref`);
+  }
+  if (/\bTODO\b|待补充|模板占位|过程日志|agent\s+log/i.test(parsed.body)) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${relativePath} contains placeholder or process-log content`);
+  }
+  if (/(?:^|[\s("'`])(?:\/Users\/|\/tmp\/|\/var\/folders\/|file:)/i.test(parsed.body)) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${relativePath} contains machine-local file paths`);
+  }
+  if (/evidence_status:\s*confirmed/i.test(content) && parsed.sources.length === 0) {
+    throw new ApiError(400, "INVALID_KNOWLEDGE_CONTRACT", `${relativePath} has confirmed facts without sources`);
+  }
+}
+
+function assertInitialScanContract(changes) {
+  const byTarget = new Map(changes.map((change) => [change.targetPath, change]));
+  const missingPages = INITIAL_KNOWLEDGE_PAGES.filter((targetPath) => !byTarget.has(targetPath));
+  const missingIndexes = INITIAL_INDEX_FILES.filter((targetPath) => !byTarget.has(targetPath));
+  if (missingPages.length > 0 || missingIndexes.length > 0) {
+    throw new ApiError(400, "INCOMPLETE_INITIAL_KNOWLEDGE", [
+      missingPages.length > 0 ? `Missing initial knowledge pages: ${missingPages.join(", ")}` : "",
+      missingIndexes.length > 0 ? `Missing initial knowledge indexes: ${missingIndexes.join(", ")}` : "",
+    ].filter(Boolean).join("; "));
+  }
+  for (const targetPath of INITIAL_KNOWLEDGE_PAGES) {
+    const change = byTarget.get(targetPath);
+    if (change.operation === "delete") {
+      throw new ApiError(400, "INCOMPLETE_INITIAL_KNOWLEDGE", `Initial scan cannot delete '${targetPath}'`);
+    }
+    assertKnowledgePageContract(targetPath, change.afterContent);
+  }
+  for (const targetPath of INITIAL_INDEX_FILES) {
+    const change = byTarget.get(targetPath);
+    if (change.operation === "delete") {
+      throw new ApiError(400, "INCOMPLETE_INITIAL_KNOWLEDGE", `Initial scan cannot delete '${targetPath}'`);
+    }
+    assertInitialKnowledgeIndex(targetPath, parseKnowledgeIndexJson(targetPath, change.afterContent));
   }
 }
 
@@ -250,12 +493,17 @@ function pageKind(relativePath, attributes) {
   return path.posix.basename(relativePath, ".md");
 }
 
-async function inspectPage(workspaceRoot, relativePath, sourceVersions = {}) {
+async function inspectPage(workspaceRoot, relativePath, sourceVersions = {}, options = {}) {
+  const checkSources = options.checkSources !== false;
   const target = await safeTarget(workspaceRoot, relativePath, { allowMissing: false });
   const content = await readCapped(target.candidate);
   const parsed = parseFrontmatter(content);
   const sourceStates = [];
   for (const source of parsed.sources) {
+    if (!checkSources) {
+      sourceStates.push({ ...source, actualRevision: null, status: "unverified" });
+      continue;
+    }
     if (source.type === "file" && source.ref) {
       const resolvedRevision = await sourceRevision(workspaceRoot, source.ref, source.revision);
       const actualRevision = resolvedRevision ?? null;
@@ -398,7 +646,9 @@ function analysisPrompt(sourceType, sourceSnapshot) {
     "Technical designs belong under docs/knowledge/designs/. Decisions, detailed flows and guides use their matching directories.",
     "Allowed targets are docs/knowledge/**/*.md, .taskboard/knowledge-index/*.json, and changelog.md. Include changelog.md only for an actual project behavior change.",
     "Every knowledge page must have YAML frontmatter with id, title, kind, updated_at and sources. Source refs are project-relative paths or issue/comment identifiers. For file sources, record the current revision as git-blob:<git hash-object value>; for issue/comment sources, use the supplied version. These revisions are the deterministic baseline for later incremental checks.",
-    "For initial scans, also propose project pre-index JSON files under .taskboard/knowledge-index/: manifest.json, files.json, symbols.json, docs.json, and recent.json. These files are machine-readable routing aids, not narrative knowledge; keep entries project-relative and include freshness or revision data when available.",
+    "For initial scans, the proposal must include docs/knowledge/index.md, project-overview.md, architecture.md, code-map.md, key-flows.md, engineering-notes.md, data-boundaries.md, and interfaces-and-entrypoints.md.",
+    "For initial scans, also propose project pre-index JSON files under .taskboard/knowledge-index/: manifest.json, files.json, symbols.json, entrypoints.json, objects.json, flows.json, docs.json, and recent.json. These files are machine-readable routing aids, not narrative knowledge; keep entries project-relative and include freshness or revision data when available.",
+    "Initial index entries must model object ownership, state authority, critical entrypoints, and end-to-end flows. Critical symbols or entrypoints must link to docs/knowledge pages. Confirmed facts need evidence; uncertain facts must be marked pending or inferred.",
     "Write user-facing knowledge pages in Chinese unless the project already has a stronger local convention.",
     "Return JSON only with this shape:",
     '{"title":"...","summary":"...","changes":[{"targetPath":"docs/knowledge/...md or .taskboard/knowledge-index/files.json","operation":"create|update|delete","afterContent":"full file content"}]}',
@@ -409,7 +659,7 @@ function analysisPrompt(sourceType, sourceSnapshot) {
 
 function knowledgeRunInstruction({ sourceType, sourceSnapshot, workspacePath, callbackUrl, callbackToken }) {
   const scanMode = sourceType === "project_scan"
-    ? "This is the initial analysis. Build a complete project understanding before proposing the initial knowledge structure; cover architecture, code map, core flows, engineering notes, durable designs and confirmed decisions."
+    ? "This is the initial analysis. Build a complete project understanding before proposing the initial knowledge structure; cover architecture, code map, core flows, engineering notes, data boundaries, entrypoints, object ownership, state authority, durable designs and confirmed decisions."
     : sourceType === "project_review"
       ? "This is a full project review. Compare the complete current project with published knowledge and propose only missing, stale or contradicted durable knowledge."
       : sourceType === "stale_refresh"
@@ -451,13 +701,13 @@ export class KnowledgeService {
     }));
   }
 
-  async overview(workspacePath, sourceVersions = {}) {
+  async overview(workspacePath, sourceVersions = {}, options = {}) {
     const workspaceRoot = await existingRealRoot(workspacePath);
     const knowledgeRoot = path.join(workspaceRoot, KNOWLEDGE_DIRECTORY);
     const relativePaths = await listMarkdownFiles(knowledgeRoot, workspaceRoot);
     const pages = [];
     for (const relativePath of relativePaths) {
-      pages.push(await inspectPage(workspaceRoot, relativePath, sourceVersions));
+      pages.push(await inspectPage(workspaceRoot, relativePath, sourceVersions, options));
     }
     const summaries = pages.map(({ content: _content, ...page }) => page);
     const health = {
@@ -476,13 +726,13 @@ export class KnowledgeService {
     };
   }
 
-  async readPage(workspacePath, relativePath, sourceVersions = {}) {
+  async readPage(workspacePath, relativePath, sourceVersions = {}, options = {}) {
     const workspaceRoot = await existingRealRoot(workspacePath);
     const normalized = normalizeRelativePath(relativePath);
     if (!normalized.startsWith("docs/knowledge/") || !normalized.endsWith(".md")) {
       throw new ApiError(400, "INVALID_KNOWLEDGE_PATH", "Only Markdown knowledge pages can be read");
     }
-    return inspectPage(workspaceRoot, normalized, sourceVersions);
+    return inspectPage(workspaceRoot, normalized, sourceVersions, options);
   }
 
   async search(workspacePath, query) {
@@ -546,6 +796,13 @@ export class KnowledgeService {
       );
     }
     if (analyzed.changes.length === 0) {
+      if (input.sourceType === "project_scan") {
+        throw new ApiError(
+          400,
+          "INCOMPLETE_INITIAL_KNOWLEDGE",
+          "Initial project knowledge scans must include the complete knowledge protocol pages and indexes",
+        );
+      }
       return {
         title: String(analyzed.title || "No knowledge changes"),
         summary: analysisSummary || "No durable project knowledge was found.",
@@ -580,7 +837,10 @@ export class KnowledgeService {
       if (operation !== "delete" && (!afterContent.trim() || Buffer.byteLength(afterContent) > MAX_PAGE_BYTES)) {
         throw new ApiError(413, "KNOWLEDGE_PAGE_TOO_LARGE", "Proposed knowledge pages must contain at most 1 MiB");
       }
-      if (operation !== "delete") assertValidKnowledgeIndexJson(targetPath, afterContent);
+      if (operation !== "delete") {
+        assertValidKnowledgeIndexJson(targetPath, afterContent);
+        assertKnowledgePageContract(targetPath, afterContent);
+      }
       changes.push({
         id: randomUUID(),
         targetPath,
@@ -594,6 +854,7 @@ export class KnowledgeService {
     if (proposalInputBytes(changes) > MAX_PROPOSAL_BYTES) {
       throw new ApiError(413, "KNOWLEDGE_PROPOSAL_TOO_LARGE", "A proposal cannot exceed 5 MiB");
     }
+    if (input.sourceType === "project_scan") assertInitialScanContract(changes);
     return {
       title: String(analyzed.title || "Project knowledge update").slice(0, 240),
       summary: String(analyzed.summary || "").slice(0, 20_000),
@@ -670,8 +931,18 @@ export class KnowledgeService {
       if (raw.operation !== "delete" && (!afterContent.trim() || Buffer.byteLength(afterContent) > MAX_PAGE_BYTES)) {
         throw new ApiError(413, "KNOWLEDGE_PAGE_TOO_LARGE", "Proposed knowledge pages must contain at most 1 MiB");
       }
-      if (raw.operation !== "delete") assertValidKnowledgeIndexJson(targetPath, afterContent);
+      if (raw.operation !== "delete") {
+        assertValidKnowledgeIndexJson(targetPath, afterContent);
+        assertKnowledgePageContract(targetPath, afterContent);
+      }
       prepared.push({ targetPath, target, operation: raw.operation, beforeContent, afterContent, alreadyApplied });
+    }
+    if (proposal.sourceType === "project_scan") {
+      assertInitialScanContract(prepared.map((change) => ({
+        targetPath: change.targetPath,
+        operation: change.operation,
+        afterContent: change.afterContent,
+      })));
     }
 
     const completed = [];

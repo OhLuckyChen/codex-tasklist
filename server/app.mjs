@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
@@ -26,6 +26,7 @@ const execFileAsync = promisify(execFile);
 const JSON_BODY_LIMIT = 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
 const KNOWLEDGE_BODY_LIMIT = 6 * 1024 * 1024;
+const AGENT_TEMPLATE_FILE_LIMIT = 256 * 1024;
 const HOST_RUNTIME_TTL_MS = 3_000;
 const CODEX_PLAN_TAIL_BYTES = 16 * 1024 * 1024;
 const INLINE_ATTACHMENT_TYPES = new Set([
@@ -40,6 +41,8 @@ const INLINE_ATTACHMENT_TYPES = new Set([
 const PROJECT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TRUSTED_EMBED_ORIGINS = new Set(["app://-"]);
 const DIRECTORY_PICKER_SCRIPT = 'POSIX path of (choose folder with prompt "选择本地项目目录")';
+const AGENT_FILE_PICKER_SCRIPT = 'POSIX path of (choose file with prompt "选择 Agent 模板文件")';
+const SKILL_DIRECTORY_PICKER_SCRIPT = 'POSIX path of (choose folder with prompt "选择包含 SKILL.md 的 Skill 目录")';
 const TASKBOARD_PROJECT_AGENTS_MD = `# Taskboard Project Guidelines
 
 ## Communication
@@ -189,17 +192,47 @@ function assertLoopbackRequest(request) {
   }
 }
 
-async function chooseLocalDirectory() {
+async function chooseLocalPath(script, unavailableCode, failedCode, unavailableMessage, failedMessage) {
   if (process.platform !== "darwin") {
-    throw new ApiError(501, "DIRECTORY_PICKER_UNAVAILABLE", "当前系统不支持文件夹选择器");
+    throw new ApiError(501, unavailableCode, unavailableMessage);
   }
   try {
-    const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", DIRECTORY_PICKER_SCRIPT]);
+    const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", script]);
     return path.resolve(stdout.trim());
   } catch (error) {
     if (String(error.stderr ?? error.message).includes("-128")) return null;
-    throw new ApiError(500, "DIRECTORY_PICKER_FAILED", "无法打开文件夹选择器");
+    throw new ApiError(500, failedCode, failedMessage);
   }
+}
+
+async function chooseLocalDirectory() {
+  return chooseLocalPath(
+    DIRECTORY_PICKER_SCRIPT,
+    "DIRECTORY_PICKER_UNAVAILABLE",
+    "DIRECTORY_PICKER_FAILED",
+    "当前系统不支持文件夹选择器",
+    "无法打开文件夹选择器",
+  );
+}
+
+async function chooseAgentTemplateFile() {
+  return chooseLocalPath(
+    AGENT_FILE_PICKER_SCRIPT,
+    "FILE_PICKER_UNAVAILABLE",
+    "FILE_PICKER_FAILED",
+    "当前系统不支持文件选择器",
+    "无法打开文件选择器",
+  );
+}
+
+async function chooseSkillDirectory() {
+  return chooseLocalPath(
+    SKILL_DIRECTORY_PICKER_SCRIPT,
+    "DIRECTORY_PICKER_UNAVAILABLE",
+    "DIRECTORY_PICKER_FAILED",
+    "当前系统不支持文件夹选择器",
+    "无法打开 Skill 目录选择器",
+  );
 }
 
 function assertPlainObject(value) {
@@ -596,6 +629,12 @@ function actorFromRequest(request) {
   return { type: "user", id, name, avatarUrl };
 }
 
+function agentRuntimeFromRequest(request) {
+  if (request.headers["x-taskboard-client"] !== "taskctl") return "codex";
+  const runtime = requestHeader(request, "x-taskboard-agent-runtime");
+  return runtime === "claude" || runtime === "omp" ? runtime : "codex";
+}
+
 function parseAssigneeTarget(value) {
   if (value === undefined) return undefined;
   if (value !== "current-user" && value !== "codex-agent" && value !== "claude-agent" && value !== "omp-agent") {
@@ -621,6 +660,62 @@ function parseWorkflowId(value) {
     throw new ApiError(400, "INVALID_FIELD", "'workflowId' cannot be empty");
   }
   return workflowId;
+}
+
+function parseAgentId(value) {
+  const agentId = stringField(value, "agentId", { nullable: true, maxLength: 128 });
+  if (agentId === "") {
+    throw new ApiError(400, "INVALID_FIELD", "'agentId' cannot be empty");
+  }
+  return agentId;
+}
+
+function parseSkillPaths(value, fieldName = "skillPaths") {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new ApiError(400, "INVALID_FIELD", `'${fieldName}' must contain at most 50 items`);
+  }
+  return [...new Set(value.map((item) => {
+    const skillPath = stringField(item, "skillPath", { required: true, maxLength: 4096 });
+    if (!path.isAbsolute(skillPath) || skillPath.includes("\0")) {
+      throw new ApiError(400, "INVALID_FIELD", "'skillPath' must be an absolute local directory path");
+    }
+    return path.resolve(skillPath);
+  }))];
+}
+
+function parseAgentIds(value) {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new ApiError(400, "INVALID_FIELD", "'agentIds' must contain at most 50 items");
+  }
+  return [...new Set(value.map((item) => (
+    stringField(item, "agentId", { required: true, maxLength: 128 })
+  )))];
+}
+
+function parseAgentTemplateFields(body, { partial = false } = {}) {
+  assertPlainObject(body);
+  const allowed = new Set(["name", "templateType", "templateValue", "skillPaths"]);
+  if (partial) allowed.add("version");
+  assertAllowedKeys(body, allowed);
+  const result = {};
+  if (!partial || body.name !== undefined) {
+    result.name = stringField(body.name, "name", { required: true, maxLength: 120 });
+  }
+  if (!partial || body.templateType !== undefined) {
+    const templateType = stringField(body.templateType, "templateType", { required: true, maxLength: 16 });
+    if (templateType !== "inline" && templateType !== "file") {
+      throw new ApiError(400, "INVALID_FIELD", "'templateType' must be inline or file");
+    }
+    result.templateType = templateType;
+  }
+  if (!partial || body.templateValue !== undefined) {
+    result.templateValue = stringField(body.templateValue, "templateValue", {
+      required: true,
+      maxLength: 200_000,
+    });
+  }
+  if (!partial || body.skillPaths !== undefined) result.skillPaths = parseSkillPaths(body.skillPaths ?? []);
+  return partial ? { version: parseVersion(body.version), changes: result } : result;
 }
 
 function parseRuntime(value) {
@@ -712,7 +807,7 @@ function parseTaskCreate(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
     "projectId", "title", "description", "status", "priority", "labels", "sortOrder", "threadId",
-    "runtime", "assigneeTarget", "workflowId", "developmentContext", "startDate", "dueDate", "recurrence",
+    "runtime", "assigneeTarget", "workflowId", "agentId", "developmentContext", "startDate", "dueDate", "recurrence",
   ]));
   const projectId = validateProjectId(body.projectId ?? DEFAULT_PROJECT_ID);
   const task = {
@@ -727,6 +822,7 @@ function parseTaskCreate(body) {
     runtime: parseRuntime(body.runtime) ?? "codex",
     assigneeTarget: parseAssigneeTarget(body.assigneeTarget),
     workflowId: parseWorkflowId(body.workflowId ?? null),
+    agentId: parseAgentId(body.agentId ?? null),
     developmentContext: parseDevelopmentContext(body.developmentContext ?? null),
     startDate: parseDueDate(body.startDate ?? null, "startDate"),
     dueDate: parseDueDate(body.dueDate ?? null),
@@ -742,7 +838,7 @@ function parseTaskPatch(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
     "version", "title", "description", "status", "priority", "labels", "threadId",
-    "runtime", "assigneeTarget", "workflowId", "developmentContext", "startDate", "dueDate", "recurrence",
+    "runtime", "assigneeTarget", "workflowId", "agentId", "developmentContext", "startDate", "dueDate", "recurrence",
   ]));
   const version = parseVersion(body.version);
   const threadId = parseThreadId(body.threadId);
@@ -755,6 +851,7 @@ function parseTaskPatch(body) {
   if (body.priority !== undefined) changes.priority = parsePriority(body.priority);
   if (body.labels !== undefined) changes.labels = parseLabels(body.labels);
   if (body.workflowId !== undefined) changes.workflowId = parseWorkflowId(body.workflowId);
+  if (body.agentId !== undefined) changes.agentId = parseAgentId(body.agentId);
   if (body.developmentContext !== undefined) changes.developmentContext = parseDevelopmentContext(body.developmentContext);
   if (body.startDate !== undefined) changes.startDate = parseDueDate(body.startDate, "startDate");
   if (body.dueDate !== undefined) changes.dueDate = parseDueDate(body.dueDate);
@@ -893,10 +990,11 @@ function parseIssueRelationType(value) {
 
 function parseCommentCreate(body) {
   assertPlainObject(body);
-  assertAllowedKeys(body, new Set(["body", "threadId"]));
+  assertAllowedKeys(body, new Set(["body", "threadId", "agentId"]));
   return {
     body: stringField(body.body ?? "", "body", { maxLength: 100_000 }),
     threadId: parseThreadId(body.threadId),
+    agentId: parseAgentId(body.agentId ?? null),
   };
 }
 
@@ -1162,7 +1260,7 @@ class EventHub {
     });
     response.write(": connected\n\n");
     this.clients.add(response);
-    request.once("close", () => this.clients.delete(response));
+    response.once("close", () => this.clients.delete(response));
   }
 
   emit(type, value) {
@@ -1485,6 +1583,137 @@ async function discoverWorkflowCapabilities(resolved, workspacePath) {
   return { skills, mcpServers };
 }
 
+async function readAgentTemplateContent(agent) {
+  if (agent.templateType === "inline") return agent.templateValue;
+  if (!path.isAbsolute(agent.templateValue) || agent.templateValue.includes("\0")) {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", "Agent template file path must be an absolute local path");
+  }
+  let resolvedPath;
+  try {
+    resolvedPath = await realpath(agent.templateValue);
+  } catch {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", `Agent template file does not exist: ${agent.templateValue}`);
+  }
+  const home = path.resolve(os.homedir());
+  if (resolvedPath !== home && !resolvedPath.startsWith(`${home}${path.sep}`)) {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", "Agent template file must be inside the user home directory");
+  }
+  let fileStat;
+  try {
+    fileStat = await stat(resolvedPath);
+  } catch {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", `Agent template file cannot be inspected: ${agent.templateValue}`);
+  }
+  if (!fileStat.isFile()) {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", "Agent template path must point to a regular file");
+  }
+  if (fileStat.size > AGENT_TEMPLATE_FILE_LIMIT) {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", "Agent template file cannot exceed 256 KiB");
+  }
+  try {
+    return await readFile(resolvedPath, "utf8");
+  } catch {
+    throw new ApiError(400, "AGENT_TEMPLATE_UNAVAILABLE", `Agent template file cannot be read: ${agent.templateValue}`);
+  }
+}
+
+function skillNameFromContent(content, directoryPath) {
+  const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---(?:\n|$)/);
+  const name = frontmatter?.[1].match(/^name:\s*(.+)$/m)?.[1]
+    ?.trim()
+    .replace(/^(['"])(.*)\1$/, "$2");
+  return name || path.basename(directoryPath);
+}
+
+async function readAgentSkillDirectory(directoryPath) {
+  if (!path.isAbsolute(directoryPath) || directoryPath.includes("\0")) {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", "Agent Skill path must be an absolute local directory path");
+  }
+  let resolvedDirectory;
+  try {
+    resolvedDirectory = await realpath(directoryPath);
+  } catch {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", `Agent Skill directory does not exist: ${directoryPath}`);
+  }
+  const home = path.resolve(os.homedir());
+  if (resolvedDirectory !== home && !resolvedDirectory.startsWith(`${home}${path.sep}`)) {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", "Agent Skill directory must be inside the user home directory");
+  }
+  let directoryStat;
+  try {
+    directoryStat = await stat(resolvedDirectory);
+  } catch {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", `Agent Skill directory cannot be inspected: ${directoryPath}`);
+  }
+  if (!directoryStat.isDirectory()) {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", "Agent Skill path must point to a directory");
+  }
+  const requestedSkillFile = path.join(resolvedDirectory, "SKILL.md");
+  let skillFilePath;
+  try {
+    skillFilePath = await realpath(requestedSkillFile);
+  } catch {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", `Selected directory does not contain SKILL.md: ${directoryPath}`);
+  }
+  const skillFileRelativePath = path.relative(resolvedDirectory, skillFilePath);
+  if (skillFileRelativePath.startsWith("..") || path.isAbsolute(skillFileRelativePath)) {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", "Agent Skill SKILL.md must be a regular file inside the selected directory");
+  }
+  let skillFileStat;
+  try {
+    skillFileStat = await stat(skillFilePath);
+  } catch {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", `Agent Skill cannot be inspected: ${skillFilePath}`);
+  }
+  if (!skillFileStat.isFile() || skillFileStat.size > AGENT_TEMPLATE_FILE_LIMIT) {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", "Agent Skill SKILL.md must be a readable regular file no larger than 256 KiB");
+  }
+  let content;
+  try {
+    content = await readFile(skillFilePath, "utf8");
+  } catch {
+    throw new ApiError(400, "AGENT_SKILL_UNAVAILABLE", `Agent Skill cannot be read: ${skillFilePath}`);
+  }
+  return {
+    id: resolvedDirectory,
+    label: skillNameFromContent(content, resolvedDirectory),
+    directoryPath: resolvedDirectory,
+    path: skillFilePath,
+  };
+}
+
+async function resolveAgentInstruction(database, input) {
+  const task = database.getTask(input.taskId);
+  if (!task) throw new ApiError(404, "TASK_NOT_FOUND", `Task '${input.taskId}' does not exist`);
+  const comment = input.commentId ? database.getComment(input.commentId) : null;
+  if (input.commentId && (!comment || comment.taskId !== task.id)) {
+    throw new ApiError(404, "COMMENT_NOT_FOUND", "Comment does not belong to the selected task");
+  }
+  const agentId = comment?.agentId ?? task.agentId;
+  if (!agentId) return { instruction: input.instruction, agent: null, skills: [] };
+  const agent = database.requireProjectAgent(task.projectId, agentId);
+  const content = (await readAgentTemplateContent(agent)).trim();
+  const skills = await Promise.all(agent.skillPaths.map(readAgentSkillDirectory));
+  const sections = [
+    `Use the Agent template named "${agent.name}":`,
+    content,
+  ];
+  if (skills.length > 0) {
+    sections.push(
+      "Read and follow these additional Skills before working on the task:",
+      skills.map((skill) => (
+        `- [$${skill.label}](${skill.path})`
+      )).join("\n"),
+    );
+  }
+  sections.push("Task instruction:", input.instruction);
+  return {
+    instruction: sections.filter(Boolean).join("\n\n"),
+    agent,
+    skills,
+  };
+}
+
 export function resolveServerOptions(options = {}) {
   const configuredDataDirectory = options.dataDirectory ?? process.env.CODEX_TASKBOARD_DATA_DIR;
   const dataDirectory = configuredDataDirectory
@@ -1781,7 +2010,12 @@ export function createTaskboardServer(options = {}) {
       }
       if (pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
-        return sendJson(response, 200, { status: "ok" });
+        return sendJson(response, 200, {
+          status: "ok",
+          pid: process.pid,
+          projectRoot: PROJECT_ROOT,
+          dataDir: resolved.dataDir,
+        });
       }
 
       if (pathname === "/api/local/directory-picker") {
@@ -1789,6 +2023,27 @@ export function createTaskboardServer(options = {}) {
         assertNoQuery(url.searchParams, "POST /api/local/directory-picker");
         await assertEmptyRequestBody(request, "POST /api/local/directory-picker");
         return sendJson(response, 200, { workspacePath: await chooseLocalDirectory() });
+      }
+
+      if (pathname === "/api/local/agent-template-file-picker") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/agent-template-file-picker");
+        await assertEmptyRequestBody(request, "POST /api/local/agent-template-file-picker");
+        const filePath = await chooseAgentTemplateFile();
+        if (filePath) {
+          await readAgentTemplateContent({ templateType: "file", templateValue: filePath });
+        }
+        return sendJson(response, 200, { filePath });
+      }
+
+      if (pathname === "/api/local/skill-directory-picker") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/skill-directory-picker");
+        await assertEmptyRequestBody(request, "POST /api/local/skill-directory-picker");
+        const directoryPath = await chooseSkillDirectory();
+        return sendJson(response, 200, {
+          skill: directoryPath ? await readAgentSkillDirectory(directoryPath) : null,
+        });
       }
 
       if (pathname === "/api/local/workspace-check") {
@@ -2049,7 +2304,7 @@ export function createTaskboardServer(options = {}) {
               maxLength: 4096,
             }),
           );
-          return sendJson(response, 200, await knowledge.overview(workspacePath));
+          return sendJson(response, 200, await knowledge.overview(workspacePath, {}, { checkSources: false }));
         }
         if (action === "pages") {
           if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
@@ -2065,7 +2320,7 @@ export function createTaskboardServer(options = {}) {
             required: true,
             maxLength: 4096,
           });
-          return sendJson(response, 200, await knowledge.readPage(workspacePath, pagePath));
+          return sendJson(response, 200, await knowledge.readPage(workspacePath, pagePath, {}, { checkSources: false }));
         }
         if (action === "search") {
           if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
@@ -2121,12 +2376,29 @@ export function createTaskboardServer(options = {}) {
           assertAllowedKeys(body, new Set(["workspacePath", "proposal"]));
           assertPlainObject(body.proposal);
           assertAllowedKeys(body.proposal, new Set(["id", "version", "changes"]));
+          const proposalId = stringField(body.proposal.id, "proposalId", { required: true, maxLength: 128 });
+          const storedProposal = database.getKnowledgeProposal(proposalId);
+          if (!storedProposal) {
+            throw new ApiError(404, "KNOWLEDGE_PROPOSAL_NOT_FOUND", `Knowledge proposal '${proposalId}' does not exist`);
+          }
+          if (storedProposal.status !== "ready") {
+            throw new ApiError(409, "INVALID_PROPOSAL_TRANSITION", "Only ready knowledge proposals can be published");
+          }
+          const expectedVersion = parseVersion(body.proposal.version);
           const receipt = await knowledge.publish(workspacePath, {
-            id: stringField(body.proposal.id, "proposalId", { required: true, maxLength: 128 }),
-            version: parseVersion(body.proposal.version),
+            id: proposalId,
+            version: expectedVersion,
+            sourceType: storedProposal.sourceType,
             changes: parseKnowledgeChanges(body.proposal.changes),
           });
-          return sendJson(response, 200, { receipt });
+          const proposal = database.updateKnowledgeProposal(
+            proposalId,
+            expectedVersion,
+            { status: "published" },
+            actorFromRequest(request),
+          );
+          events.emit("knowledge-proposal.updated", { projectId: proposal.projectId, proposal });
+          return sendJson(response, 200, { receipt, proposal });
         }
       }
 
@@ -2157,7 +2429,7 @@ export function createTaskboardServer(options = {}) {
         const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
         const connector = database.getDefaultConnector("claude");
         try {
-          claudeLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt, connector });
+          claudeLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt, connector, taskId });
         } catch (error) {
           throw new ApiError(500, "CLAUDE_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch Claude session");
         }
@@ -2233,7 +2505,7 @@ export function createTaskboardServer(options = {}) {
         const prompt = `Use the manage-taskboard skill to work on this task.\n\n${instruction}\n\n[taskboard-request:${requestId}]`;
         const connector = database.getDefaultConnector("omp");
         try {
-          ompLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt, connector });
+          ompLauncher.launchSession({ workspacePath: resolvedWorkspace, sessionId: requestId, prompt, connector, taskId });
         } catch (error) {
           throw new ApiError(500, "OMP_LAUNCH_FAILED", error instanceof Error ? error.message : "Failed to launch OMP session");
         }
@@ -2315,6 +2587,61 @@ export function createTaskboardServer(options = {}) {
           200,
           await discoverWorkflowCapabilities(resolved, workspacePath ?? PROJECT_ROOT),
         );
+      }
+
+      if (pathname === "/api/agents") {
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Agent routes do not accept query parameters");
+        }
+        if (request.method === "GET") {
+          return sendJson(response, 200, { agents: database.listAgentTemplates() });
+        }
+        if (request.method === "POST") {
+          const agent = database.createAgentTemplate(parseAgentTemplateFields(await readJson(request)));
+          events.emit("agent.changed", { agent });
+          return sendJson(response, 201, { agent });
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const agentRoute = pathname.match(/^\/api\/agents\/([^/]+)$/);
+      if (agentRoute) {
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Agent routes do not accept query parameters");
+        }
+        const agentId = decodeRouteSegment(agentRoute[1], "Agent id");
+        if (request.method === "PATCH") {
+          const input = parseAgentTemplateFields(await readJson(request), { partial: true });
+          const agent = database.updateAgentTemplate(agentId, input.version, input.changes);
+          events.emit("agent.changed", { agent });
+          return sendJson(response, 200, { agent });
+        }
+        if (request.method === "DELETE") {
+          const body = await readJson(request);
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["version"]));
+          const agent = database.deleteAgentTemplate(agentId, parseVersion(body.version));
+          events.emit("agent.changed", { agent, deleted: true });
+          return sendJson(response, 200, { agent });
+        }
+        return methodNotAllowed(response, ["PATCH", "DELETE"]);
+      }
+
+      if (pathname === "/api/agent-instruction") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Agent instruction route does not accept query parameters");
+        }
+        const body = await readJson(request);
+        assertPlainObject(body);
+        assertAllowedKeys(body, new Set(["taskId", "commentId", "workspacePath", "instruction"]));
+        const workspacePath = pathField(body.workspacePath, "workspacePath");
+        return sendJson(response, 200, await resolveAgentInstruction(database, {
+          taskId: stringField(body.taskId, "taskId", { required: true, maxLength: 128 }),
+          commentId: stringField(body.commentId ?? null, "commentId", { nullable: true, maxLength: 128 }),
+          workspacePath,
+          instruction: stringField(body.instruction, "instruction", { required: true, maxLength: 100_000 }),
+        }));
       }
 
       if (pathname === "/api/connectors") {
@@ -2485,23 +2812,30 @@ export function createTaskboardServer(options = {}) {
           input.content,
           "",
         ].join("\n");
+        const workspacePath = await resolveKnowledgeWorkspace(projectId, null);
         const proposal = database.createKnowledgeProposal({
           projectId,
-          title: input.title,
-          sourceType: "project_review",
-          sourceSnapshot: {
-            sourceRuntime: "hermes",
-            interactionId: input.interactionId,
-            sources: input.sources,
-          },
-          summary: input.summary,
-          changes: [{
-            targetPath: input.targetPath,
-            operation: "create",
-            baseDigest: null,
-            beforeContent: null,
-            afterContent,
-          }],
+          ...(await knowledge.prepareProposal(
+            workspacePath,
+            {
+              sourceType: "project_review",
+              sourceSnapshot: {
+                sourceRuntime: "hermes",
+                interactionId: input.interactionId,
+                sources: input.sources,
+              },
+              developmentContext: null,
+            },
+            {
+              title: input.title,
+              summary: input.summary,
+              changes: [{
+                targetPath: input.targetPath,
+                operation: "create",
+                afterContent,
+              }],
+            },
+          )),
           actor: { type: "agent", id: "hermes-agent", name: "Hermes Agent" },
         });
         events.emit("knowledge-proposal.created", { projectId, proposal });
@@ -2538,13 +2872,27 @@ export function createTaskboardServer(options = {}) {
         }
         if (request.method === "POST") {
           assertNoQuery(url.searchParams, "POST project knowledge proposal");
+          const parsed = parseKnowledgeProposalCreate(await readJson(
+            request,
+            KNOWLEDGE_BODY_LIMIT,
+            "Knowledge proposals cannot exceed 6 MiB",
+          ));
+          const workspacePath = await resolveKnowledgeWorkspace(projectId, null);
+          const prepared = parsed.status === "ready"
+            ? await knowledge.prepareProposal(workspacePath, {
+              sourceType: parsed.sourceType,
+              sourceSnapshot: parsed.sourceSnapshot,
+              developmentContext: parsed.developmentContext,
+            }, parsed)
+            : parsed;
           const proposal = database.createKnowledgeProposal({
             projectId,
-            ...parseKnowledgeProposalCreate(await readJson(
-              request,
-              KNOWLEDGE_BODY_LIMIT,
-              "Knowledge proposals cannot exceed 6 MiB",
-            )),
+            ...prepared,
+            id: parsed.id,
+            status: parsed.status,
+            title: parsed.title || prepared.title,
+            summary: parsed.summary || prepared.summary,
+            error: parsed.error,
             actor: actorFromRequest(request),
           });
           events.emit("knowledge-proposal.created", { projectId, proposal });
@@ -2564,7 +2912,7 @@ export function createTaskboardServer(options = {}) {
       const answerRoute = pathname.match(/^\/api\/knowledge-questions\/([^/]+)\/answers$/);
       if (answerRoute && request.method === "POST") { const body = await readJson(request); assertPlainObject(body); assertAllowedKeys(body, new Set(["content", "confidence"])); const confidence = stringField(body.confidence, "confidence", { required: true, maxLength: 16 }); if (!["high", "medium", "low", "unknown"].includes(confidence)) throw new ApiError(400, "INVALID_FIELD", "Unknown confidence"); const answerId = database.submitKnowledgeAnswer(decodeRouteSegment(answerRoute[1], "Question id"), { content: stringField(body.content, "content", { required: true, maxLength: 20000 }), confidence, actor: actorFromRequest(request) }); return sendJson(response, 201, { answerId }); }
       const reviewRoute = pathname.match(/^\/api\/knowledge-answers\/([^/]+)\/review$/);
-      if (reviewRoute && request.method === "POST") { const body = await readJson(request); assertPlainObject(body); assertAllowedKeys(body, new Set(["status", "reviewNote"])); const status = stringField(body.status, "status", { required: true, maxLength: 20 }); if (!["accepted", "needs_revision", "rejected"].includes(status)) throw new ApiError(400, "INVALID_FIELD", "Unknown answer review status"); const answerId = decodeRouteSegment(reviewRoute[1], "Answer id"); const actor = actorFromRequest(request); const context = database.knowledgeAnswerContext(answerId); if (!context) throw new ApiError(404, "KNOWLEDGE_ANSWER_NOT_FOUND", "Knowledge answer does not exist"); if (context.status !== "submitted") throw new ApiError(409, "INVALID_ANSWER_TRANSITION", "Only submitted answers can be reviewed"); let proposal = null; if (status === "accepted") { const targetPath = `docs/knowledge/questionnaire/${answerId}.md`; const afterContent = `---\nid: questionnaire.${answerId}\ntitle: ${context.knowledge_target}\nkind: business-fact\nupdated_at: ${new Date().toISOString()}\nsources:\n  - type: questionnaire_answer\n    ref: ${answerId}\n---\n# ${context.knowledge_target}\n\n## 问题\n\n${context.prompt}\n\n## 人工确认回答\n\n${context.content}\n`; proposal = database.createKnowledgeProposal({ projectId: context.project_id, title: `待确认：${context.knowledge_target}`, sourceType: "question", sourceSnapshot: { questionnaireAnswerId: answerId, question: context.prompt }, summary: "人工问卷回答已审核采纳；此新增知识页仍须经人工确认发布。", changes: [{ targetPath, operation: "create", baseDigest: null, beforeContent: null, afterContent }], actor }); } database.reviewKnowledgeAnswer(answerId, status, stringField(body.reviewNote ?? "", "reviewNote", { maxLength: 4000 }), actor, proposal?.id ?? null); return sendJson(response, 200, { proposal }); }
+      if (reviewRoute && request.method === "POST") { const body = await readJson(request); assertPlainObject(body); assertAllowedKeys(body, new Set(["status", "reviewNote"])); const status = stringField(body.status, "status", { required: true, maxLength: 20 }); if (!["accepted", "needs_revision", "rejected"].includes(status)) throw new ApiError(400, "INVALID_FIELD", "Unknown answer review status"); const answerId = decodeRouteSegment(reviewRoute[1], "Answer id"); const actor = actorFromRequest(request); const context = database.knowledgeAnswerContext(answerId); if (!context) throw new ApiError(404, "KNOWLEDGE_ANSWER_NOT_FOUND", "Knowledge answer does not exist"); if (context.status !== "submitted") throw new ApiError(409, "INVALID_ANSWER_TRANSITION", "Only submitted answers can be reviewed"); let proposal = null; if (status === "accepted") { const targetPath = `docs/knowledge/questionnaire/${answerId}.md`; const afterContent = `---\nid: questionnaire.${answerId}\ntitle: ${context.knowledge_target}\nkind: business-fact\nupdated_at: ${new Date().toISOString()}\nsources:\n  - type: questionnaire_answer\n    ref: ${answerId}\n---\n# ${context.knowledge_target}\n\n## 问题\n\n${context.prompt}\n\n## 人工确认回答\n\n${context.content}\n`; proposal = database.createKnowledgeProposal({ projectId: context.project_id, ...(await knowledge.prepareProposal((await resolveKnowledgeWorkspace(context.project_id, null)), { sourceType: "question", sourceSnapshot: { questionnaireAnswerId: answerId, question: context.prompt }, developmentContext: null }, { title: `待确认：${context.knowledge_target}`, summary: "人工问卷回答已审核采纳；此新增知识页仍须经人工确认发布。", changes: [{ targetPath, operation: "create", afterContent }] })), actor }); } database.reviewKnowledgeAnswer(answerId, status, stringField(body.reviewNote ?? "", "reviewNote", { maxLength: 4000 }), actor, proposal?.id ?? null); return sendJson(response, 200, { proposal }); }
 
       const knowledgeProposalRoute = pathname.match(/^\/api\/knowledge-proposals\/([^/]+)$/);
       if (knowledgeProposalRoute) {
@@ -2583,6 +2931,12 @@ export function createTaskboardServer(options = {}) {
             KNOWLEDGE_BODY_LIMIT,
             "Knowledge proposals cannot exceed 6 MiB",
           ));
+          if (parsed.changes.changes !== undefined) {
+            throw new ApiError(400, "INVALID_KNOWLEDGE_PATCH", "Knowledge proposal file changes cannot be patched; create a new proposal");
+          }
+          if (["ready", "published"].includes(parsed.changes.status)) {
+            throw new ApiError(409, "INVALID_PROPOSAL_TRANSITION", "Ready and published proposal states are controlled by proposal generation and publish");
+          }
           const proposal = database.updateKnowledgeProposal(
             proposalId,
             parsed.version,
@@ -2618,6 +2972,27 @@ export function createTaskboardServer(options = {}) {
             workflowVersion: workflow.version,
           });
           return sendJson(response, 200, { workflow });
+        }
+        return methodNotAllowed(response, ["GET", "PUT"]);
+      }
+
+      const projectAgentsRoute = pathname.match(/^\/api\/projects\/([^/]+)\/agents$/);
+      if (projectAgentsRoute) {
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Project Agent routes do not accept query parameters");
+        }
+        const projectId = decodeRouteSegment(projectAgentsRoute[1], "Project id");
+        validateProjectId(projectId);
+        if (request.method === "GET") {
+          return sendJson(response, 200, { agentIds: database.listProjectAgentIds(projectId) });
+        }
+        if (request.method === "PUT") {
+          const body = await readJson(request);
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["agentIds"]));
+          const agentIds = database.setProjectAgentIds(projectId, parseAgentIds(body.agentIds ?? []));
+          events.emit("project.agents.updated", { projectId, agentIds });
+          return sendJson(response, 200, { agentIds });
         }
         return methodNotAllowed(response, ["GET", "PUT"]);
       }
@@ -2736,6 +3111,7 @@ export function createTaskboardServer(options = {}) {
             relationType,
             relatedTaskId,
             threadId,
+            agentRuntimeFromRequest(request),
           );
           events.emit("task.relation.updated", result);
           return sendJson(response, 200, result);
@@ -2748,6 +3124,7 @@ export function createTaskboardServer(options = {}) {
             relationType,
             relatedTaskId,
             threadId,
+            agentRuntimeFromRequest(request),
           );
           events.emit("task.relation.updated", result);
           return sendJson(response, 200, result);
@@ -2773,9 +3150,11 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 200, { comments: database.listComments(taskId) });
         }
         if (request.method === "POST") {
+          const actor = actorFromRequest(request);
           const comment = database.createComment(taskId, {
             ...parseCommentCreate(await readJson(request)),
-            actor: actorFromRequest(request),
+            actor,
+            threadRuntime: agentRuntimeFromRequest(request),
           });
           const task = await getTaskWithResolvedRuntimes(taskId);
           events.emit("comment.created", { comment, task });
@@ -2800,14 +3179,20 @@ export function createTaskboardServer(options = {}) {
         }
         if (request.method === "PATCH") {
           const patch = parseCommentPatch(await readJson(request));
-          const comment = database.updateComment(id, patch.version, patch.body, patch.threadId);
+          const comment = database.updateComment(
+            id,
+            patch.version,
+            patch.body,
+            patch.threadId,
+            agentRuntimeFromRequest(request),
+          );
           const task = await getTaskWithResolvedRuntimes(comment.taskId);
           events.emit("comment.updated", { comment, task });
           return sendJson(response, 200, { comment });
         }
         if (request.method === "DELETE") {
           const { version, threadId } = parseArchive(await readJson(request));
-          const comment = database.deleteComment(id, version, threadId);
+          const comment = database.deleteComment(id, version, threadId, agentRuntimeFromRequest(request));
           for (const attachment of comment.attachments) {
             try {
               await unlink(path.join(resolved.attachmentsDirectory, attachment.id));
@@ -3023,7 +3408,14 @@ export function createTaskboardServer(options = {}) {
         }
         if (action === "move" && request.method === "POST") {
           const move = parseMove(await readJson(request));
-          const movedTask = database.moveTask(id, move.version, move.status, move.sortOrder, move.threadId);
+          const movedTask = database.moveTask(
+            id,
+            move.version,
+            move.status,
+            move.sortOrder,
+            move.threadId,
+            agentRuntimeFromRequest(request),
+          );
           const task = await getTaskWithResolvedRuntimes(movedTask.id);
           events.emit("task.moved", { task });
           return sendJson(response, 200, { task });
@@ -3035,20 +3427,21 @@ export function createTaskboardServer(options = {}) {
             transfer.version,
             transfer.projectId,
             transfer.threadId,
+            agentRuntimeFromRequest(request),
           );
           events.emit("task.transferred", result);
           return sendJson(response, 200, result);
         }
         if (action === "archive" && request.method === "POST") {
           const { version, threadId } = parseArchive(await readJson(request));
-          const archivedTask = database.archiveTask(id, version, threadId);
+          const archivedTask = database.archiveTask(id, version, threadId, agentRuntimeFromRequest(request));
           const task = await getTaskWithResolvedRuntimes(archivedTask.id);
           events.emit("task.archived", { task });
           return sendJson(response, 200, { task });
         }
         if (action === "restore" && request.method === "POST") {
           const { version, threadId } = parseArchive(await readJson(request));
-          const restoredTask = database.restoreTask(id, version, threadId);
+          const restoredTask = database.restoreTask(id, version, threadId, agentRuntimeFromRequest(request));
           const task = await getTaskWithResolvedRuntimes(restoredTask.id);
           events.emit("task.restored", { task });
           return sendJson(response, 200, { task });
@@ -3104,12 +3497,13 @@ export function createTaskboardServer(options = {}) {
       return server.address();
     },
     async close() {
+      events.close();
       const serverClosed = listening
         ? new Promise((resolve, reject) => {
             server.close((error) => error ? reject(error) : resolve());
+            server.closeAllConnections();
           })
         : Promise.resolve();
-      events.close();
       await serverClosed;
       listening = false;
       database.close();

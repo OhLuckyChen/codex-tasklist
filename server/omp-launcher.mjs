@@ -2,8 +2,13 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const RUNS_DIRNAME = "omp-runs";
+const DEFAULT_COMPLETION_HOOK = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../scripts/task-completion-omp-hook.mjs",
+);
 
 /**
  * Single-quote a string for safe interpolation into a POSIX shell command.
@@ -106,6 +111,7 @@ export function createOmpLauncher(options = {}) {
   if (!dataDirectory) throw new Error("createOmpLauncher requires dataDirectory");
   const runsDirectory = path.join(dataDirectory, RUNS_DIRNAME);
   const ompBinary = resolveOmpBinary(options.ompExecutable);
+  const completionHookPath = options.completionHookPath ?? DEFAULT_COMPLETION_HOOK;
   let supportedPlatform = process.platform === "darwin";
 
   function ensureRunsDirectory() {
@@ -131,6 +137,8 @@ export function createOmpLauncher(options = {}) {
     mkdirSync(sessionDir, { recursive: true });
     const binary = resolveRuntimeBinary(payload.connector, ompBinary);
     const modelFlag = payload.model ? ` --model=${shellSingleQuote(payload.model)}` : "";
+    const guard = writeCompletionGuardMetadata(sessionId, payload.taskId);
+    const hookFlag = guard.enabled ? ` --hook ${shellSingleQuote(completionHookPath)}` : "";
 
     const lines = [
       "#!/bin/zsh -l",
@@ -139,13 +147,27 @@ export function createOmpLauncher(options = {}) {
       "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\" 2>/dev/null",
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='omp'`,
+      ...(guard.enabled ? [`export TASKBOARD_GUARD_METADATA=${shellSingleQuote(guard.metadataPath)}`] : []),
       `cd -- ${shellSingleQuote(payload.workspacePath)}`,
-      `${shellSingleQuote(binary)} --auto-approve${modelFlag} --session-dir=${shellSingleQuote(sessionDir)} "$(cat ${shellSingleQuote(promptPath)})"`,
+      `${shellSingleQuote(binary)} --auto-approve${modelFlag}${hookFlag} --session-dir=${shellSingleQuote(sessionDir)} "$(cat ${shellSingleQuote(promptPath)})"`,
       'echo "\\n[Oh My Pi 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
     writeFileSync(scriptPath, lines.join("\n"), { encoding: "utf8", mode: 0o755 });
-    return { scriptPath, promptPath, sessionDir };
+    return { scriptPath, promptPath, sessionDir, ...guard };
+  }
+
+  function writeCompletionGuardMetadata(sessionId, taskId) {
+    const metadataPath = path.join(runsDirectory, `${sessionId}.taskboard.json`);
+    if (taskId) {
+      writeFileSync(metadataPath, JSON.stringify({
+        taskId,
+        threadId: sessionId,
+        runtime: "omp",
+        taskboardUrl: process.env.CODEX_TASKBOARD_URL || "http://127.0.0.1:47823",
+      }, null, 2), { encoding: "utf8" });
+    }
+    return { metadataPath, enabled: existsSync(metadataPath) };
   }
 
   /**
@@ -153,7 +175,7 @@ export function createOmpLauncher(options = {}) {
    * The session id is fixed via CODEX_THREAD_ID; OMP's own session state
    * is isolated into a per-session directory under the data runs folder.
    */
-  function launchSession({ workspacePath, sessionId, prompt, connector }) {
+  function launchSession({ workspacePath, sessionId, prompt, connector, taskId }) {
     assertSupported();
     if (!workspacePath || !path.isAbsolute(workspacePath)) {
       throw new Error("workspacePath must be an absolute path");
@@ -164,7 +186,7 @@ export function createOmpLauncher(options = {}) {
       updateOmpEnvFile(providerInfo.apiKeyEnvVar, connector.apiKey);
     }
     const model = ompModelArg(connector, providerInfo);
-    const { scriptPath } = writeSessionFiles(sessionId, { workspacePath, prompt, connector, model });
+    const { scriptPath } = writeSessionFiles(sessionId, { workspacePath, prompt, connector, model, taskId });
     const appleScript = `tell application "Terminal"
   activate
   do script ${appleScriptString(shellSingleQuote(scriptPath))}
@@ -207,6 +229,8 @@ end tell`;
     const model = ompModelArg(connector, providerInfo);
     const binary = resolveRuntimeBinary(connector, ompBinary);
     const modelFlag = model ? ` --model=${shellSingleQuote(model)}` : "";
+    const guard = writeCompletionGuardMetadata(sessionId);
+    const hookFlag = guard.enabled ? ` --hook ${shellSingleQuote(completionHookPath)}` : "";
     const lines = [
       "#!/bin/zsh -l",
       "# taskboard-managed Oh My Pi resume launcher",
@@ -214,8 +238,9 @@ end tell`;
       "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\" 2>/dev/null",
       `export CODEX_THREAD_ID=${shellSingleQuote(sessionId)}`,
       `export TASKBOARD_AGENT_RUNTIME='omp'`,
+      ...(guard.enabled ? [`export TASKBOARD_GUARD_METADATA=${shellSingleQuote(guard.metadataPath)}`] : []),
       `cd -- ${shellSingleQuote(workspacePath)}`,
-      `${shellSingleQuote(binary)} --auto-approve${modelFlag} --session-dir=${shellSingleQuote(sessionDir)} --continue${promptArg}`,
+      `${shellSingleQuote(binary)} --auto-approve${modelFlag}${hookFlag} --session-dir=${shellSingleQuote(sessionDir)} --continue${promptArg}`,
       'echo "\\n[Oh My Pi 会话已退出，可关闭此窗口或重新运行。]"',
       "",
     ];
@@ -321,7 +346,7 @@ end tell`;
    * Best-effort cleanup of stale runner artifacts. Non-fatal.
    */
   function pruneSessionFiles(sessionId) {
-    for (const file of [`${sessionId}.sh`, `${sessionId}.prompt`, `resume-${sessionId}.sh`, `resume-${sessionId}.prompt`]) {
+    for (const file of [`${sessionId}.sh`, `${sessionId}.prompt`, `${sessionId}.taskboard.json`, `resume-${sessionId}.sh`, `resume-${sessionId}.prompt`]) {
       const full = path.join(runsDirectory, file);
       try { rmSync(full, { force: true }); } catch { /* ignore */ }
     }

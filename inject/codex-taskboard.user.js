@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.6.8";
+  const VERSION = "0.6.9";
   const SOURCE_HASH = window.__CODEX_TASKBOARD_SOURCE_HASH__;
   const SENTINEL_KEY = "__codexTaskboardInjection__";
   const DEFAULT_TASKBOARD_URL = "http://127.0.0.1:47823/?host=codex";
@@ -14,6 +14,7 @@
   const STATUS_ID = "codex-taskboard-status";
   const STYLE_ID = "codex-taskboard-inject-style";
   const OWNED_ATTRIBUTE = "data-codex-taskboard-owned";
+  const DUPLICATE_ENTRY_ATTRIBUTE = "data-codex-taskboard-duplicate-entry-hidden";
   const HIDDEN_ATTRIBUTE = "data-codex-taskboard-native-hidden";
   const HOST_ATTRIBUTE = "data-codex-taskboard-page-host";
   const NATIVE_SELECTED_ATTRIBUTE = "data-codex-taskboard-native-selected";
@@ -22,18 +23,24 @@
   const REATTACH_DELAY_MS = 160;
   const FRAME_READY_TIMEOUT_MS = 12_000;
   const HOST_REQUEST_TIMEOUT_MS = 12_000;
+  const SERVICE_RESTART_TIMEOUT_MS = 16_000;
   const HOST_HEARTBEAT_MAX_AGE_MS = 8_000;
   const MACOS_TITLEBAR_SAFE_LEFT = 80;
   const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh";
   const THREAD_LINK_RECEIPT_STORAGE_KEY = "codex-taskboard.pendingThreadLinkReceipt.v1";
   const THREAD_LINK_REQUEST_STORAGE_KEY = "codex-taskboard.pendingThreadLinkRequest.v2";
+  const COMPLETION_GUARD_STORAGE_KEY = "codex-taskboard.completionGuard.v1";
+  const MANAGED_TASK_THREADS_STORAGE_KEY = "codex-taskboard.managedTaskThreads.v1";
   const THREAD_LINK_RECEIPT_TTL_MS = 24 * 60 * 60 * 1_000;
   const THREAD_LINK_BLOCKING_TIMEOUT_MS = 5 * 60 * 1_000;
   const THREAD_LINK_RECEIPT_RETRY_MS = 1_000;
   const THREAD_LINK_RESOLVE_RETRY_MS = 500;
+  const COMPLETION_GUARD_RETRY_MS = 750;
   const PLUGIN_LABELS = ["插件", "plugins"];
+  const TASKBOARD_ENTRY_LABELS = ["任务面板", "taskboard"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
+    "新聊天",
     "new task",
     "new chat",
     "拉取请求",
@@ -83,6 +90,10 @@
   let pendingThreadLinkReceipt = null;
   let pendingThreadLinkReceiptTimer = null;
   let lastNativeThreadId = "";
+  let completionGuard = null;
+  let managedTaskThreads = {};
+  let completionGuardTimer = null;
+  let completionGuardCheckInFlight = false;
   let active = false;
   let destroyed = false;
 
@@ -150,6 +161,9 @@
         || (request.commentId !== undefined && typeof request.commentId !== "string")
         || (request.action !== undefined && request.action !== "create" && request.action !== "follow-up")
         || (request.threadId !== undefined && !normalizeThreadId(request.threadId))
+        || typeof request.skillName !== "string"
+        || typeof request.skillDisplayName !== "string"
+        || typeof request.skillPath !== "string"
         || typeof request.marker !== "string"
         || request.marker.length < 8
         || request.marker.length > 200
@@ -177,6 +191,67 @@
     } else {
       window.localStorage.removeItem(THREAD_LINK_REQUEST_STORAGE_KEY);
     }
+  }
+
+  function readCompletionGuard() {
+    try {
+      const guard = JSON.parse(window.localStorage.getItem(COMPLETION_GUARD_STORAGE_KEY) || "null");
+      if (
+        !guard
+        || typeof guard !== "object"
+        || typeof guard.taskId !== "string"
+        || !normalizeThreadId(guard.threadId)
+        || typeof guard.skillName !== "string"
+        || typeof guard.skillDisplayName !== "string"
+        || typeof guard.skillPath !== "string"
+        || typeof guard.armed !== "boolean"
+        || !Number.isInteger(guard.correctionCount)
+      ) {
+        window.localStorage.removeItem(COMPLETION_GUARD_STORAGE_KEY);
+        return null;
+      }
+      return { ...guard, threadId: normalizeThreadId(guard.threadId) };
+    } catch (_) {
+      window.localStorage.removeItem(COMPLETION_GUARD_STORAGE_KEY);
+      return null;
+    }
+  }
+
+  function persistCompletionGuard(guard) {
+    completionGuard = guard;
+    if (guard) {
+      window.localStorage.setItem(COMPLETION_GUARD_STORAGE_KEY, JSON.stringify(guard));
+    } else {
+      window.localStorage.removeItem(COMPLETION_GUARD_STORAGE_KEY);
+    }
+  }
+
+  function readManagedTaskThreads() {
+    try {
+      const records = JSON.parse(window.localStorage.getItem(MANAGED_TASK_THREADS_STORAGE_KEY) || "{}");
+      if (!records || typeof records !== "object" || Array.isArray(records)) return {};
+      return Object.fromEntries(Object.entries(records).filter(([threadId, record]) => (
+        normalizeThreadId(threadId)
+        && record
+        && typeof record === "object"
+        && typeof record.taskId === "string"
+        && typeof record.skillName === "string"
+        && typeof record.skillDisplayName === "string"
+        && typeof record.skillPath === "string"
+      )));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function rememberManagedTaskThread(record) {
+    managedTaskThreads = {
+      ...managedTaskThreads,
+      [record.threadId]: record,
+    };
+    const entries = Object.entries(managedTaskThreads).slice(-100);
+    managedTaskThreads = Object.fromEntries(entries);
+    window.localStorage.setItem(MANAGED_TASK_THREADS_STORAGE_KEY, JSON.stringify(managedTaskThreads));
   }
 
   function releaseExpiredThreadTransaction() {
@@ -226,8 +301,84 @@
         || button.textContent
         || ""
       ).trim().toLowerCase();
-      return !button.disabled && (label === "停止" || label === "stop");
+      const surface = button.closest("[data-app-shell-main-content-layout]")?.parentElement;
+      return !button.disabled && (label === "停止" || label === "stop")
+        && isVisiblePageSurface(surface || button);
     });
+  }
+
+  function showCompletionGuardWarning(message) {
+    try {
+      if (window.Notification?.permission === "granted") {
+        new window.Notification("任务完成门禁", { body: message });
+        return;
+      }
+    } catch (_) {}
+    window.alert(`任务完成门禁：${message}`);
+  }
+
+  function scheduleCompletionGuardCheck(delay = COMPLETION_GUARD_RETRY_MS) {
+    if (!completionGuard?.armed || completionGuardTimer !== null || destroyed) return;
+    completionGuardTimer = window.setTimeout(() => {
+      completionGuardTimer = null;
+      void runCompletionGuardCheck();
+    }, delay);
+  }
+
+  async function sendCompletionGuardCorrection(guard, reason) {
+    await openThread(guard.threadId);
+    if (!await waitForActiveThread(guard.threadId, 8_000)) {
+      throw new Error("Codex 没有打开任务面板管理的会话");
+    }
+    await requestHostTaskComposerPrefill({
+      instruction: `${reason}\n\n[taskboard-completion-correction:${Date.now()}]`,
+      skillDisplayName: guard.skillDisplayName,
+      skillName: guard.skillName,
+      skillPath: guard.skillPath,
+      submit: true,
+    });
+  }
+
+  async function runCompletionGuardCheck() {
+    const guard = completionGuard;
+    if (!guard?.armed || completionGuardCheckInFlight || destroyed) return;
+    const currentThreadId = normalizeThreadId(readHostContext().threadId);
+    if (currentThreadId !== guard.threadId || nativeCodexTaskInProgress()) {
+      scheduleCompletionGuardCheck();
+      return;
+    }
+    completionGuardCheckInFlight = true;
+    try {
+      const result = await requestHost("task-completion-check", {
+        taskId: guard.taskId,
+        threadId: guard.threadId,
+      });
+      if (completionGuard !== guard) return;
+      if (result.action === "correct" && guard.correctionCount === 0) {
+        const corrected = { ...guard, correctionCount: 1 };
+        persistCompletionGuard(corrected);
+        await sendCompletionGuardCorrection(corrected, result.reason);
+        scheduleCompletionGuardCheck();
+        return;
+      }
+      if (result.action === "correct") {
+        persistCompletionGuard({ ...guard, armed: false });
+        showCompletionGuardWarning("任务仍未闭环，但已经自动纠偏过一次；本次停止以避免循环。");
+        return;
+      }
+      if (result.action === "inactive" && (guard.associationRetries || 0) < 5) {
+        persistCompletionGuard({ ...guard, associationRetries: (guard.associationRetries || 0) + 1 });
+        scheduleCompletionGuardCheck(1_000);
+        return;
+      }
+      persistCompletionGuard({ ...guard, armed: false });
+      if (result.action === "error") showCompletionGuardWarning(result.reason);
+    } catch (error) {
+      persistCompletionGuard({ ...guard, armed: false });
+      showCompletionGuardWarning(error instanceof Error ? error.message : "无法读取任务状态");
+    } finally {
+      completionGuardCheckInFlight = false;
+    }
   }
 
   function assertNativeComposerCanStartTask() {
@@ -238,7 +389,10 @@
 
   pendingThreadLinkReceipt = readPendingThreadLinkReceipt();
   pendingTaskThreadLink = readPendingTaskThreadLink();
+  completionGuard = readCompletionGuard();
+  managedTaskThreads = readManagedTaskThreads();
   releaseExpiredThreadTransaction();
+  scheduleCompletionGuardCheck();
 
   function resolveTaskboardUrl() {
     const configured = typeof window.__CODEX_TASKBOARD_URL__ === "string"
@@ -272,6 +426,9 @@
     style.id = STYLE_ID;
     style.setAttribute(OWNED_ATTRIBUTE, "true");
     style.textContent = `
+      #${ENTRY_ID} {
+        flex: none;
+      }
       #${ENTRY_ID}[aria-current="page"] {
         background: var(--color-token-list-hover-background, color-mix(in srgb, currentColor 8%, transparent));
         color: var(--color-token-foreground, inherit);
@@ -294,6 +451,9 @@
       }
       [${NATIVE_SELECTED_ATTRIBUTE}="true"] [class*="text-token-list-active-selection"] {
         color: var(--color-token-foreground, inherit) !important;
+      }
+      [${DUPLICATE_ENTRY_ATTRIBUTE}="true"] {
+        display: none !important;
       }
       #${PAGE_ID} {
         position: absolute;
@@ -374,24 +534,63 @@
     return labels.includes(text);
   }
 
-  function findReferenceButton() {
-    const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
-    if (!scroll) return null;
-    const buttons = Array.from(scroll.querySelectorAll("button"));
-    const plugin = buttons.find((button) => buttonMatches(button, PLUGIN_LABELS));
-    if (plugin && plugin.parentElement) {
-      const siblings = Array.from(plugin.parentElement.children).filter((child) => child.tagName === "BUTTON");
-      if (siblings.length >= 3) return plugin;
-    }
+  function topNavigationButton(button, scroll, sectionTop) {
+    if (!button || !scroll?.contains(button)) return false;
+    if (button.closest("[data-app-action-sidebar-section]")) return false;
+    const rect = button.getBoundingClientRect();
+    return !Number.isFinite(sectionTop) || rect.top < sectionTop;
+  }
 
+  function nativeTaskboardEntries() {
+    const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
+    if (!scroll) return [];
     const firstSection = scroll.querySelector("[data-app-action-sidebar-section]");
     const sectionTop = firstSection?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY;
-    const groups = Array.from(scroll.querySelectorAll("div")).filter((element) => {
-      const directButtons = Array.from(element.children).filter((child) => child.tagName === "BUTTON");
-      return directButtons.length >= 3 && element.getBoundingClientRect().top < sectionTop;
+    return Array.from(scroll.querySelectorAll("button")).filter((button) => (
+      button !== entry
+      && button.getAttribute(OWNED_ATTRIBUTE) !== "true"
+      && topNavigationButton(button, scroll, sectionTop)
+      && buttonMatches(button, TASKBOARD_ENTRY_LABELS)
+    ));
+  }
+
+  function hasNativeTaskboardEntry() {
+    return nativeTaskboardEntries().length > 0;
+  }
+
+  function hideDuplicateNativeTaskboardEntries() {
+    nativeTaskboardEntries().forEach((node) => {
+      node.setAttribute(DUPLICATE_ENTRY_ATTRIBUTE, "true");
+      node.setAttribute("aria-hidden", "true");
+      node.setAttribute("tabindex", "-1");
     });
-    const group = groups.sort((left, right) => right.children.length - left.children.length)[0];
-    return Array.from(group?.children || []).filter((child) => child.tagName === "BUTTON").at(-1) || null;
+  }
+
+  function restoreDuplicateNativeTaskboardState() {
+    document.querySelectorAll(`[${DUPLICATE_ENTRY_ATTRIBUTE}="true"]`).forEach((node) => {
+      node.removeAttribute(DUPLICATE_ENTRY_ATTRIBUTE);
+      if (node.getAttribute("aria-hidden") === "true") node.removeAttribute("aria-hidden");
+      if (node.getAttribute("tabindex") === "-1") node.removeAttribute("tabindex");
+    });
+  }
+
+  function findReferenceButton() {
+    return document.querySelector('button[data-sidebar-destination="builtin:home"]');
+  }
+
+  function findEntryAnchor(reference) {
+    const navigationRow = reference?.closest(".sidebar-item");
+    const parentRow = navigationRow?.parentElement?.closest(".sidebar-item");
+    if (parentRow) return parentRow;
+    const referenceParent = reference?.parentElement;
+    if (
+      referenceParent?.parentElement
+      && referenceParent.children.length === 1
+      && referenceParent.firstElementChild === reference
+    ) {
+      return referenceParent;
+    }
+    return reference;
   }
 
   function replaceEntryIcon(button) {
@@ -418,11 +617,15 @@
     button.removeAttribute("aria-controls");
     button.removeAttribute("aria-describedby");
     button.removeAttribute("data-state");
+    button.removeAttribute("data-sidebar-destination");
+    button.removeAttribute("data-selected");
+    button.removeAttribute("aria-current");
     button.setAttribute("aria-label", "打开任务面板");
     button.setAttribute("title", "任务面板");
     button.setAttribute(OWNED_ATTRIBUTE, "true");
     button.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
-    const label = button.querySelector(".text-fade-truncate")
+    const label = button.querySelector(".sr-only")
+      || button.querySelector(".text-fade-truncate")
       || Array.from(button.querySelectorAll("span")).find((node) => buttonMatches(node, PLUGIN_LABELS));
     if (label) label.textContent = "任务面板";
     else button.textContent = "任务面板";
@@ -447,30 +650,43 @@
   function ensureEntry() {
     if (destroyed || !document.body) return;
     installStyles();
+    hideDuplicateNativeTaskboardEntries();
     const reference = findReferenceButton();
-    if (!reference?.parentElement) return;
+    const anchor = findEntryAnchor(reference);
+    if (!reference || !anchor?.parentElement) return;
     if (!entry) entry = createEntry(reference);
-    if (entry.parentElement !== reference.parentElement || entry.previousElementSibling !== reference) {
-      reference.after(entry);
+    if (entry.parentElement !== anchor.parentElement || entry.previousElementSibling !== anchor) {
+      anchor.after(entry);
     }
     syncEntryState();
   }
 
-  function findPageHost() {
-    const direct = document.querySelector(".app-shell-main-content-frame");
-    if (direct?.closest?.("[data-app-shell-main-content-layout]")) return direct;
+  function isVisiblePageSurface(element) {
+    if (!element?.isConnected) return false;
+    const rect = element.getBoundingClientRect();
+    const visibility = window.getComputedStyle(element).visibility;
+    return rect.width > 0 && rect.height > 0
+      && visibility !== "hidden" && visibility !== "collapse";
+  }
 
-    const viewport = document.querySelector("[data-app-shell-main-content-layout]");
-    if (!viewport) return null;
-    const viewportRect = viewport.getBoundingClientRect();
-    const headerBottom = document.querySelector("main > header")?.getBoundingClientRect().bottom
-      ?? viewportRect.top;
-    return Array.from(viewport.children).find((candidate) => {
-      const rect = candidate.getBoundingClientRect();
-      return rect.width >= viewportRect.width * 0.8
-        && rect.height >= viewportRect.height * 0.7
-        && rect.top >= headerBottom - 1;
-    }) || null;
+  function findPageHost() {
+    // Codex keeps inactive workspaces mounted; the first match may be hidden.
+    for (const viewport of document.querySelectorAll("[data-app-shell-main-content-layout]")) {
+      if (!isVisiblePageSurface(viewport)) continue;
+      const direct = viewport.querySelector(".app-shell-main-content-frame");
+      if (isVisiblePageSurface(direct)) return direct;
+
+      const viewportRect = viewport.getBoundingClientRect();
+      const host = Array.from(viewport.children).find((candidate) => {
+        if (!isVisiblePageSurface(candidate)) return false;
+        const rect = candidate.getBoundingClientRect();
+        return rect.width >= viewportRect.width * 0.8
+          && rect.height >= viewportRect.height * 0.7
+          && rect.top >= viewportRect.top - 1;
+      });
+      if (host) return host;
+    }
+    return null;
   }
 
   function findPageMount() {
@@ -789,6 +1005,24 @@
           threadId,
           createdAt: Date.now(),
         });
+        if (request.action === "create") {
+          const managedRecord = {
+            taskId: request.taskId,
+            identifier: request.identifier || undefined,
+            threadId,
+            skillName: request.skillName,
+            skillDisplayName: request.skillDisplayName,
+            skillPath: request.skillPath,
+          };
+          rememberManagedTaskThread(managedRecord);
+          persistCompletionGuard({
+            ...managedRecord,
+            armed: true,
+            correctionCount: 0,
+            associationRetries: 0,
+          });
+          scheduleCompletionGuardCheck(1_500);
+        }
         persistPendingTaskThreadLink(null);
         if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
         pendingThreadCheckTimer = null;
@@ -899,6 +1133,17 @@
       .find((row) => normalizedLabel(row.getAttribute("data-app-action-sidebar-project-label")) === expected) || null;
   }
 
+  function projectLabelCandidates(project) {
+    return [
+      project?.name,
+      project?.codexProjectName,
+      project?.workspaceLabel,
+      project?.projectName,
+    ]
+      .filter((label) => typeof label === "string" && label.trim())
+      .map(normalizedLabel);
+  }
+
   async function ensureProjectRows() {
     let section = findProjectsSection();
     const deadline = Date.now() + 1_200;
@@ -948,7 +1193,8 @@
     const requestedProjectId = typeof payload?.codexProjectId === "string"
       ? payload.codexProjectId.trim()
       : "";
-    return projectRowByLabel(payload?.workspaceLabel)
+    return projectRowByLabel(payload?.codexProjectName)
+      || projectRowByLabel(payload?.workspaceLabel)
       || projectRowById(requestedProjectId)
       || projectRowByLabel(payload?.projectName)
       || null;
@@ -975,8 +1221,9 @@
     }
     if (!picker) throw new Error("Codex 新会话没有项目选择器");
 
+    const labels = projectLabelCandidates(project);
     const currentLabel = normalizedLabel(picker.textContent || picker.getAttribute("aria-label"));
-    if (currentLabel.includes(normalizedLabel(project.name))) return;
+    if (labels.some((label) => currentLabel.includes(label))) return;
     picker.click();
 
     const optionDeadline = Date.now() + 8_000;
@@ -986,12 +1233,12 @@
         candidate.getClientRects().length > 0
         && (
           candidate.getAttribute("data-value") === project.id
-          || normalizedLabel(candidate.textContent) === normalizedLabel(project.name)
+          || labels.includes(normalizedLabel(candidate.textContent))
         )
       )) || null;
       if (!option) await new Promise((resolve) => window.setTimeout(resolve, 80));
     }
-    if (!option) throw new Error(`Codex 项目选择器中没有“${project.name}”`);
+    if (!option) throw new Error(`Codex 项目选择器中没有“${project.name}”（候选：${labels.join(" / ")}）`);
     option.click();
 
     const selectionDeadline = Date.now() + 5_000;
@@ -1001,7 +1248,7 @@
         && button.getAttribute("data-composer-navigation-target") === "workspace-project"
       ));
       const label = normalizedLabel(selected?.textContent || selected?.getAttribute("aria-label"));
-      if (label.includes(normalizedLabel(project.name))) return;
+      if (labels.some((candidate) => label.includes(candidate))) return;
       await new Promise((resolve) => window.setTimeout(resolve, 80));
     }
     throw new Error(`Codex 没有确认新会话的项目“${project.name}”`);
@@ -1009,10 +1256,13 @@
 
   async function activateProjectForThread(payload, workspacePath, bridge) {
     await ensureProjectRows();
-    if (workspacePath) {
+    const projectId = typeof payload?.codexProjectId === "string"
+      ? payload.codexProjectId.trim()
+      : "";
+    if (projectId) {
       await bridge.sendMessageFromView({
         type: "electron-set-active-workspace-root",
-        root: workspacePath,
+        projectId,
       });
     }
 
@@ -1033,7 +1283,17 @@
       if (!requestedProjectId || !projectName) {
         throw new Error("Codex 未找到任务所属项目，已停止创建会话");
       }
-      return { id: requestedProjectId, name: projectName, selectInComposer: true };
+      const codexProjectName = typeof payload?.codexProjectName === "string"
+        ? payload.codexProjectName.trim()
+        : "";
+      return {
+        id: requestedProjectId,
+        name: codexProjectName || projectName,
+        codexProjectName,
+        projectName,
+        workspaceLabel: payload?.workspaceLabel,
+        selectInComposer: true,
+      };
     }
 
     if (row.getAttribute("data-app-action-sidebar-project-collapsed") === "true") {
@@ -1069,7 +1329,7 @@
       const beforeIds = new Set(readCodexProjects().map((project) => project.id));
       const beforeActiveProjectId = projectFromRow(activeProjectRow())?.id || "";
       await bridge.sendMessageFromView({
-        type: "electron-set-active-workspace-root",
+        type: "electron-add-new-workspace-root-option",
         root: workspacePath,
       });
 
@@ -1170,6 +1430,9 @@
       identifier,
       ...(commentId ? { commentId } : {}),
       action: "create",
+      skillName,
+      skillDisplayName,
+      skillPath,
       marker,
       startedAt,
     });
@@ -1179,21 +1442,15 @@
         throw new Error("当前 Codex 版本没有提供原生对话导航能力");
       }
       const activatedProject = await activateProjectForThread(payload, workspacePath, bridge);
-      assertNativeComposerCanStartTask();
-
       closeTaskboard(false);
-      await dispatchHostMessage({
-        type: "navigate-to-route",
-        path: "/",
-        state: {
-          focusComposerNonce: Date.now(),
-        },
-      });
-      if (activatedProject.selectInComposer) {
-        await selectComposerProject(activatedProject);
-      } else if (!await waitForActiveNativeProject(activatedProject.id)) {
-        throw new Error(`Codex 离开了项目“${activatedProject.name}”，已停止创建会话`);
-      }
+      const newChatButton = Array.from(document.querySelectorAll("aside nav[role='navigation'] button"))
+        .find((button) => isVisiblePageSurface(button)
+          && ["新聊天", "新对话", "新建任务", "new task", "new chat"]
+            .includes(normalizedLabel(button.textContent || button.getAttribute("aria-label"))));
+      if (!newChatButton) throw new Error("Codex 没有找到新聊天入口");
+      newChatButton.click();
+      await selectComposerProject(activatedProject);
+      assertNativeComposerCanStartTask();
       if (usesRepositoryKnowledgeSkill) {
         await requestHost("prefill-plain-composer", {
           instruction: composerInstruction,
@@ -1211,6 +1468,7 @@
       void resolvePendingTaskThreadLink();
       postToFrame({ type: "taskboard:thread-prepared", payload: { requestId, taskId } });
     } catch (error) {
+      console.error("Taskboard 新建 Codex 会话失败：", error instanceof Error ? error.message : String(error));
       if (pendingTaskThreadLink?.requestId === requestId) persistPendingTaskThreadLink(null);
       if (pendingThreadCheckTimer !== null) window.clearTimeout(pendingThreadCheckTimer);
       pendingThreadCheckTimer = null;
@@ -1339,6 +1597,7 @@
   async function followUpThreadForTask(payload) {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId.trim() : "";
     const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
+    const commentId = typeof payload?.commentId === "string" ? payload.commentId.trim() : "";
     const threadId = normalizeThreadId(payload?.threadId);
     const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
     const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
@@ -1377,8 +1636,12 @@
       requestId,
       taskId,
       identifier,
+      ...(commentId ? { commentId } : {}),
       action: "follow-up",
       threadId,
+      skillName,
+      skillDisplayName,
+      skillPath,
       marker,
       startedAt,
     });
@@ -1394,11 +1657,25 @@
         skillPath,
         submit: true,
       });
+      const managedRecord = managedTaskThreads[threadId];
+      if (managedRecord?.taskId === taskId) {
+        persistCompletionGuard({
+          ...managedRecord,
+          skillName,
+          skillDisplayName,
+          skillPath,
+          armed: true,
+          correctionCount: 0,
+          associationRetries: 0,
+        });
+        scheduleCompletionGuardCheck();
+      }
       postToFrame({ type: "taskboard:thread-prepared", payload: { requestId, taskId } });
       persistPendingThreadLinkReceipt({
         requestId,
         taskId,
         action: "follow-up",
+        ...(commentId ? { commentId } : {}),
         threadId,
         createdAt: Date.now(),
       });
@@ -1531,6 +1808,14 @@
       expandNativeSidebar();
       return;
     }
+    if (message.type === "taskboard:restart-service") {
+      openTaskboard({ restartService: true });
+      return;
+    }
+    if (message.type === "taskboard:recover-service") {
+      openTaskboard({ recoverService: true });
+      return;
+    }
     if (message.type === "taskboard:automation-request") {
       void handleAutomationRequest(message.payload);
       return;
@@ -1653,7 +1938,7 @@
     const retry = document.createElement("button");
     retry.type = "button";
     retry.textContent = "重新启动";
-    retry.addEventListener("click", openTaskboard, { once: true });
+    retry.addEventListener("click", () => openTaskboard({ restartService: true }), { once: true });
     content.append(text, retry);
     status.replaceChildren(content);
     status.hidden = false;
@@ -1666,6 +1951,16 @@
       reject(error);
     });
     frameReadyWaiters.clear();
+  }
+
+  function removeTaskboardFrame() {
+    cancelFrameReadyWaiters(new Error("任务面板正在重新加载"));
+    frame?.remove();
+    frame = null;
+    frameReady = false;
+    if (dragRegion) dragRegion.hidden = true;
+    if (noDragLeft) noDragLeft.hidden = true;
+    if (noDragRight) noDragRight.hidden = true;
   }
 
   function waitForFrameReady() {
@@ -1684,13 +1979,7 @@
   }
 
   function loadTaskboardFrame(cacheBust = false) {
-    cancelFrameReadyWaiters(new Error("任务面板正在重新加载"));
-    frame?.remove();
-    frame = null;
-    frameReady = false;
-    if (dragRegion) dragRegion.hidden = true;
-    if (noDragLeft) noDragLeft.hidden = true;
-    if (noDragRight) noDragRight.hidden = true;
+    removeTaskboardFrame();
 
     const taskboardUrl = resolveTaskboardUrl();
     if (cacheBust) {
@@ -1766,7 +2055,7 @@
       const timeout = window.setTimeout(() => {
         hostRequests.delete(id);
         reject(new Error("任务面板启动器没有响应"));
-      }, HOST_REQUEST_TIMEOUT_MS);
+      }, options.timeoutMs ?? HOST_REQUEST_TIMEOUT_MS);
       hostRequests.set(id, { resolve, reject, timeout });
       try {
         binding(JSON.stringify({ ...payload, id, action }));
@@ -1783,6 +2072,16 @@
       return Promise.resolve({ managed: false, restarted: false });
     }
     return requestHost("ensure", {}, { requireLiveHeartbeat: false });
+  }
+
+  function requestHostRestartService(taskboardUrl) {
+    if (taskboardUrl.origin !== managedTaskboardOrigin() || !hasHostBindingFunction()) {
+      return Promise.resolve({ managed: false, restarted: false });
+    }
+    return requestHost("restart-service", {}, {
+      requireLiveHeartbeat: false,
+      timeoutMs: SERVICE_RESTART_TIMEOUT_MS,
+    });
   }
 
   function requestHostTaskComposerPrefill({
@@ -1824,8 +2123,12 @@
     else pending.reject(new Error(response.error || "任务面板服务启动失败"));
   }
 
-  async function prepareTaskboard(generation) {
+  async function prepareTaskboard(generation, options = {}) {
     const taskboardUrl = resolveTaskboardUrl();
+    if (options.restartService || options.recoverService) {
+      showLoading();
+      removeTaskboardFrame();
+    }
     const canReuseFrame = Boolean(
       frameReady
       && frame?.isConnected
@@ -1836,12 +2139,14 @@
 
     try {
       const [result, context] = await Promise.all([
-        requestHostEnsure(taskboardUrl),
+        options.restartService
+          ? requestHostRestartService(taskboardUrl)
+          : requestHostEnsure(taskboardUrl),
         captureHostContext(),
       ]);
       if (!active || generation !== openGeneration) return;
       hostContextSnapshot = context;
-      if (!frameReady || result.restarted || !frameMatchesTaskboardUrl(taskboardUrl)) {
+      if (!frameReady || result.restarted || options.recoverService || !frameMatchesTaskboardUrl(taskboardUrl)) {
         showLoading();
         loadTaskboardFrame();
         await waitForFrameReady();
@@ -1863,6 +2168,7 @@
       .forEach((node) => node.removeAttribute(HIDDEN_ATTRIBUTE));
     document.querySelectorAll(`[${HOST_ATTRIBUTE}="true"]`)
       .forEach((node) => node.removeAttribute(HOST_ATTRIBUTE));
+    document.documentElement.removeAttribute("data-codex-taskboard-open");
   }
 
   function mountActivePage() {
@@ -1870,6 +2176,7 @@
     if (!page) page = createPage();
     const mount = findPageMount();
     const existingSurface = page.parentElement?.closest?.("main")
+      && isVisiblePageSurface(page.parentElement)
       ? page.parentElement
       : null;
     const surface = mount?.surface || existingSurface;
@@ -1898,14 +2205,13 @@
     if (page) page.hidden = true;
     restoreNativeContent();
     restoreNativeSelection();
-    document.documentElement.removeAttribute("data-codex-taskboard-open");
     syncEntryState();
     if (restoreFocus) lastFocusedElement?.focus?.();
     lastFocusedElement = null;
     hostContextSnapshot = null;
   }
 
-  function openTaskboard() {
+  function openTaskboard(options = {}) {
     if (destroyed) return;
     if (!active) {
       lastFocusedElement = document.activeElement;
@@ -1916,12 +2222,13 @@
     ensureEntry();
     mountActivePage();
     syncEntryState();
-    void prepareTaskboard(generation);
+    void prepareTaskboard(generation, options);
   }
 
   function isNativePageNavigation(target) {
     const clickable = target?.closest?.("button,a,[role='button'],[data-app-action-sidebar-thread-id]");
     if (!clickable || clickable === entry || clickable.closest(`#${ENTRY_ID}`)) return false;
+    if (clickable.hasAttribute("data-sidebar-destination")) return true;
     if (!clickable.closest("aside nav[role='navigation']")) return false;
     if (clickable.hasAttribute("data-app-action-sidebar-section-toggle")) return false;
     if (buttonMatches(clickable, NATIVE_PAGE_LABELS)) return true;
@@ -1959,6 +2266,7 @@
   function mount() {
     document.removeEventListener("DOMContentLoaded", mount);
     if (destroyed || observer || !document.documentElement) return;
+    restoreNativeContent();
     ensureEntry();
     observer = new MutationObserver(scheduleRefresh);
     observer.observe(document.documentElement, {
@@ -1996,6 +2304,8 @@
     pendingThreadCheckTimer = null;
     if (pendingThreadLinkReceiptTimer !== null) window.clearTimeout(pendingThreadLinkReceiptTimer);
     pendingThreadLinkReceiptTimer = null;
+    if (completionGuardTimer !== null) window.clearTimeout(completionGuardTimer);
+    completionGuardTimer = null;
     document.removeEventListener("DOMContentLoaded", mount);
     document.removeEventListener("click", onDocumentClick, true);
     window.removeEventListener("message", onFrameMessage);
@@ -2003,6 +2313,7 @@
     window.removeEventListener("hashchange", onNativeRouteChange);
     window.removeEventListener("resize", scheduleRefresh);
     closeTaskboard(false);
+    restoreDuplicateNativeTaskboardState();
     document.querySelectorAll(`[${OWNED_ATTRIBUTE}="true"]`).forEach((node) => node.remove());
     entry = null;
     page = null;

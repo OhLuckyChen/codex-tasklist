@@ -24,6 +24,24 @@ export interface ActorIdentity {
   avatarUrl: string | null;
 }
 
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  templateType: "inline" | "file";
+  templateValue: string;
+  skillPaths: string[];
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentSkillDirectory {
+  id: string;
+  label: string;
+  directoryPath: string;
+  path: string;
+}
+
 export type DevelopmentContext =
   | { type: "branch"; branch: string }
   | { type: "worktree"; path: string; branch: string | null };
@@ -177,6 +195,28 @@ export interface KnowledgeProposal {
   changes: KnowledgeProposalChange[];
 }
 
+export interface ProjectInteractionSource {
+  type: "knowledge" | "source" | "issue" | string;
+  ref: string;
+  title?: string | null;
+  url?: string | null;
+  excerpt?: string | null;
+}
+
+export interface ProjectInteraction {
+  id: string;
+  projectId: string;
+  workspacePath: string;
+  sourceRuntime: string;
+  channel: string;
+  conversationId: string;
+  question: string;
+  answer: string;
+  label: "咨询" | "缺陷";
+  sources: ProjectInteractionSource[];
+  createdAt: string;
+}
+
 export interface GeneratedKnowledgeProposal {
   title: string;
   summary: string;
@@ -294,6 +334,7 @@ export interface Task {
   creatorAvatarUrl: string | null;
   assignee: ActorIdentity;
   workflowId: string | null;
+  agentId: string | null;
   developmentContext: DevelopmentContext | null;
   dueDate: string | null;
   recurrence: Recurrence | null;
@@ -315,6 +356,7 @@ export interface Comment {
   authorName: string;
   authorAvatarUrl: string | null;
   threadId: string | null;
+  agentId: string | null;
   attachments: Attachment[];
   version: number;
   createdAt: string;
@@ -357,6 +399,7 @@ export interface TaskDraft {
   labels: string[];
   assigneeTarget?: AssigneeTarget;
   workflowId: string | null;
+  agentId: string | null;
   developmentContext: DevelopmentContext | null;
   dueDate: string | null;
   startDate: string | null;

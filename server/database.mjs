@@ -46,6 +46,7 @@ function taskFromRow(row) {
       avatarUrl: row.assignee_avatar_url,
     },
     workflowId: row.workflow_id,
+    agentId: row.agent_id ?? null,
     developmentContext,
     dueDate: row.due_date,
     recurrence: row.recurrence_interval && row.recurrence_unit
@@ -121,11 +122,25 @@ function commentFromRow(row) {
     taskId: row.task_id,
     body: row.body,
     threadId: row.thread_id,
+    agentId: row.agent_id ?? null,
     authorType: row.author_type,
     authorId: row.author_id,
     authorName: row.author_name,
     authorAvatarUrl: row.author_avatar_url,
     attachments: [],
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function agentTemplateFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    templateType: row.template_type,
+    templateValue: row.template_value,
+    skillPaths: JSON.parse(row.skill_paths ?? "[]"),
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -598,6 +613,39 @@ export class TaskboardDatabase {
         ON project_interactions(project_id, label, created_at DESC, id DESC);
     `);
 
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS agent_templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        template_type TEXT NOT NULL CHECK (template_type IN ('inline', 'file')),
+        template_value TEXT NOT NULL,
+        skill_paths TEXT NOT NULL DEFAULT '[]',
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS project_agents (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES agent_templates(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, agent_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS project_agents_agent
+        ON project_agents(agent_id, project_id);
+    `);
+
+    const agentTemplateColumns = this.database.prepare("PRAGMA table_info(agent_templates)").all();
+    if (!agentTemplateColumns.some((column) => column.name === "skill_paths")) {
+      this.database.exec("ALTER TABLE agent_templates ADD COLUMN skill_paths TEXT NOT NULL DEFAULT '[]'");
+    }
+
+    const agentTaskColumns = this.database.prepare("PRAGMA table_info(tasks)").all();
+    if (!agentTaskColumns.some((column) => column.name === "agent_id")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN agent_id TEXT");
+    }
+
     const commentColumns = this.database.prepare("PRAGMA table_info(comments)").all();
     if (!commentColumns.some((column) => column.name === "thread_id")) {
       this.database.exec("ALTER TABLE comments ADD COLUMN thread_id TEXT");
@@ -607,6 +655,9 @@ export class TaskboardDatabase {
     }
     if (!commentColumns.some((column) => column.name === "author_avatar_url")) {
       this.database.exec("ALTER TABLE comments ADD COLUMN author_avatar_url TEXT");
+    }
+    if (!commentColumns.some((column) => column.name === "agent_id")) {
+      this.database.exec("ALTER TABLE comments ADD COLUMN agent_id TEXT");
     }
     this.database.exec(`
       UPDATE comments
@@ -1073,6 +1124,170 @@ export class TaskboardDatabase {
       throw error;
     }
     return this.getWorkflowWorkspace(projectId);
+  }
+
+  listAgentTemplates() {
+    return this.database.prepare(`
+      SELECT * FROM agent_templates
+      ORDER BY name COLLATE NOCASE, created_at, id
+    `).all().map(agentTemplateFromRow);
+  }
+
+  getAgentTemplate(id) {
+    const row = this.database.prepare("SELECT * FROM agent_templates WHERE id = ?").get(id);
+    return row ? agentTemplateFromRow(row) : null;
+  }
+
+  createAgentTemplate(input) {
+    const id = randomUUID();
+    const timestamp = now();
+    this.database.prepare(`
+      INSERT INTO agent_templates (
+        id, name, template_type, template_value, skill_paths,
+        version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      id,
+      input.name,
+      input.templateType,
+      input.templateValue,
+      JSON.stringify(input.skillPaths),
+      timestamp,
+      timestamp,
+    );
+    return this.getAgentTemplate(id);
+  }
+
+  updateAgentTemplate(id, version, changes) {
+    const current = this.#requireAgentTemplate(id);
+    if (current.version !== version) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Agent template was changed by another client", {
+        expectedVersion: version,
+        actualVersion: current.version,
+      });
+    }
+    const next = { ...current, ...changes };
+    const result = this.database.prepare(`
+      UPDATE agent_templates
+      SET name = ?, template_type = ?, template_value = ?, skill_paths = ?,
+          version = version + 1, updated_at = ?
+      WHERE id = ? AND version = ?
+    `).run(
+      next.name,
+      next.templateType,
+      next.templateValue,
+      JSON.stringify(next.skillPaths),
+      now(),
+      id,
+      version,
+    );
+    if (result.changes !== 1) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Agent template was changed by another client");
+    }
+    return this.getAgentTemplate(id);
+  }
+
+  deleteAgentTemplate(id, version) {
+    const current = this.#requireAgentTemplate(id);
+    if (current.version !== version) {
+      throw new ApiError(409, "VERSION_CONFLICT", "Agent template was changed by another client", {
+        expectedVersion: version,
+        actualVersion: current.version,
+      });
+    }
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        UPDATE tasks
+        SET agent_id = NULL, version = version + 1, updated_at = ?
+        WHERE agent_id = ?
+      `).run(timestamp, id);
+      this.database.prepare(`
+        UPDATE comments
+        SET agent_id = NULL, version = version + 1, updated_at = ?
+        WHERE agent_id = ?
+      `).run(timestamp, id);
+      this.database.prepare("DELETE FROM project_agents WHERE agent_id = ?").run(id);
+      const result = this.database.prepare(
+        "DELETE FROM agent_templates WHERE id = ? AND version = ?",
+      ).run(id, version);
+      if (result.changes !== 1) {
+        throw new ApiError(409, "VERSION_CONFLICT", "Agent template was changed by another client");
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return current;
+  }
+
+  listProjectAgentIds(projectId) {
+    if (!this.getProject(projectId)) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    return this.database.prepare(`
+      SELECT agent_id FROM project_agents
+      WHERE project_id = ?
+      ORDER BY created_at, agent_id
+    `).all(projectId).map((row) => row.agent_id);
+  }
+
+  setProjectAgentIds(projectId, agentIds) {
+    if (!this.getProject(projectId)) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    const uniqueIds = [...new Set(agentIds)];
+    for (const agentId of uniqueIds) this.#requireAgentTemplate(agentId);
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("DELETE FROM project_agents WHERE project_id = ?").run(projectId);
+      const insert = this.database.prepare(`
+        INSERT INTO project_agents (project_id, agent_id, created_at)
+        VALUES (?, ?, ?)
+      `);
+      for (const agentId of uniqueIds) insert.run(projectId, agentId, timestamp);
+      this.database.prepare(`
+        UPDATE tasks
+        SET agent_id = NULL, version = version + 1, updated_at = ?
+        WHERE project_id = ? AND agent_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM project_agents
+            WHERE project_agents.project_id = ?
+              AND project_agents.agent_id = tasks.agent_id
+          )
+      `).run(timestamp, projectId, projectId);
+      this.database.prepare(`
+        UPDATE comments
+        SET agent_id = NULL, version = version + 1, updated_at = ?
+        WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+          AND agent_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM project_agents
+            WHERE project_agents.project_id = ?
+              AND project_agents.agent_id = comments.agent_id
+          )
+      `).run(timestamp, projectId, projectId);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listProjectAgentIds(projectId);
+  }
+
+  requireProjectAgent(projectId, agentId) {
+    if (agentId === null || agentId === undefined) return null;
+    const agent = this.#requireAgentTemplate(agentId);
+    const linked = this.database.prepare(`
+      SELECT 1 FROM project_agents WHERE project_id = ? AND agent_id = ?
+    `).get(projectId, agentId);
+    if (!linked) {
+      throw new ApiError(400, "AGENT_NOT_AVAILABLE", "The selected Agent is not available to this project");
+    }
+    return agent;
   }
 
   listConnectors() {
@@ -1628,6 +1843,7 @@ export class TaskboardDatabase {
       if (!project) {
         throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${input.projectId}' does not exist`);
       }
+      this.requireProjectAgent(input.projectId, input.agentId);
 
       const number = project.next_task_number;
       const identifier = `${projectPrefix(project.id)}-${number}`;
@@ -1651,10 +1867,10 @@ export class TaskboardDatabase {
           id, identifier, project_id, title, description, status, priority, labels,
           sort_order, thread_id, runtime, creator_type, creator_id, creator_name, creator_avatar_url,
           assignee_type, assignee_id, assignee_name, assignee_avatar_url,
-          workflow_id, git_branch, worktree_path, worktree_branch,
+          workflow_id, agent_id, git_branch, worktree_path, worktree_branch,
           due_date, recurrence_interval, recurrence_unit,
           archived_at, version, created_at, updated_at, status_changed_at, start_date
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       `).run(
         id,
         identifier,
@@ -1676,6 +1892,7 @@ export class TaskboardDatabase {
         input.assignee.name,
         input.assignee.avatarUrl,
         input.workflowId,
+        input.agentId ?? null,
         input.developmentContext?.type === "branch" ? input.developmentContext.branch : null,
         input.developmentContext?.type === "worktree" ? input.developmentContext.path : null,
         input.developmentContext?.type === "worktree" ? input.developmentContext.branch : null,
@@ -1705,6 +1922,9 @@ export class TaskboardDatabase {
     if (recurrence && !dueDate) {
       throw new ApiError(400, "INVALID_FIELD", "A recurring issue requires a due date");
     }
+    if (Object.hasOwn(changes, "agentId")) {
+      this.requireProjectAgent(current.projectId, changes.agentId);
+    }
 
     const columns = {
       title: "title",
@@ -1713,6 +1933,7 @@ export class TaskboardDatabase {
       priority: "priority",
       labels: "labels",
       workflowId: "workflow_id",
+      agentId: "agent_id",
       dueDate: "due_date",
       startDate: "start_date",
       runtime: "runtime",
@@ -1820,7 +2041,7 @@ export class TaskboardDatabase {
     return this.getTask(current.id);
   }
 
-  moveTask(id, version, status, sortOrder, threadId) {
+  moveTask(id, version, status, sortOrder, threadId, threadRuntime = "codex") {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
     if (sortOrder === undefined) {
@@ -1846,7 +2067,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
-      this.#linkTaskThread(current.id, threadId, timestamp);
+      this.#linkTaskThread(current.id, threadId, timestamp, threadRuntime);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1855,7 +2076,7 @@ export class TaskboardDatabase {
     return this.getTask(current.id);
   }
 
-  transferTask(id, version, projectId, threadId) {
+  transferTask(id, version, projectId, threadId, threadRuntime = "codex") {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
     if (current.projectId === projectId) {
@@ -1887,6 +2108,11 @@ export class TaskboardDatabase {
         FROM tasks
         WHERE project_id = ? AND status = ? AND id != ?
       `).get(projectId, current.status, current.id).next_order;
+      const targetAgentId = current.agentId && this.database.prepare(`
+        SELECT 1 FROM project_agents WHERE project_id = ? AND agent_id = ?
+      `).get(projectId, current.agentId)
+        ? current.agentId
+        : null;
 
       this.database.prepare(`
         DELETE FROM task_relations
@@ -1902,13 +2128,14 @@ export class TaskboardDatabase {
       `).run(timestamp, current.projectId);
       const result = this.database.prepare(`
         UPDATE tasks
-        SET identifier = ?, project_id = ?, sort_order = ?,
+        SET identifier = ?, project_id = ?, sort_order = ?, agent_id = ?,
             thread_id = COALESCE(?, thread_id), version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?
       `).run(
         identifier,
         projectId,
         sortOrder,
+        targetAgentId,
         threadId ?? null,
         timestamp,
         current.id,
@@ -1917,7 +2144,17 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
-      this.#linkTaskThread(current.id, threadId, timestamp);
+      this.database.prepare(`
+        UPDATE comments
+        SET agent_id = NULL, version = version + 1, updated_at = ?
+        WHERE task_id = ? AND agent_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM project_agents
+            WHERE project_agents.project_id = ?
+              AND project_agents.agent_id = comments.agent_id
+          )
+      `).run(timestamp, current.id, projectId);
+      this.#linkTaskThread(current.id, threadId, timestamp, threadRuntime);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1932,7 +2169,7 @@ export class TaskboardDatabase {
     };
   }
 
-  archiveTask(id, version, threadId) {
+  archiveTask(id, version, threadId, threadRuntime = "codex") {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
     const timestamp = now();
@@ -1952,7 +2189,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
-      this.#linkTaskThread(current.id, threadId, timestamp);
+      this.#linkTaskThread(current.id, threadId, timestamp, threadRuntime);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1961,7 +2198,7 @@ export class TaskboardDatabase {
     return this.getTask(current.id);
   }
 
-  restoreTask(id, version, threadId) {
+  restoreTask(id, version, threadId, threadRuntime = "codex") {
     const current = this.#requireTask(id);
     this.#requireVersion(current, version);
     if (current.status !== "archived") {
@@ -1984,7 +2221,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingOrConflict(id, version);
       }
-      this.#linkTaskThread(current.id, threadId, timestamp);
+      this.#linkTaskThread(current.id, threadId, timestamp, threadRuntime);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -1993,7 +2230,7 @@ export class TaskboardDatabase {
     return this.getTask(current.id);
   }
 
-  addTaskRelation(id, version, type, relatedId, threadId) {
+  addTaskRelation(id, version, type, relatedId, threadId, threadRuntime = "codex") {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const task = this.#requireTask(id);
@@ -2038,7 +2275,7 @@ export class TaskboardDatabase {
           relation_type, source_task_id, target_task_id, created_at
         ) VALUES (?, ?, ?, ?)
       `).run(relationType, sourceTaskId, targetTaskId, now());
-      this.#touchTask(task.id, version, threadId);
+      this.#touchTask(task.id, version, threadId, threadRuntime);
       this.database.exec("COMMIT");
       return {
         task: this.getTask(task.id),
@@ -2050,7 +2287,7 @@ export class TaskboardDatabase {
     }
   }
 
-  removeTaskRelation(id, version, type, relatedId, threadId) {
+  removeTaskRelation(id, version, type, relatedId, threadId, threadRuntime = "codex") {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const task = this.#requireTask(id);
@@ -2069,7 +2306,7 @@ export class TaskboardDatabase {
       if (removed.changes !== 1) {
         throw new ApiError(404, "RELATION_NOT_FOUND", "This issue relation does not exist");
       }
-      this.#touchTask(task.id, version, threadId);
+      this.#touchTask(task.id, version, threadId, threadRuntime);
       this.database.exec("COMMIT");
       return {
         task: this.getTask(task.id),
@@ -2092,20 +2329,22 @@ export class TaskboardDatabase {
 
   createComment(taskId, input) {
     const task = this.#requireTask(taskId);
+    this.requireProjectAgent(task.projectId, input.agentId);
     const id = randomUUID();
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare(`
         INSERT INTO comments (
-          id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
+          id, task_id, body, thread_id, agent_id, author_type, author_id, author_name, author_avatar_url,
           version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       `).run(
         id,
         task.id,
         input.body,
         input.threadId ?? null,
+        input.agentId ?? null,
         input.actor.type,
         input.actor.id,
         input.actor.name,
@@ -2113,7 +2352,7 @@ export class TaskboardDatabase {
         timestamp,
         timestamp,
       );
-      this.#linkTaskThread(task.id, input.threadId, timestamp);
+      this.#linkTaskThread(task.id, input.threadId, timestamp, input.threadRuntime ?? "codex");
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -2127,7 +2366,7 @@ export class TaskboardDatabase {
     return row ? this.#commentWithAttachments(row) : null;
   }
 
-  updateComment(id, version, body, threadId) {
+  updateComment(id, version, body, threadId, threadRuntime = "codex") {
     const current = this.#requireComment(id);
     this.#requireCommentVersion(current, version);
     const timestamp = now();
@@ -2145,7 +2384,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingCommentOrConflict(id, version);
       }
-      this.#linkTaskThread(current.taskId, threadId, timestamp);
+      this.#linkTaskThread(current.taskId, threadId, timestamp, threadRuntime);
       if (threadId === null && current.threadId) {
         this.database.prepare(`
           DELETE FROM task_threads
@@ -2173,7 +2412,7 @@ export class TaskboardDatabase {
     return this.getComment(id);
   }
 
-  deleteComment(id, version, threadId) {
+  deleteComment(id, version, threadId, threadRuntime = "codex") {
     const current = this.#requireComment(id);
     this.#requireCommentVersion(current, version);
     const timestamp = now();
@@ -2185,7 +2424,7 @@ export class TaskboardDatabase {
       if (result.changes !== 1) {
         this.#throwMissingCommentOrConflict(id, version);
       }
-      this.#linkTaskThread(current.taskId, threadId, timestamp);
+      this.#linkTaskThread(current.taskId, threadId, timestamp, threadRuntime);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -2493,7 +2732,7 @@ export class TaskboardDatabase {
     }
   }
 
-  #touchTask(id, version, threadId) {
+  #touchTask(id, version, threadId, threadRuntime = "codex") {
     const timestamp = now();
     const result = this.database.prepare(`
       UPDATE tasks
@@ -2503,7 +2742,7 @@ export class TaskboardDatabase {
     if (result.changes !== 1) {
       this.#throwMissingOrConflict(id, version);
     }
-    this.#linkTaskThread(id, threadId, timestamp);
+    this.#linkTaskThread(id, threadId, timestamp, threadRuntime);
   }
 
   #linkTaskThread(taskId, threadId, linkedAt, runtime = "codex") {
@@ -2523,6 +2762,14 @@ export class TaskboardDatabase {
       throw new ApiError(404, "TASK_NOT_FOUND", `Task '${id}' does not exist`);
     }
     return task;
+  }
+
+  #requireAgentTemplate(id) {
+    const agent = this.getAgentTemplate(id);
+    if (!agent) {
+      throw new ApiError(404, "AGENT_NOT_FOUND", `Agent template '${id}' does not exist`);
+    }
+    return agent;
   }
 
   #requireComment(id) {

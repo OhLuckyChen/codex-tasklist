@@ -76,6 +76,7 @@ interface BoardColumnProps {
   settlingTaskId: string | null;
   contextMenuTaskId: string | null;
   favoriteTaskIds: Set<string>;
+  unreadTaskIds: Set<string>;
   onCreate: (status: TaskStatus) => void;
   onEdit: (task: Task) => void;
   onToggleFavorite: (task: Task) => void;
@@ -108,6 +109,7 @@ export function BoardColumn({
   settlingTaskId,
   contextMenuTaskId,
   favoriteTaskIds,
+  unreadTaskIds,
   onCreate,
   onEdit,
   onToggleFavorite,
@@ -269,6 +271,7 @@ export function BoardColumn({
                 isSettling={settlingTaskId === task.id}
                 isContextMenuOpen={contextMenuTaskId === task.id}
                 isFavorite={favoriteTaskIds.has(task.id)}
+                isUnread={unreadTaskIds.has(task.id)}
                 onEdit={onEdit}
                 onToggleFavorite={onToggleFavorite}
                 onContextMenu={onContextMenu}

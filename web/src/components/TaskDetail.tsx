@@ -22,6 +22,7 @@ import {
 import { TASK_STATUSES } from "../types";
 import type {
   ActorIdentity,
+  AgentTemplate,
   Attachment,
   CodexThreadSummary,
   Comment,
@@ -70,6 +71,7 @@ import {
   type RelationMutationResult,
 } from "./IssueRelations";
 import { RuntimeIcon, RUNTIME_LABELS } from "./RuntimeIcon";
+import { safeLocalStorage } from "../safeStorage";
 
 const PRIORITY_DETAILS: Record<TaskPriority, { label: string; bars: number }> = {
   none: { label: "无优先级", bars: 0 },
@@ -85,6 +87,7 @@ interface TaskDetailProps {
   currentUser: ActorIdentity;
   availableLabels: string[];
   workflows: WorkflowOption[];
+  agents: AgentTemplate[];
   developmentScan: DevelopmentScan;
   developmentScanLoading: boolean;
   commentsRevision: number;
@@ -109,10 +112,11 @@ interface TaskDetailProps {
   onOpenThread: (threadId: string, task: Task) => void;
   currentCodexThreadId?: string;
   codexThreads: CodexThreadSummary[];
+  allCodexThreads: CodexThreadSummary[];
   onLinkThread: (task: Task, threadId: string) => Promise<Task>;
   onUnlinkThread: (task: Task, threadId: string) => Promise<Task>;
   onOpenInThread: (task: Task, followUp?: string, comment?: Comment, runtime?: TaskRuntime) => void;
-  onFollowUpInThread: (task: Task, threadId: string, followUp: string, runtime?: TaskRuntime) => void;
+  onFollowUpInThread: (task: Task, threadId: string, followUp: string, runtime?: TaskRuntime, comment?: Comment) => void;
   claudeRuntimeSupported: boolean;
   ompRuntimeSupported: boolean;
   openingThread: boolean;
@@ -121,6 +125,8 @@ interface TaskDetailProps {
   onError: (message: string | null) => void;
   onAnnounce: (message: string) => void;
 }
+
+const OTHER_THREAD_PAGE_SIZE = 20;
 
 function messageFor(error: unknown): string {
   if (error instanceof ApiError) return error.message;
@@ -362,6 +368,7 @@ export function TaskDetail({
   currentUser,
   availableLabels,
   workflows,
+  agents,
   developmentScan,
   developmentScanLoading,
   commentsRevision,
@@ -378,6 +385,7 @@ export function TaskDetail({
   onOpenThread,
   currentCodexThreadId,
   codexThreads,
+  allCodexThreads,
   onLinkThread,
   onUnlinkThread,
   onOpenInThread,
@@ -400,6 +408,10 @@ export function TaskDetail({
   const [migratingProject, setMigratingProject] = useState(false);
   const [linkingThreadId, setLinkingThreadId] = useState<string | null>(null);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
+  const [otherThreadsOpen, setOtherThreadsOpen] = useState(false);
+  const [visibleOtherThreadCount, setVisibleOtherThreadCount] = useState(OTHER_THREAD_PAGE_SIZE);
+  const [commentOtherThreadsOpen, setCommentOtherThreadsOpen] = useState(false);
+  const [visibleCommentOtherThreadCount, setVisibleCommentOtherThreadCount] = useState(OTHER_THREAD_PAGE_SIZE);
   const [unlinkingThreadId, setUnlinkingThreadId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(true);
@@ -412,9 +424,10 @@ export function TaskDetail({
   const [commentsError, setCommentsError] = useState<string | null>(null);
   const [activityOrder, setActivityOrder] = useState<"desc" | "asc">("desc");
   const [commentSearch, setCommentSearch] = useState("");
+  const [commentAgentId, setCommentAgentId] = useState("");
   const [commentSegments, setCommentSegments] = useState<InlineMediaSegment[]>(
     () => createInlineMediaSegments(
-      window.localStorage.getItem(`taskboard.comment-draft.${task.id}`) ?? "",
+      safeLocalStorage.getItem(`taskboard.comment-draft.${task.id}`) ?? "",
     ),
   );
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
@@ -440,24 +453,63 @@ export function TaskDetail({
   const threadMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const workflowAvailable = !currentTask.workflowId
     || workflows.some((workflow) => workflow.id === currentTask.workflowId);
-  const selectableCodexThreads = codexThreads.filter((thread) => thread.id !== currentCodexThreadId);
   const linkedThreadIds = currentTask.threadIds?.length > 0
     ? currentTask.threadIds
     : currentTask.threadId
       ? [currentTask.threadId]
       : [];
+  const availableThreadById = new Map(
+    [...allCodexThreads, ...codexThreads].map((thread) => [thread.id, thread]),
+  );
+  const issueLinkedCodexThreads = linkedThreadIds
+    .filter((threadId) => taskThreadRuntime(currentTask, threadId) === "codex")
+    .map((threadId) => availableThreadById.get(threadId) ?? {
+      id: threadId,
+      title: threadId === currentTask.threadId ? "当前会话" : "历史会话",
+      projectId: currentTask.projectId,
+    });
+  const issueCodexThreads = issueLinkedCodexThreads.filter((thread) => thread.id !== currentCodexThreadId);
+  const issueThreadIdSet = new Set(issueLinkedCodexThreads.map((thread) => thread.id));
+  const projectThreadById = new Map<string, CodexThreadSummary>();
+  for (const thread of codexThreads) {
+    if (thread.id !== currentCodexThreadId && !issueThreadIdSet.has(thread.id)) {
+      projectThreadById.set(thread.id, thread);
+    }
+  }
+  for (const projectTask of tasks) {
+    const projectTaskThreadIds = projectTask.threadIds?.length > 0
+      ? projectTask.threadIds
+      : projectTask.threadId
+        ? [projectTask.threadId]
+        : [];
+    for (const threadId of projectTaskThreadIds) {
+      if (
+        threadId === currentCodexThreadId
+        || issueThreadIdSet.has(threadId)
+        || taskThreadRuntime(projectTask, threadId) !== "codex"
+      ) continue;
+      projectThreadById.set(threadId, availableThreadById.get(threadId) ?? {
+        id: threadId,
+        title: `${projectTask.identifier} · ${projectTask.title}`,
+        projectId: projectTask.projectId,
+      });
+    }
+  }
+  const projectCodexThreadOptions = [...projectThreadById.values()];
+  const projectThreadIdSet = new Set(projectThreadById.keys());
+  const otherCodexThreadOptions = allCodexThreads.filter((thread) => (
+    thread.id !== currentCodexThreadId
+    && !issueThreadIdSet.has(thread.id)
+    && !projectThreadIdSet.has(thread.id)
+  ));
+  const selectableCodexThreadCount = issueCodexThreads.length
+    + projectCodexThreadOptions.length
+    + otherCodexThreadOptions.length;
+  const commentCodexThreadCount = issueLinkedCodexThreads.length
+    + projectCodexThreadOptions.length
+    + otherCodexThreadOptions.length;
   const historicalThreadIds = linkedThreadIds.filter((threadId) => threadId !== currentTask.threadId);
   const currentThreadRuntime = taskThreadRuntime(currentTask, currentTask.threadId);
-  const commentThreadOptions = [
-    ...codexThreads,
-    ...linkedThreadIds
-      .filter((threadId) => !codexThreads.some((thread) => thread.id === threadId))
-      .map((threadId) => ({
-        id: threadId,
-        title: threadId === currentTask.threadId ? "当前会话" : "历史会话",
-        projectId: currentTask.projectId,
-      })),
-  ];
   const projectPropertyOptions = projectOptions.map((project) => ({
     value: project.id,
     label: project.name,
@@ -507,8 +559,11 @@ export function TaskDetail({
   useEffect(() => {
     setCurrentTask(task);
     setThreadMenuOpen(false);
+    setOtherThreadsOpen(false);
+    setVisibleOtherThreadCount(OTHER_THREAD_PAGE_SIZE);
     setCommentThreadMenuId(null);
     setCommentSearch("");
+    setCommentAgentId("");
     if (document.activeElement !== titleRef.current) setTitle(task.title);
     if (document.activeElement !== descriptionRef.current) setDescription(task.description);
   }, [task]);
@@ -564,8 +619,8 @@ export function TaskDetail({
   useEffect(() => {
     const key = `taskboard.comment-draft.${task.id}`;
     const text = inlineMediaText(commentSegments);
-    if (text) window.localStorage.setItem(key, text);
-    else window.localStorage.removeItem(key);
+    if (text) safeLocalStorage.setItem(key, text);
+    else safeLocalStorage.removeItem(key);
   }, [commentSegments, task.id]);
 
   useEffect(() => {
@@ -600,7 +655,7 @@ export function TaskDetail({
   useEffect(() => {
     if (!threadMenuOpen) return;
     requestAnimationFrame(() => {
-      threadMenuRef.current?.querySelector<HTMLButtonElement>("[role='option']")?.focus();
+      threadMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     });
 
     function closeFromOutside(event: PointerEvent) {
@@ -623,8 +678,10 @@ export function TaskDetail({
 
   useEffect(() => {
     if (!commentThreadMenuId) return;
+    setCommentOtherThreadsOpen(false);
+    setVisibleCommentOtherThreadCount(OTHER_THREAD_PAGE_SIZE);
     requestAnimationFrame(() => {
-      commentThreadMenuRef.current?.querySelector<HTMLButtonElement>("[role='option']")?.focus();
+      commentThreadMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     });
 
     function closeFromOutside(event: PointerEvent) {
@@ -734,7 +791,7 @@ export function TaskDetail({
     try {
       const saved = await onLinkThread(currentTask, threadId);
       setCurrentTask(saved);
-      const threadTitle = codexThreads.find((thread) => thread.id === threadId)?.title;
+      const threadTitle = availableThreadById.get(threadId)?.title;
       onAnnounce(`${saved.identifier} 已关联到${threadTitle ? `「${threadTitle}」` : "所选会话"}。`);
     } catch (error) {
       onError(messageFor(error));
@@ -752,7 +809,7 @@ export function TaskDetail({
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const options = [...(threadMenuRef.current?.querySelectorAll<HTMLButtonElement>("[role='option']") ?? [])];
+    const options = [...(threadMenuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
     if (options.length === 0) return;
     event.preventDefault();
     const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
@@ -804,7 +861,7 @@ export function TaskDetail({
     setSubmitting(true);
     setCommentsError(null);
     try {
-      const comment = await createComment(task.id, body);
+      const comment = await createComment(task.id, body, undefined, commentAgentId || null);
       const [results, inlineAttachments] = await Promise.all([
         Promise.allSettled(
           pendingCommentFiles.map((file) => uploadCommentAttachment(comment.id, file)),
@@ -822,6 +879,7 @@ export function TaskDetail({
         : { ...comment, attachments: [...comment.attachments, ...uploaded] };
       setComments((current) => [...current, nextComment]);
       setCommentSegments(createInlineMediaSegments());
+      setCommentAgentId("");
       setPendingCommentFiles([]);
       if (commentAttachmentInputRef.current) commentAttachmentInputRef.current.value = "";
       const failed = results.length - uploaded.length;
@@ -917,7 +975,7 @@ export function TaskDetail({
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const options = [...(commentThreadMenuRef.current?.querySelectorAll<HTMLButtonElement>("[role='option']") ?? [])];
+    const options = [...(commentThreadMenuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
     if (options.length === 0) return;
     event.preventDefault();
     const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
@@ -1088,6 +1146,14 @@ export function TaskDetail({
       icon: <LinearIcon name="dashboard" />,
     })),
   ];
+  const agentPropertyOptions: PropertyOption<string>[] = [
+    { value: "", label: "未绑定", icon: <LinearIcon name="file" /> },
+    ...agents.map((agent) => ({
+      value: agent.id,
+      label: agent.name,
+      icon: <LinearIcon name="file" />,
+    })),
+  ];
   const developmentPropertyOptions: PropertyOption<string>[] = [
     {
       value: "",
@@ -1167,6 +1233,16 @@ export function TaskDetail({
           />
         </div>
         <div className="composer-submit-actions">
+          <select
+            className="comment-agent-select"
+            aria-label="评论 Agent"
+            value={commentAgentId}
+            disabled={submitting}
+            onChange={(event) => setCommentAgentId(event.target.value)}
+          >
+            <option value="">继承 Issue Agent</option>
+            {agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
+          </select>
           <kbd>⌘ Enter</kbd>
           <button
             className="button primary"
@@ -1677,6 +1753,8 @@ export function TaskDetail({
                               currentTask,
                               comment.threadId as string,
                               comment.body.trim() || "请查看这条评论及附件。",
+                              taskThreadRuntime(currentTask, comment.threadId),
+                              comment,
                             )}
                           >
                             <RuntimeIcon runtime={taskThreadRuntime(currentTask, comment.threadId)} />
@@ -1720,11 +1798,11 @@ export function TaskDetail({
                             className="button secondary comment-thread-picker-trigger"
                             type="button"
                             data-comment-thread-trigger={comment.id}
-                            disabled={openingThread || Boolean(commentThreadActionId) || commentThreadOptions.length === 0}
+                            disabled={openingThread || Boolean(commentThreadActionId) || commentCodexThreadCount === 0}
                             aria-label="关联已有会话"
                             aria-haspopup="listbox"
                             aria-expanded={commentThreadMenuId === comment.id}
-                            title={commentThreadOptions.length === 0 ? "当前议题没有可关联的 Codex 会话" : "Codex · 关联已有会话"}
+                            title={commentCodexThreadCount === 0 ? "暂无可关联的 Codex 会话" : "Codex · 关联已有会话"}
                             onClick={() => setCommentThreadMenuId((current) => current === comment.id ? null : comment.id)}
                           >
                             <RuntimeIcon runtime="codex" />
@@ -1754,22 +1832,100 @@ export function TaskDetail({
                                   </span>
                                 </button>
                               )}
-                              {commentThreadOptions.map((thread) => (
-                                <button
-                                  type="button"
-                                  role="option"
-                                  aria-selected={comment.threadId === thread.id}
-                                  key={thread.id}
-                                  title={thread.title}
-                                  onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
-                                >
-                                  <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
-                                  <span className="comment-thread-option-copy">
-                                    <strong>{thread.title}</strong>
-                                    <small>{thread.id}</small>
-                                  </span>
-                                </button>
-                              ))}
+                              <div className="detail-thread-group comment-thread-group" role="group" aria-label="本议题的会话">
+                                <div className="detail-thread-group-heading">
+                                  <span>本议题</span>
+                                  <small>{issueLinkedCodexThreads.length}</small>
+                                </div>
+                                {issueLinkedCodexThreads.length > 0 ? issueLinkedCodexThreads.map((thread) => (
+                                  <button
+                                    className="comment-thread-option"
+                                    type="button"
+                                    role="option"
+                                    aria-selected={comment.threadId === thread.id}
+                                    key={thread.id}
+                                    title={thread.title}
+                                    onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
+                                  >
+                                    <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
+                                    <span className="comment-thread-option-copy">
+                                      <strong>{thread.title}</strong>
+                                      <small>{thread.id}</small>
+                                    </span>
+                                  </button>
+                                )) : <p className="detail-thread-group-empty">暂无关联会话</p>}
+                              </div>
+
+                              <div className="detail-thread-group comment-thread-group" role="group" aria-label="本项目的会话">
+                                <div className="detail-thread-group-heading">
+                                  <span>本项目</span>
+                                  <small>{projectCodexThreadOptions.length}</small>
+                                </div>
+                                {projectCodexThreadOptions.length > 0 ? projectCodexThreadOptions.map((thread) => (
+                                  <button
+                                    className="comment-thread-option"
+                                    type="button"
+                                    role="option"
+                                    aria-selected={comment.threadId === thread.id}
+                                    key={thread.id}
+                                    title={thread.title}
+                                    onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
+                                  >
+                                    <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
+                                    <span className="comment-thread-option-copy">
+                                      <strong>{thread.title}</strong>
+                                      <small>{thread.id}</small>
+                                    </span>
+                                  </button>
+                                )) : <p className="detail-thread-group-empty">暂无项目会话</p>}
+                              </div>
+
+                              {otherCodexThreadOptions.length > 0 && (
+                                <div className="detail-thread-group comment-thread-group is-other">
+                                  <button
+                                    className="detail-thread-other-toggle"
+                                    type="button"
+                                    aria-expanded={commentOtherThreadsOpen}
+                                    onClick={() => setCommentOtherThreadsOpen((open) => !open)}
+                                  >
+                                    <span>其他会话</span>
+                                    <small>{otherCodexThreadOptions.length}</small>
+                                    <LinearIcon name={commentOtherThreadsOpen ? "chevronDown" : "chevronRight"} />
+                                  </button>
+                                  {commentOtherThreadsOpen && (
+                                    <div role="group" aria-label="其他会话">
+                                      {otherCodexThreadOptions.slice(0, visibleCommentOtherThreadCount).map((thread) => (
+                                        <button
+                                          className="comment-thread-option"
+                                          type="button"
+                                          role="option"
+                                          aria-selected={comment.threadId === thread.id}
+                                          key={thread.id}
+                                          title={thread.title}
+                                          onClick={() => void associatePublishedCommentWithThread(comment, thread.id)}
+                                        >
+                                          <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
+                                          <span className="comment-thread-option-copy">
+                                            <strong>{thread.title}</strong>
+                                            <small>{thread.id}</small>
+                                          </span>
+                                        </button>
+                                      ))}
+                                      {visibleCommentOtherThreadCount < otherCodexThreadOptions.length && (
+                                        <button
+                                          className="detail-thread-load-more"
+                                          type="button"
+                                          onClick={() => setVisibleCommentOtherThreadCount(
+                                            (count) => count + OTHER_THREAD_PAGE_SIZE,
+                                          )}
+                                        >
+                                          加载更多（剩余 {otherCodexThreadOptions.length - visibleCommentOtherThreadCount}）
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1809,11 +1965,11 @@ export function TaskDetail({
                   ref={threadMenuTriggerRef}
                   className="detail-thread-picker-trigger"
                   type="button"
-                  disabled={Boolean(linkingThreadId) || selectableCodexThreads.length === 0}
+                  disabled={Boolean(linkingThreadId) || selectableCodexThreadCount === 0}
                   aria-label="选择已有会话"
                   aria-haspopup="listbox"
                   aria-expanded={threadMenuOpen}
-                  title={selectableCodexThreads.length > 0 ? "Codex · 选择已有会话" : "暂无可选会话"}
+                  title={selectableCodexThreadCount > 0 ? "Codex · 选择已有会话" : "暂无可选会话"}
                   onClick={() => setThreadMenuOpen((open) => !open)}
                   onKeyDown={(event) => {
                     if (event.key !== "Escape" || !threadMenuOpen) return;
@@ -1826,7 +1982,7 @@ export function TaskDetail({
                   <span>
                     {linkingThreadId
                       ? "正在关联…"
-                      : selectableCodexThreads.length > 0
+                      : selectableCodexThreadCount > 0
                         ? "选择已有会话"
                         : "暂无可选会话"}
                   </span>
@@ -1839,19 +1995,89 @@ export function TaskDetail({
                     aria-label="已有会话"
                     onKeyDown={handleThreadMenuKeyDown}
                   >
-                    {selectableCodexThreads.map((thread) => (
-                      <button
-                        key={thread.id}
-                        type="button"
-                        role="option"
-                        aria-selected="false"
-                        title={thread.title}
-                        onClick={() => void linkThread(thread.id)}
-                      >
-                        <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
-                        <span className="detail-thread-option-title">{thread.title}</span>
-                      </button>
-                    ))}
+                    <div className="detail-thread-group" role="group" aria-label="本议题的会话">
+                      <div className="detail-thread-group-heading">
+                        <span>本议题</span>
+                        <small>{issueCodexThreads.length}</small>
+                      </div>
+                      {issueCodexThreads.length > 0 ? issueCodexThreads.map((thread) => (
+                        <button
+                          className="detail-thread-option"
+                          key={thread.id}
+                          type="button"
+                          role="option"
+                          aria-selected="false"
+                          title={thread.title}
+                          onClick={() => void linkThread(thread.id)}
+                        >
+                          <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
+                          <span className="detail-thread-option-title">{thread.title}</span>
+                        </button>
+                      )) : <p className="detail-thread-group-empty">暂无关联会话</p>}
+                    </div>
+
+                    <div className="detail-thread-group" role="group" aria-label="本项目的会话">
+                      <div className="detail-thread-group-heading">
+                        <span>本项目</span>
+                        <small>{projectCodexThreadOptions.length}</small>
+                      </div>
+                      {projectCodexThreadOptions.length > 0 ? projectCodexThreadOptions.map((thread) => (
+                        <button
+                          className="detail-thread-option"
+                          key={thread.id}
+                          type="button"
+                          role="option"
+                          aria-selected="false"
+                          title={thread.title}
+                          onClick={() => void linkThread(thread.id)}
+                        >
+                          <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
+                          <span className="detail-thread-option-title">{thread.title}</span>
+                        </button>
+                      )) : <p className="detail-thread-group-empty">暂无项目会话</p>}
+                    </div>
+
+                    {otherCodexThreadOptions.length > 0 && (
+                      <div className="detail-thread-group is-other">
+                        <button
+                          className="detail-thread-other-toggle"
+                          type="button"
+                          aria-expanded={otherThreadsOpen}
+                          onClick={() => setOtherThreadsOpen((open) => !open)}
+                        >
+                          <span>其他会话</span>
+                          <small>{otherCodexThreadOptions.length}</small>
+                          <LinearIcon name={otherThreadsOpen ? "chevronDown" : "chevronRight"} />
+                        </button>
+                        {otherThreadsOpen && (
+                          <div role="group" aria-label="其他会话">
+                            {otherCodexThreadOptions.slice(0, visibleOtherThreadCount).map((thread) => (
+                              <button
+                                className="detail-thread-option"
+                                key={thread.id}
+                                type="button"
+                                role="option"
+                                aria-selected="false"
+                                title={thread.title}
+                                onClick={() => void linkThread(thread.id)}
+                              >
+                                <span className="detail-thread-option-icon"><RuntimeIcon runtime="codex" /></span>
+                                <span className="detail-thread-option-title">{thread.title}</span>
+                              </button>
+                            ))}
+                            {visibleOtherThreadCount < otherCodexThreadOptions.length && (
+                              <button
+                                className="detail-thread-load-more"
+                                type="button"
+                                onClick={() => setVisibleOtherThreadCount((count) => count + OTHER_THREAD_PAGE_SIZE)}
+                              >
+                                加载更多（剩余 {otherCodexThreadOptions.length - visibleOtherThreadCount}）
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1979,6 +2205,17 @@ export function TaskDetail({
                 onChange={(workflowId) => void saveTask({
                   workflowId: workflowId || null,
                 }, "workflowId")}
+              />
+            </div>
+            <div className="detail-property-row agent-property">
+              <span className="detail-property-icon" aria-hidden="true"><LinearIcon name="file" /></span>
+              <span className="detail-property-label">Agent</span>
+              <PropertyPicker
+                ariaLabel="Agent"
+                value={currentTask.agentId ?? ""}
+                options={agentPropertyOptions}
+                disabled={savingProperty === "agentId"}
+                onChange={(agentId) => void saveTask({ agentId: agentId || null }, "agentId")}
               />
             </div>
             <div className="detail-property-row development-property">

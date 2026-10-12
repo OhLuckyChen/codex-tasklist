@@ -73,6 +73,122 @@ async function waitFor(predicate, timeoutMs = 1_000) {
   return lastValue;
 }
 
+const initialKnowledgePages = [
+  ["docs/knowledge/index.md", "index", "Project knowledge", "index"],
+  ["docs/knowledge/project-overview.md", "project-overview", "Project overview", "overview"],
+  ["docs/knowledge/architecture.md", "architecture", "Architecture", "architecture"],
+  ["docs/knowledge/code-map.md", "code-map", "Code map", "code-map"],
+  ["docs/knowledge/key-flows.md", "key-flows", "Key flows", "flow"],
+  ["docs/knowledge/engineering-notes.md", "engineering-notes", "Engineering notes", "engineering"],
+  ["docs/knowledge/data-boundaries.md", "data-boundaries", "Data boundaries", "architecture"],
+  ["docs/knowledge/interfaces-and-entrypoints.md", "interfaces-and-entrypoints", "Interfaces and entrypoints", "code-map"],
+];
+
+function initialKnowledgePage(id, title, kind) {
+  return `---
+id: ${id}
+title: ${title}
+kind: ${kind}
+updated_at: 2026-08-10T00:00:00.000Z
+sources:
+  - type: file
+    ref: package.json
+---
+# ${title}
+
+Evidence-backed project knowledge.
+`;
+}
+
+function initialKnowledgeChanges() {
+  const evidence = [{ type: "file", ref: "src/app.ts" }];
+  return [
+    ...initialKnowledgePages.map(([targetPath, id, title, kind]) => ({
+      targetPath,
+      operation: "create",
+      afterContent: initialKnowledgePage(id, title, kind),
+    })),
+    {
+      targetPath: ".taskboard/knowledge-index/manifest.json",
+      operation: "create",
+      afterContent: JSON.stringify({
+        schemaVersion: "1.0.0",
+        generatedAt: "2026-08-10T00:00:00.000Z",
+        projectSummary: "Demo project",
+        scanScope: ["package.json", "src"],
+      }),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/files.json",
+      operation: "create",
+      afterContent: JSON.stringify([{ path: "src/app.ts", type: "source", language: "typescript", keywords: ["app"] }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/symbols.json",
+      operation: "create",
+      afterContent: JSON.stringify([{
+        path: "src/app.ts",
+        name: "createApp",
+        kind: "function",
+        line: 1,
+        importance: "critical",
+        evidenceStatus: "confirmed",
+        linkedKnowledge: ["docs/knowledge/code-map.md"],
+        keywords: ["app"],
+      }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/entrypoints.json",
+      operation: "create",
+      afterContent: JSON.stringify([{
+        path: "src/app.ts",
+        name: "createApp",
+        kind: "function",
+        line: 1,
+        importance: "critical",
+        evidenceStatus: "confirmed",
+        successSemantics: "Runtime is ready",
+        linkedKnowledge: ["docs/knowledge/interfaces-and-entrypoints.md"],
+      }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/objects.json",
+      operation: "create",
+      afterContent: JSON.stringify(["Project", "Knowledge proposal", "Knowledge index"].map((name) => ({
+        name,
+        authority: "server/knowledge-service.mjs",
+        evidence,
+        confidence: "confirmed",
+      }))),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/flows.json",
+      operation: "create",
+      afterContent: JSON.stringify(["Initialize knowledge", "Review proposal", "Publish knowledge"].map((name) => ({
+        name,
+        trigger: "User action",
+        entrypoint: "createApp",
+        components: ["server", "knowledge"],
+        stateChanges: ["proposal state changes"],
+        successSemantics: "The proposal is ready for review",
+        failureSemantics: "The callback records an error",
+        evidence,
+        confidence: "confirmed",
+      }))),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/docs.json",
+      operation: "create",
+      afterContent: JSON.stringify([{ title: "README", source: "README.md", keywords: ["readme"], summary: "Project README" }]),
+    },
+    {
+      targetPath: ".taskboard/knowledge-index/recent.json",
+      operation: "create",
+      afterContent: JSON.stringify([{ path: "src/app.ts", changed_at: "2026-08-10T00:00:00.000Z", reason: "Recently changed" }]),
+    },
+  ];
+}
+
 test("health and the default local project are available", async () => {
   let skillPath;
   const baseUrl = await startServer(async (directory) => {
@@ -82,7 +198,9 @@ test("health and the default local project are available", async () => {
 
   const health = await request(baseUrl, "/health");
   assert.equal(health.response.status, 200);
-  assert.deepEqual(health.body, { status: "ok" });
+  assert.equal(health.body.status, "ok");
+  assert.equal(typeof health.body.pid, "number");
+  assert.equal(health.body.projectRoot, path.resolve(new URL("..", import.meta.url).pathname));
 
   const metadata = await request(baseUrl, "/api/meta");
   assert.equal(metadata.response.status, 200);
@@ -220,7 +338,7 @@ test("project knowledge proposals preserve review state and publish only through
       changes: [{
         targetPath: "docs/knowledge/index.md",
         operation: "create",
-        afterContent: "---\nid: index\ntitle: Project knowledge\nkind: index\n---\n# Project knowledge\n",
+        afterContent: initialKnowledgePage("index", "Project knowledge", "index"),
       }],
     }),
   });
@@ -285,14 +403,15 @@ test("project knowledge proposals preserve review state and publish only through
     },
   });
   assert.equal(receipt.response.status, 200);
+  assert.equal(receipt.body.proposal.status, "published");
   assert.match(await readFile(path.join(workspacePath, "docs", "knowledge", "index.md"), "utf8"), /Project knowledge/);
 
   const published = await request(baseUrl, `/api/knowledge-proposals/${stored.body.proposal.id}`, {
     method: "PATCH",
-    body: { version: stored.body.proposal.version, status: "published" },
+    body: { version: receipt.body.proposal.version, status: "published" },
   });
-  assert.equal(published.response.status, 200);
-  assert.equal(published.body.proposal.status, "published");
+  assert.equal(published.response.status, 409);
+  assert.equal(published.body.error.code, "INVALID_PROPOSAL_TRANSITION");
 });
 
 test("knowledge questionnaires require gap evidence and only accepted answers create reviewable proposals", async () => {
@@ -321,7 +440,7 @@ test("knowledge questionnaires require gap evidence and only accepted answers cr
   assert.match(await readFile(path.join(workspacePath, review.body.proposal.changes[0].targetPath), "utf8"), /人工确认回答/);
   const duplicateReview = await request(baseUrl, `/api/knowledge-answers/${answer.body.answerId}/review`, { method: "POST", body: { status: "accepted" } });
   assert.equal(duplicateReview.response.status, 409);
-  const proposals = await request(baseUrl, "/api/projects/survey/knowledge-proposals?status=ready");
+  const proposals = await request(baseUrl, "/api/projects/survey/knowledge-proposals?status=published");
   assert.equal(proposals.body.proposals.length, 1);
   const closed = await request(baseUrl, `/api/projects/survey/knowledge-questionnaires/${questionnaire.id}`, { method: "PATCH", body: { status: "closed" } });
   assert.equal(closed.response.status, 200);
@@ -362,11 +481,7 @@ test("a persistent project knowledge run stores its callback as a ready proposal
         analysis: {
           title: "Initial project knowledge",
           summary: "Durable project orientation",
-          changes: [{
-            targetPath: "docs/knowledge/index.md",
-            operation: "create",
-            afterContent: "---\nid: index\ntitle: Project knowledge\nkind: index\nupdated_at: 2026-08-10T00:00:00.000Z\nsources:\n  - type: file\n    ref: package.json\n---\n# Project knowledge\n",
-          }],
+          changes: initialKnowledgeChanges(),
         },
       },
     },
@@ -385,6 +500,128 @@ test("a persistent project knowledge run stores its callback as a ready proposal
     await access(path.join(workspacePath, "docs", "knowledge", "index.md")).then(() => true, () => false),
     false,
   );
+});
+
+test("direct ready project-scan proposals pass through the initial knowledge gate", async () => {
+  let workspacePath;
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    return {};
+  });
+  await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "knowledge-direct", name: "Knowledge Direct", workspacePath },
+  });
+
+  const rejected = await request(baseUrl, "/api/projects/knowledge-direct/knowledge-proposals", {
+    method: "POST",
+    body: {
+      title: "Shallow init",
+      sourceType: "project_scan",
+      sourceSnapshot: { trigger: "direct" },
+      status: "ready",
+      summary: "Only an index page",
+      changes: [{
+        targetPath: "docs/knowledge/index.md",
+        operation: "create",
+        afterContent: initialKnowledgePage("index", "Project knowledge", "index"),
+      }],
+    },
+  });
+
+  assert.equal(rejected.response.status, 400);
+  assert.equal(rejected.body.error.code, "INCOMPLETE_INITIAL_KNOWLEDGE");
+
+  const empty = await request(baseUrl, "/api/projects/knowledge-direct/knowledge-proposals", {
+    method: "POST",
+    body: {
+      title: "Empty init",
+      sourceType: "project_scan",
+      sourceSnapshot: { trigger: "direct" },
+      status: "ready",
+      summary: "No changes",
+      changes: [],
+    },
+  });
+  assert.equal(empty.response.status, 400);
+  assert.equal(empty.body.error.code, "INCOMPLETE_INITIAL_KNOWLEDGE");
+});
+
+test("knowledge proposal status and file changes cannot bypass review gates", async () => {
+  let workspacePath;
+  const baseUrl = await startServer(async (directory) => {
+    workspacePath = path.join(directory, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    return {};
+  });
+  await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "knowledge-gates", name: "Knowledge Gates", workspacePath },
+  });
+
+  const generating = await request(baseUrl, "/api/projects/knowledge-gates/knowledge-proposals", {
+    method: "POST",
+    body: {
+      title: "Generating init",
+      sourceType: "project_scan",
+      sourceSnapshot: { trigger: "direct" },
+      status: "generating",
+      summary: "Still running",
+      changes: [],
+    },
+  });
+  assert.equal(generating.response.status, 201);
+
+  const readyPatch = await request(baseUrl, `/api/knowledge-proposals/${generating.body.proposal.id}`, {
+    method: "PATCH",
+    body: { version: generating.body.proposal.version, status: "ready" },
+  });
+  assert.equal(readyPatch.response.status, 409);
+  assert.equal(readyPatch.body.error.code, "INVALID_PROPOSAL_TRANSITION");
+
+  const changePatch = await request(baseUrl, `/api/knowledge-proposals/${generating.body.proposal.id}`, {
+    method: "PATCH",
+    body: {
+      version: generating.body.proposal.version,
+      changes: initialKnowledgeChanges(),
+    },
+  });
+  assert.equal(changePatch.response.status, 400);
+  assert.equal(changePatch.body.error.code, "INVALID_KNOWLEDGE_PATCH");
+
+  const ready = await request(baseUrl, "/api/projects/knowledge-gates/knowledge-proposals", {
+    method: "POST",
+    body: {
+      title: "Complete init",
+      sourceType: "project_scan",
+      sourceSnapshot: { trigger: "direct" },
+      status: "ready",
+      summary: "Complete protocol",
+      changes: initialKnowledgeChanges(),
+    },
+  });
+  assert.equal(ready.response.status, 201);
+  const rejected = await request(baseUrl, `/api/knowledge-proposals/${ready.body.proposal.id}`, {
+    method: "PATCH",
+    body: { version: ready.body.proposal.version, status: "rejected" },
+  });
+  assert.equal(rejected.response.status, 200);
+  assert.equal(rejected.body.proposal.status, "rejected");
+
+  const publishRejected = await request(baseUrl, "/api/local/projects/knowledge-gates/knowledge/publish", {
+    method: "POST",
+    body: {
+      workspacePath,
+      proposal: {
+        id: rejected.body.proposal.id,
+        version: rejected.body.proposal.version,
+        changes: rejected.body.proposal.changes,
+      },
+    },
+  });
+  assert.equal(publishRejected.response.status, 409);
+  assert.equal(publishRejected.body.error.code, "INVALID_PROPOSAL_TRANSITION");
 });
 
 test("Hermes data flywheel resolves projects and records sourced interactions", async () => {
@@ -486,6 +723,18 @@ test("Hermes can create Taskboard knowledge candidates and self-service defects 
   assert.equal(proposal.body.proposal.status, "ready");
   assert.equal(proposal.body.proposal.creator.id, "hermes-agent");
   assert.match(proposal.body.proposal.changes[0].afterContent, /用户咨询后确认的处理口径/);
+
+  const localPathCandidate = await request(baseUrl, "/api/projects/flywheel/knowledge-candidates", {
+    method: "POST",
+    body: {
+      title: "错误本机路径",
+      content: "不要把 /Users/lincya/workspace/private.md 放入知识库正文。",
+      targetPath: "docs/knowledge/candidates/local-path.md",
+      sources: [{ type: "issue", ref: "FLY-2" }],
+    },
+  });
+  assert.equal(localPathCandidate.response.status, 400);
+  assert.equal(localPathCandidate.body.error.code, "INVALID_KNOWLEDGE_CONTRACT");
 
   const defect = await request(baseUrl, "/api/tasks", {
     method: "POST",
@@ -1122,6 +1371,26 @@ test("workflow workspace changes are broadcast to other open clients", async () 
   await reader.cancel();
 });
 
+test("server shutdown closes active event streams", async () => {
+  const baseUrl = await startServer();
+  const running = runningApps.pop();
+  const eventResponse = await fetch(`${baseUrl}/api/events`);
+  const reader = eventResponse.body.getReader();
+  await reader.read();
+
+  const closePromise = running.app.close();
+  const closedPromptly = await Promise.race([
+    closePromise.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+  ]);
+
+  if (!closedPromptly) running.app.server.closeAllConnections();
+  await closePromise;
+  await rm(running.directory, { recursive: true, force: true });
+  assert.equal(closedPromptly, true);
+  assert.equal((await reader.read()).done, true);
+});
+
 test("workflow capabilities come from the live Codex skill and MCP catalogs", async () => {
   let workspacePath;
   const baseUrl = await startServer(async (directory) => {
@@ -1684,6 +1953,283 @@ test("tasks can bind, change, and unbind one project workflow", async () => {
   assert.equal(invalidResult.body.error.code, "INVALID_FIELD");
 });
 
+test("Agent templates support project access, issue inheritance, comment override, skills, and local files", async () => {
+  const baseUrl = await startServer();
+  const skillDirectory = path.join(process.cwd(), "skills/manage-taskboard");
+
+  const baseAgentResult = await request(baseUrl, "/api/agents", {
+    method: "POST",
+    body: {
+      name: "Issue Agent",
+      templateType: "inline",
+      templateValue: "Act as the issue specialist.",
+      skillPaths: [skillDirectory],
+    },
+  });
+  assert.equal(baseAgentResult.response.status, 201);
+  const baseAgent = baseAgentResult.body.agent;
+  assert.deepEqual(baseAgent.skillPaths, [skillDirectory]);
+
+  const overrideAgentResult = await request(baseUrl, "/api/agents", {
+    method: "POST",
+    body: {
+      name: "Comment Agent",
+      templateType: "inline",
+      templateValue: "Review only this comment.",
+      skillPaths: [],
+    },
+  });
+  const overrideAgent = overrideAgentResult.body.agent;
+
+  const unavailableTask = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "Unavailable Agent", agentId: baseAgent.id },
+  });
+  assert.equal(unavailableTask.response.status, 400);
+  assert.equal(unavailableTask.body.error.code, "AGENT_NOT_AVAILABLE");
+
+  const allowAgents = await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [baseAgent.id, overrideAgent.id] },
+  });
+  assert.equal(allowAgents.response.status, 200);
+  assert.deepEqual(new Set(allowAgents.body.agentIds), new Set([baseAgent.id, overrideAgent.id]));
+
+  const taskResult = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "Agent issue", agentId: baseAgent.id },
+  });
+  assert.equal(taskResult.response.status, 201);
+  assert.equal(taskResult.body.task.agentId, baseAgent.id);
+  const task = taskResult.body.task;
+
+  const inheritedCommentResult = await request(baseUrl, `/api/tasks/${task.id}/comments`, {
+    method: "POST",
+    body: { body: "Use the issue Agent" },
+  });
+  assert.equal(inheritedCommentResult.body.comment.agentId, null);
+  const overrideCommentResult = await request(baseUrl, `/api/tasks/${task.id}/comments`, {
+    method: "POST",
+    body: { body: "Use the comment Agent", agentId: overrideAgent.id },
+  });
+  assert.equal(overrideCommentResult.body.comment.agentId, overrideAgent.id);
+
+  const inheritedInstruction = await request(baseUrl, "/api/agent-instruction", {
+    method: "POST",
+    body: {
+      taskId: task.id,
+      commentId: inheritedCommentResult.body.comment.id,
+      workspacePath: path.join(os.homedir(), "unrelated-workspace"),
+      instruction: "Implement the issue.",
+    },
+  });
+  assert.equal(inheritedInstruction.response.status, 200);
+  assert.match(inheritedInstruction.body.instruction, /Issue Agent/);
+  assert.match(inheritedInstruction.body.instruction, /Act as the issue specialist/);
+  assert.match(inheritedInstruction.body.instruction, /\[\$manage-taskboard\]\(.+\/skills\/manage-taskboard\/SKILL\.md\)/);
+  assert.match(inheritedInstruction.body.instruction, /Implement the issue/);
+
+  const overrideInstruction = await request(baseUrl, "/api/agent-instruction", {
+    method: "POST",
+    body: {
+      taskId: task.id,
+      commentId: overrideCommentResult.body.comment.id,
+      workspacePath: process.cwd(),
+      instruction: "Handle the comment.",
+    },
+  });
+  assert.equal(overrideInstruction.response.status, 200);
+  assert.match(overrideInstruction.body.instruction, /Comment Agent/);
+  assert.match(overrideInstruction.body.instruction, /Review only this comment/);
+  assert.doesNotMatch(overrideInstruction.body.instruction, /Issue Agent/);
+
+  const fileAgentResult = await request(baseUrl, "/api/agents", {
+    method: "POST",
+    body: {
+      name: "File Agent",
+      templateType: "file",
+      templateValue: path.join(process.cwd(), "package.json"),
+      skillPaths: [],
+    },
+  });
+  const fileAgent = fileAgentResult.body.agent;
+  await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [baseAgent.id, overrideAgent.id, fileAgent.id] },
+  });
+  const fileTask = (await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "File Agent issue", agentId: fileAgent.id },
+  })).body.task;
+  const fileInstruction = await request(baseUrl, "/api/agent-instruction", {
+    method: "POST",
+    body: {
+      taskId: fileTask.id,
+      workspacePath: process.cwd(),
+      instruction: "Use the file template.",
+    },
+  });
+  assert.equal(fileInstruction.response.status, 200);
+  assert.match(fileInstruction.body.instruction, /"name": "codex-taskboard"/);
+
+  const missingFileAgentResult = await request(baseUrl, "/api/agents", {
+    method: "POST",
+    body: {
+      name: "Missing File Agent",
+      templateType: "file",
+      templateValue: path.join(os.homedir(), ".taskboard-agent-template-does-not-exist"),
+      skillPaths: [],
+    },
+  });
+  const missingFileAgent = missingFileAgentResult.body.agent;
+  await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [baseAgent.id, overrideAgent.id, fileAgent.id, missingFileAgent.id] },
+  });
+  const missingFileTask = (await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "Missing file", agentId: missingFileAgent.id },
+  })).body.task;
+  const missingFileInstruction = await request(baseUrl, "/api/agent-instruction", {
+    method: "POST",
+    body: {
+      taskId: missingFileTask.id,
+      workspacePath: process.cwd(),
+      instruction: "This must fail before launch.",
+    },
+  });
+  assert.equal(missingFileInstruction.response.status, 400);
+  assert.equal(missingFileInstruction.body.error.code, "AGENT_TEMPLATE_UNAVAILABLE");
+
+  const missingSkillAgent = (await request(baseUrl, "/api/agents", {
+    method: "POST",
+    body: {
+      name: "Missing Skill Agent",
+      templateType: "inline",
+      templateValue: "This Skill must be checked before launch.",
+      skillPaths: [path.join(os.homedir(), ".taskboard-agent-skill-does-not-exist")],
+    },
+  })).body.agent;
+  await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [baseAgent.id, overrideAgent.id, fileAgent.id, missingFileAgent.id, missingSkillAgent.id] },
+  });
+  const missingSkillTask = (await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "Missing Skill", agentId: missingSkillAgent.id },
+  })).body.task;
+  const missingSkillInstruction = await request(baseUrl, "/api/agent-instruction", {
+    method: "POST",
+    body: {
+      taskId: missingSkillTask.id,
+      workspacePath: process.cwd(),
+      instruction: "This must also fail before launch.",
+    },
+  });
+  assert.equal(missingSkillInstruction.response.status, 400);
+  assert.equal(missingSkillInstruction.body.error.code, "AGENT_SKILL_UNAVAILABLE");
+
+  const deleteBaseAgent = await request(baseUrl, `/api/agents/${baseAgent.id}`, {
+    method: "DELETE",
+    body: { version: baseAgent.version },
+  });
+  assert.equal(deleteBaseAgent.response.status, 200);
+  const taskAfterAgentDelete = await request(baseUrl, `/api/tasks/${task.id}`);
+  assert.equal(taskAfterAgentDelete.body.task.agentId, null);
+  const commentsAfterAgentDelete = await request(baseUrl, `/api/tasks/${task.id}/comments`);
+  assert.equal(commentsAfterAgentDelete.body.comments[0].agentId, null);
+});
+
+test("project Agent policy changes and issue transfer clear only invalid Agent bindings", async () => {
+  const baseUrl = await startServer();
+  async function createAgent(name) {
+    return (await request(baseUrl, "/api/agents", {
+      method: "POST",
+      body: { name, templateType: "inline", templateValue: `${name} template`, skillPaths: [] },
+    })).body.agent;
+  }
+  const agentA = await createAgent("Agent A");
+  const agentB = await createAgent("Agent B");
+  await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [agentA.id, agentB.id] },
+  });
+
+  const task = (await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "Policy cleanup", agentId: agentA.id },
+  })).body.task;
+  const commentA = (await request(baseUrl, `/api/tasks/${task.id}/comments`, {
+    method: "POST",
+    body: { body: "Agent A comment", agentId: agentA.id },
+  })).body.comment;
+  const commentB = (await request(baseUrl, `/api/tasks/${task.id}/comments`, {
+    method: "POST",
+    body: { body: "Agent B comment", agentId: agentB.id },
+  })).body.comment;
+
+  await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [agentB.id] },
+  });
+  const taskAfterPolicyChange = (await request(baseUrl, `/api/tasks/${task.id}`)).body.task;
+  const commentsAfterPolicyChange = (await request(baseUrl, `/api/tasks/${task.id}/comments`)).body.comments;
+  assert.equal(taskAfterPolicyChange.agentId, null);
+  assert.equal(taskAfterPolicyChange.version, task.version + 1);
+  assert.equal(commentsAfterPolicyChange.find((comment) => comment.id === commentA.id).agentId, null);
+  assert.equal(commentsAfterPolicyChange.find((comment) => comment.id === commentA.id).version, commentA.version + 1);
+  assert.equal(commentsAfterPolicyChange.find((comment) => comment.id === commentB.id).agentId, agentB.id);
+  assert.equal(commentsAfterPolicyChange.find((comment) => comment.id === commentB.id).version, commentB.version);
+
+  await request(baseUrl, "/api/projects", {
+    method: "POST",
+    body: { id: "agent-target", name: "Agent target" },
+  });
+  await request(baseUrl, "/api/projects/local/agents", {
+    method: "PUT",
+    body: { agentIds: [agentA.id, agentB.id] },
+  });
+  await request(baseUrl, "/api/projects/agent-target/agents", {
+    method: "PUT",
+    body: { agentIds: [agentB.id] },
+  });
+  const transferTask = (await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { projectId: "local", title: "Transfer cleanup", agentId: agentA.id },
+  })).body.task;
+  const transferCommentA = (await request(baseUrl, `/api/tasks/${transferTask.id}/comments`, {
+    method: "POST",
+    body: { body: "Invalid after transfer", agentId: agentA.id },
+  })).body.comment;
+  const transferCommentB = (await request(baseUrl, `/api/tasks/${transferTask.id}/comments`, {
+    method: "POST",
+    body: { body: "Still valid after transfer", agentId: agentB.id },
+  })).body.comment;
+
+  const transferred = await request(baseUrl, `/api/tasks/${transferTask.id}/transfer`, {
+    method: "POST",
+    body: { version: transferTask.version, projectId: "agent-target" },
+  });
+  assert.equal(transferred.response.status, 200);
+  assert.equal(transferred.body.task.agentId, null);
+  const transferredComments = (await request(baseUrl, `/api/tasks/${transferTask.id}/comments`)).body.comments;
+  assert.equal(transferredComments.find((comment) => comment.id === transferCommentA.id).agentId, null);
+  assert.equal(transferredComments.find((comment) => comment.id === transferCommentA.id).version, transferCommentA.version + 1);
+  assert.equal(transferredComments.find((comment) => comment.id === transferCommentB.id).agentId, agentB.id);
+
+  const validOverride = await request(baseUrl, "/api/agent-instruction", {
+    method: "POST",
+    body: {
+      taskId: transferTask.id,
+      commentId: transferCommentB.id,
+      workspacePath: process.cwd(),
+      instruction: "Transferred instruction.",
+    },
+  });
+  assert.equal(validOverride.response.status, 200);
+  assert.match(validOverride.body.instruction, /Agent B template/);
+});
+
 test("issues support parent, sub-issue, blocking, and related issue relationships", async () => {
   const baseUrl = await startServer();
   const createIssue = async (title, status = "todo", projectId = "local") => {
@@ -1967,6 +2513,51 @@ test("issues retain multiple processing conversations while one remains current"
   assert.equal(relinked.body.task.threadIds[0], threadOne);
   assert.equal(relinked.body.task.threadIds.length, 5);
   assert.equal(relinked.body.task.threadRuntimes[threadOne], "claude");
+});
+
+test("taskctl agent mutations preserve the concrete runtime for linked conversations", async () => {
+  const baseUrl = await startServer();
+  const ompThread = "00000000-0000-4000-8000-000000000301";
+  const claudeThread = "00000000-0000-4000-8000-000000000302";
+  const created = await request(baseUrl, "/api/tasks", {
+    method: "POST",
+    body: { title: "Agent runtime attribution" },
+  });
+  const moved = await request(baseUrl, `/api/tasks/${created.body.task.id}/move`, {
+    method: "POST",
+    headers: {
+      "x-taskboard-client": "taskctl",
+      "x-taskboard-agent-runtime": "omp",
+    },
+    body: {
+      version: created.body.task.version,
+      status: "in_progress",
+      threadId: ompThread,
+    },
+  });
+  assert.equal(moved.response.status, 200);
+  assert.equal(moved.body.task.threadId, ompThread);
+  assert.equal(moved.body.task.runtime, "omp");
+  assert.equal(moved.body.task.threadRuntimes[ompThread], "omp");
+
+  const comment = await request(baseUrl, `/api/tasks/${created.body.task.id}/comments`, {
+    method: "POST",
+    headers: {
+      "x-taskboard-client": "taskctl",
+      "x-taskboard-agent-runtime": "claude",
+    },
+    body: {
+      body: "Claude handled a follow-up",
+      threadId: claudeThread,
+    },
+  });
+  assert.equal(comment.response.status, 201);
+  assert.equal(comment.body.comment.authorId, "claude-agent");
+
+  const afterComment = await request(baseUrl, `/api/tasks/${created.body.task.id}`);
+  assert.equal(afterComment.body.task.threadId, ompThread);
+  assert.equal(afterComment.body.task.threadRuntimes[ompThread], "omp");
+  assert.equal(afterComment.body.task.threadRuntimes[claudeThread], "claude");
 });
 
 test("task thread runtimes are reconciled from concrete local session evidence", async () => {

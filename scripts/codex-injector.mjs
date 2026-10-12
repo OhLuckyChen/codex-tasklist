@@ -16,6 +16,7 @@ import {
   classifyHeartbeatFailure,
   frameUrlMatches,
   findResidentInjectorPids,
+  findResidentTaskboardServerPids,
   handleHostBindingPayload,
   reconcileInjectionRuntime,
   rendererBootstrapReason,
@@ -23,9 +24,11 @@ import {
 } from "./codex-injector-runtime.mjs";
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
 import { resolveCodexSessionByMarker } from "./codex-session-resolver.mjs";
+import { checkTaskCompletion } from "../shared/task-completion-guard.mjs";
 
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
+const serverPath = path.join(projectRoot, "server", "index.mjs");
 const defaultCodexDebuggingPort = 9229;
 const injectionPath = path.join(projectRoot, "inject", "codex-taskboard.user.js");
 const automationPoliciesPath = path.join(projectRoot, ".data", "codex-automation-policies.json");
@@ -114,6 +117,40 @@ async function isReachable(url) {
   }
 }
 
+async function readTaskboardHealth() {
+  try {
+    const health = await fetchJson(taskboardHealthUrl);
+    return health?.status === "ok" ? health : null;
+  } catch {
+    return null;
+  }
+}
+
+function healthMatchesCurrentProject(health) {
+  return Boolean(health?.projectRoot && path.resolve(health.projectRoot) === projectRoot);
+}
+
+function taskboardOwnershipError(health) {
+  return new Error(
+    `Taskboard port ${resolvePort()} is owned by ${health?.projectRoot || "another service"}`,
+  );
+}
+
+function healthBelongsToAnotherProject(health) {
+  return Boolean(health?.projectRoot && !healthMatchesCurrentProject(health));
+}
+
+async function waitUntilCurrentTaskboard(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const health = await readTaskboardHealth();
+    if (healthMatchesCurrentProject(health)) return;
+    if (healthBelongsToAnotherProject(health)) throw taskboardOwnershipError(health);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for ${taskboardHealthUrl}`);
+}
+
 async function waitUntilReachable(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -124,7 +161,12 @@ async function waitUntilReachable(url, timeoutMs) {
 }
 
 function startTaskboard({ detached }) {
-  return spawn(process.execPath, [path.join(projectRoot, "server", "index.mjs")], {
+  const serverArgs = [path.join(projectRoot, "server", "index.mjs")];
+  const command = process.platform === "darwin" ? "/usr/sbin/taskpolicy" : process.execPath;
+  const args = process.platform === "darwin"
+    ? ["-a", process.execPath, ...serverArgs]
+    : serverArgs;
+  return spawn(command, args, {
     cwd: projectRoot,
     detached,
     env: {
@@ -136,15 +178,71 @@ function startTaskboard({ detached }) {
   });
 }
 
-function createTaskboardSupervisor({ detached }) {
+function createTaskboardSupervisor() {
   let child = null;
   let ensureInFlight = null;
+  let restartInFlight = null;
   let retryAfter = 0;
-  let stopping = false;
+  let healthFailures = 0;
+
+  async function stopCurrentTaskboardServers() {
+    const pids = new Set(residentTaskboardServerPids());
+    if (child?.exitCode === null && !child.killed) {
+      pids.add(child.pid);
+    }
+    for (const pid of pids) {
+      await stopTaskboardServerProcess(pid);
+    }
+    child = null;
+  }
+
+  async function startFreshTaskboard() {
+    await stopCurrentTaskboardServers();
+    const started = startTaskboard({ detached: true });
+    child = started;
+    started.unref();
+    started.once("error", (error) => {
+      console.error(`Taskboard process error: ${error.message}`);
+    });
+    started.once("exit", (code, signal) => {
+      if (child === started) child = null;
+      if (code !== 0) {
+        console.error(`Taskboard exited (${signal || code}); it will be restarted automatically.`);
+      }
+    });
+    try {
+      await waitUntilCurrentTaskboard(10_000);
+    } catch (error) {
+      if (started.exitCode !== null) throw error;
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        event: "taskboard-startup-delayed",
+        pid: started.pid,
+        reason: error.message,
+      }));
+      return { status: "starting", restarted: true };
+    }
+    retryAfter = 0;
+    healthFailures = 0;
+    return { status: "ok", restarted: true };
+  }
 
   async function ensure({ force = false } = {}) {
-    if (await isReachable(taskboardHealthUrl)) {
+    if (restartInFlight) return restartInFlight;
+    const currentHealth = await readTaskboardHealth();
+    if (healthMatchesCurrentProject(currentHealth)) {
+      if (healthFailures > 0) {
+        console.warn(JSON.stringify({
+          at: new Date().toISOString(),
+          event: "taskboard-health-recovered",
+          previousFailures: healthFailures,
+        }));
+      }
+      healthFailures = 0;
       return { status: "ok", restarted: false };
+    }
+    if (healthBelongsToAnotherProject(currentHealth)) {
+      throw taskboardOwnershipError(currentHealth);
     }
     if (ensureInFlight) return ensureInFlight;
     if (!force && Date.now() < retryAfter) {
@@ -152,30 +250,22 @@ function createTaskboardSupervisor({ detached }) {
     }
 
     ensureInFlight = (async () => {
-      if (child?.exitCode === null && !child.killed) {
-        try {
-          await waitUntilReachable(taskboardHealthUrl, 3_000);
-          return { status: "ok", restarted: false };
-        } catch (_) {}
+      const residentPids = residentTaskboardServerPids();
+      if (residentPids.length > 0) {
+        healthFailures += 1;
+        if (healthFailures === 1 || healthFailures % 10 === 0) {
+          console.warn(JSON.stringify({
+            at: new Date().toISOString(),
+            event: "taskboard-health-delayed",
+            failures: healthFailures,
+            pids: residentPids,
+          }));
+        }
+        return { status: "degraded", restarted: false };
       }
 
-      const started = startTaskboard({ detached });
-      child = started;
-      if (detached) started.unref();
-      started.once("error", (error) => {
-        if (!stopping) console.error(`Taskboard process error: ${error.message}`);
-      });
-      started.once("exit", (code, signal) => {
-        if (child === started) child = null;
-        if (!stopping && !detached && code !== 0) {
-          console.error(`Taskboard exited (${signal || code}); it will be restarted automatically.`);
-        }
-      });
-
       try {
-        await waitUntilReachable(taskboardHealthUrl, 10_000);
-        retryAfter = 0;
-        return { status: "ok", restarted: true };
+        return await startFreshTaskboard();
       } catch (error) {
         retryAfter = Date.now() + 2_000;
         throw error;
@@ -189,12 +279,30 @@ function createTaskboardSupervisor({ detached }) {
     }
   }
 
-  function stop() {
-    stopping = true;
-    if (child?.exitCode === null && !child.killed) child.kill("SIGTERM");
+  async function restart() {
+    const currentHealth = await readTaskboardHealth();
+    if (healthBelongsToAnotherProject(currentHealth)) {
+      throw taskboardOwnershipError(currentHealth);
+    }
+    if (restartInFlight) return restartInFlight;
+    console.warn(JSON.stringify({
+      at: new Date().toISOString(),
+      event: "taskboard-explicit-restart",
+      pids: residentTaskboardServerPids(),
+    }));
+    restartInFlight = (async () => startFreshTaskboard())();
+    try {
+      return await restartInFlight;
+    } finally {
+      restartInFlight = null;
+    }
   }
 
-  return { ensure, stop };
+  function detach() {
+    child = null;
+  }
+
+  return { ensure, restart, detach };
 }
 
 function codexIsRunning(appPath) {
@@ -384,6 +492,114 @@ function residentInjectorPids(port) {
   });
 }
 
+function residentTaskboardServerPids() {
+  const processes = spawnSync("/bin/ps", ["-axo", "pid=,command="], {
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  if (processes.status !== 0) return [];
+  return findResidentTaskboardServerPids({
+    processList: processes.stdout,
+    currentPid: process.pid,
+    serverPath,
+    projectRoot,
+    cwdForPid: processCwd,
+  });
+}
+
+async function stopProcess(pid, options = {}) {
+  const {
+    stopped = null,
+    forceAfterMs = 5_000,
+    timeoutMs = 8_000,
+  } = options;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    if (error?.code === "ESRCH") return;
+    throw error;
+  }
+  const forceAt = Date.now() + forceAfterMs;
+  const deadline = Date.now() + timeoutMs;
+  let forced = false;
+  while (Date.now() < deadline) {
+    if (stopped && await stopped()) return;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    if (!forced && Date.now() >= forceAt) {
+      try {
+        process.kill(pid, "SIGKILL");
+        forced = true;
+      } catch (error) {
+        if (error?.code === "ESRCH") return;
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (stopped && await stopped()) return;
+  throw new Error(`Timed out stopping process ${pid}`);
+}
+
+async function stopTaskboardServerProcess(pid) {
+  await stopProcess(pid, {
+    forceAfterMs: 1_000,
+    timeoutMs: 3_000,
+  });
+}
+
+async function stopResidentInjector(pid) {
+  await stopProcess(pid);
+}
+
+async function waitForResidentInjectorReady(port, pid, startupToken, expectedSourceHash) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+      const targets = await codexTargets(port);
+      for (const target of targets) {
+        const cdp = new CdpConnection(target.webSocketDebuggerUrl);
+        await cdp.open();
+        try {
+          const readiness = await cdp.send("Runtime.evaluate", {
+            expression: `({
+              token: window[${JSON.stringify(hostStartupTokenName)}],
+              taskboardEntryMounted: Boolean(document.getElementById("codex-taskboard-entry")),
+              nativeTaskboardEntryMounted: Array.from(document.querySelectorAll("[data-app-action-sidebar-scroll] button"))
+                .some((button) => {
+                  const text = String(button.textContent || button.getAttribute("aria-label") || "").trim().toLowerCase();
+                  return text === "任务面板" || text === "taskboard";
+                }),
+              sourceHash: window.__codexTaskboardInjection__?.sourceHash || null
+            })`,
+            returnByValue: true,
+          });
+          const value = readiness.result.value || {};
+          if (
+            value.token === startupToken
+            && (value.taskboardEntryMounted === true || value.nativeTaskboardEntryMounted === true)
+            && (!expectedSourceHash || value.sourceHash === expectedSourceHash)
+          ) return;
+        } finally {
+          cdp.close();
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch (error) {
+      if (error?.code === "ESRCH") {
+        throw new Error(`Taskboard injector ${pid} exited before becoming ready`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  throw new Error(`Timed out waiting for Taskboard injector ${pid}`);
+}
+
 function startResidentInjector(
   port,
   shouldOpen,
@@ -405,53 +621,6 @@ function startResidentInjector(
   return { pid: child.pid, started: true };
 }
 
-async function stopResidentInjector(pid) {
-  process.kill(pid, "SIGTERM");
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    } catch {
-      return;
-    }
-  }
-  throw new Error(`Timed out stopping resident Taskboard injector ${pid}`);
-}
-
-async function waitForResidentInjectorReady(port, pid, startupToken, expectedSourceHash) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-      const targets = await codexTargets(port);
-      for (const target of targets) {
-        const cdp = new CdpConnection(target.webSocketDebuggerUrl);
-        await cdp.open();
-        try {
-          const readiness = await cdp.send("Runtime.evaluate", {
-            expression: `({
-              token: window[${JSON.stringify(hostStartupTokenName)}],
-              taskboardEntryMounted: Boolean(document.getElementById("codex-taskboard-entry")),
-              sourceHash: window.__codexTaskboardInjection__?.sourceHash || null
-            })`,
-            returnByValue: true,
-          });
-          if (
-            readiness.result.value?.token === startupToken
-            && readiness.result.value.taskboardEntryMounted
-            && readiness.result.value.sourceHash === expectedSourceHash
-          ) return;
-        } finally {
-          cdp.close();
-        }
-      }
-    } catch {}
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`Timed out waiting for resident Taskboard injector ${pid}`);
-}
-
 async function restartResidentInjectorForRefresh(port) {
   const { sourceHash } = await currentInjectionSource();
   return restartResidentInjector(port, {
@@ -469,13 +638,33 @@ async function restartResidentInjectorForRefresh(port) {
 
 async function refreshTaskboardFrames(port) {
   const targets = await codexTargets(port);
+  const { source, sourceHash } = await currentInjectionSource();
   const results = [];
 
   for (const target of targets) {
     const cdp = new CdpConnection(target.webSocketDebuggerUrl);
     await cdp.open();
     try {
+      await cdp.send("Page.enable");
+      await cdp.send("Page.setBypassCSP", { enabled: true });
       await cdp.send("Runtime.enable");
+      const currentStatus = await readInjectionStatus(cdp);
+      const reconciled = await reconcileInjectionRuntime({
+        currentStatus,
+        source,
+        sourceHash,
+        removeRegisteredSource: (identifier) => cdp.send(
+          "Page.removeScriptToEvaluateOnNewDocument",
+          { identifier },
+        ),
+        registerCurrentSource: (currentSource) => registerInjectionSource(cdp, currentSource),
+        evaluateCurrentSource: (currentSource) => evaluateInjectionSource(cdp, currentSource),
+        publishRegistration: (identifier) => publishInjectionScriptIdentifier(cdp, identifier),
+        reopen: () => cdp.send("Runtime.evaluate", {
+          expression: "window.__codexTaskboardInjection__?.open()",
+          returnByValue: true,
+        }),
+      });
       const evaluation = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
           const taskboard = window.__codexTaskboardInjection__;
@@ -500,6 +689,8 @@ async function refreshTaskboardFrames(port) {
         targetId: target.id,
         title: target.title,
         url: target.url,
+        sourceHash,
+        sourceReplaced: reconciled.replaced,
         ...evaluation.result.value,
       });
     } finally {
@@ -827,11 +1018,14 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
     skillName,
     skillPath,
   } = request;
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline) {
+  const composerDeadline = Date.now() + 8_000;
+  while (Date.now() < composerDeadline) {
     const prepared = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
+        const instructionParts = instruction.split(/\\r?\\n/)
+          .map((part) => part.trim())
+          .filter(Boolean);
         const skillName = ${JSON.stringify(skillName)};
         const skillPath = ${JSON.stringify(skillPath)};
         const normalizeSkillPath = (value) => {
@@ -854,7 +1048,8 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
             candidate.getAttribute("skill-mention-name") === skillName
             && comparableSkillPath(candidate.getAttribute("skill-mention-path")) === requestedPath
           ));
-        if (mention && (editor.textContent || "").includes(instruction)) {
+        const editorText = editor.textContent || "";
+        if (mention && instructionParts.every((part) => editorText.includes(part))) {
           return { ready: true, matches: true };
         }
         editor.focus();
@@ -881,7 +1076,8 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
   let selectedSkill = false;
   let skillCandidateIndex = 0;
   let lastMismatchedSkillPath = "";
-  while (Date.now() < deadline) {
+  const skillSelectionDeadline = Date.now() + 12_000;
+  while (Date.now() < skillSelectionDeadline) {
     const selection = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const displayName = ${JSON.stringify(skillDisplayName)};
@@ -906,10 +1102,14 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
       await new Promise((resolve) => setTimeout(resolve, 80));
       continue;
     }
-    if (!selection.result.value?.found) break;
+    if (!selection.result.value?.found) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      continue;
+    }
 
     let mentionResult = null;
-    while (Date.now() < deadline) {
+    const mentionDeadline = Date.now() + 4_000;
+    while (Date.now() < mentionDeadline) {
       const mention = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
           const skillName = ${JSON.stringify(skillName)};
@@ -987,6 +1187,9 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
     const verified = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
+        const instructionParts = instruction.split(/\\r?\\n/)
+          .map((part) => part.trim())
+          .filter(Boolean);
         const skillName = ${JSON.stringify(skillName)};
         const skillPath = ${JSON.stringify(skillPath)};
         const normalizeSkillPath = (value) => {
@@ -1008,7 +1211,8 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
             candidate.getAttribute("skill-mention-name") === skillName
             && comparableSkillPath(candidate.getAttribute("skill-mention-path")) === requestedPath
           ));
-        return Boolean(mention && (editor.textContent || "").includes(instruction));
+        const editorText = editor?.textContent || "";
+        return Boolean(mention && instructionParts.every((part) => editorText.includes(part)));
       })()`,
       contextId: executionContextId,
       returnByValue: true,
@@ -1026,11 +1230,17 @@ async function prefillPlainComposerViaCdp(cdp, executionContextId, request) {
     const prepared = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
+        const instructionParts = instruction.split(/\\r?\\n/)
+          .map((part) => part.trim())
+          .filter(Boolean);
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
         if (!editor) return { ready: false };
-        if ((editor.textContent || "").includes(instruction)) return { ready: true, matches: true };
+        const editorText = editor.textContent || "";
+        if (instructionParts.every((part) => editorText.includes(part))) {
+          return { ready: true, matches: true };
+        }
         editor.focus();
         const selection = window.getSelection();
         const range = document.createRange();
@@ -1061,11 +1271,15 @@ async function submitTaskComposerViaCdp(cdp, executionContextId, instruction) {
     const submitted = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
+        const instructionParts = instruction.split(/\\r?\\n/)
+          .map((part) => part.trim())
+          .filter(Boolean);
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
         if (!editor) return { ready: false };
-        if (!(editor.textContent || "").includes(instruction)) {
+        const editorText = editor.textContent || "";
+        if (!instructionParts.every((part) => editorText.includes(part))) {
           return { ready: true, submitted: true };
         }
         let root = editor;
@@ -1095,11 +1309,14 @@ async function submitTaskComposerViaCdp(cdp, executionContextId, instruction) {
     const verified = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
+        const instructionParts = instruction.split(/\\r?\\n/)
+          .map((part) => part.trim())
+          .filter(Boolean);
         return !Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).some((editor) => (
           editor.getClientRects().length > 0
-          && (editor.textContent || "").includes(instruction)
+          && instructionParts.every((part) => (editor.textContent || "").includes(part))
         ));
       })()`,
       contextId: executionContextId,
@@ -1125,6 +1342,7 @@ async function installTaskboardHostBinding(cdp, supervisor) {
     await handleHostBindingPayload(params, {
       parseAutomationRequest: parseTaskboardAutomationHostRequest,
       ensure: () => supervisor.ensure({ force: true }),
+      restartService: () => supervisor.restart(),
       runAutomation: (request, executionContextId) => (
         (async () => {
           const rpc = (method, body) => requestCodexAutomationViaCdp(
@@ -1166,6 +1384,11 @@ async function installTaskboardHostBinding(cdp, supervisor) {
       renameThread: (request, executionContextId) => (
         requestCodexThreadRenameViaCdp(cdp, executionContextId, request)
       ),
+      checkTaskCompletion: (request) => checkTaskCompletion({
+        taskId: request.taskId,
+        threadId: request.threadId,
+        taskboardUrl: taskboardOrigin,
+      }),
       sendResponse: (executionContextId, response) => (
         sendHostResponse(cdp, executionContextId, response)
       ),
@@ -1205,6 +1428,11 @@ async function readInjectionStatus(cdp) {
       sourceHash: window.__codexTaskboardInjection__?.sourceHash || null,
       scriptIdentifier: window[${JSON.stringify(injectionScriptIdentifierName)}] || null,
       entryMounted: Boolean(document.getElementById("codex-taskboard-entry")),
+      nativeEntryCount: Array.from(document.querySelectorAll("[data-app-action-sidebar-scroll] button"))
+        .filter((button) => {
+          const text = String(button.textContent || button.getAttribute("aria-label") || "").trim().toLowerCase();
+          return text === "任务面板" || text === "taskboard";
+        }).length,
       pageMounted: Boolean(document.getElementById("codex-taskboard-page")),
       pageVisible: document.getElementById("codex-taskboard-page")?.hidden === false,
       frameUrl: document.getElementById("codex-taskboard-frame")?.src || null,
@@ -1222,7 +1450,7 @@ async function waitForInjectionStatus(cdp, shouldOpen, expectedSourceHash, timeo
     Date.now() < deadline
     && (
       status.sourceHash !== expectedSourceHash
-      || !status.entryMounted
+      || (!status.entryMounted && status.nativeEntryCount < 1)
       || (shouldOpen && (!status.pageVisible || !status.frameUrl || !status.frameVisible))
     )
   ) {
@@ -1501,10 +1729,21 @@ async function main() {
   }
 
   let codexProcess = null;
-  const supervisor = createTaskboardSupervisor({ detached: !options.watch });
+  const supervisor = createTaskboardSupervisor();
+  const injectedTargets = new Map();
+  const closeInjectedTargets = () => {
+    injectedTargets.forEach((connection) => connection.close());
+    injectedTargets.clear();
+  };
 
   try {
-    const cdpReachable = await isReachable(cdpVersionUrl);
+    let cdpReachable = await isReachable(cdpVersionUrl);
+    if (!cdpReachable && options.attachExisting) {
+      try {
+        await waitUntilReachable(cdpVersionUrl, 10_000);
+        cdpReachable = true;
+      } catch {}
+    }
     if (!cdpReachable) {
       if (!options.launch) {
         throw new Error(`Codex CDP is not listening on 127.0.0.1:${options.port}`);
@@ -1524,7 +1763,6 @@ async function main() {
     }
 
     const { source, sourceHash } = await currentInjectionSource();
-    const injectedTargets = new Map();
     const firstResults = await injectAll(
       options.port,
       source,
@@ -1545,8 +1783,8 @@ async function main() {
     }
 
     const stop = () => {
-      injectedTargets.forEach((connection) => connection.close());
-      supervisor.stop();
+      closeInjectedTargets();
+      supervisor.detach();
       process.exit(0);
     };
     process.once("SIGINT", stop);
@@ -1616,9 +1854,11 @@ async function main() {
         console.error(`Waiting for Codex renderer: ${error.message}`);
       }
     }
-    supervisor.stop();
+    closeInjectedTargets();
+    supervisor.detach();
   } catch (error) {
-    supervisor.stop();
+    closeInjectedTargets();
+    supervisor.detach();
     throw error;
   }
 }

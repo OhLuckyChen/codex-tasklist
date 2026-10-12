@@ -1,5 +1,7 @@
 import type {
   ActorIdentity,
+  AgentSkillDirectory,
+  AgentTemplate,
   Attachment,
   Comment,
   CodexThreadProgress,
@@ -19,6 +21,8 @@ import type {
   KnowledgeSourceType,
   KnowledgeQuestionnaire,
   KnowledgeQuestionnaireScope,
+  ProjectInteraction,
+  ProjectInteractionSource,
   Project,
   Task,
   TaskboardMetadata,
@@ -55,14 +59,27 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details?: unknown;
+  readonly path?: string;
+  readonly serviceUnavailable: boolean;
 
-  constructor(status: number, body: ApiErrorBody) {
+  constructor(status: number, body: ApiErrorBody, options: { path?: string } = {}) {
     super(body.error?.message ?? `Request failed (${status})`);
     this.name = "ApiError";
     this.status = status;
     this.code = body.error?.code ?? "REQUEST_FAILED";
     this.details = body.error?.details;
+    this.path = options.path;
+    this.serviceUnavailable = status === 0 || this.code === "SERVICE_UNAVAILABLE";
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "name" in error
+    && error.name === "AbortError"
+  );
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -81,23 +98,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(path, { ...init, headers });
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") throw error;
+    if (isAbortError(error)) throw error;
     throw new ApiError(0, {
       error: {
         code: "SERVICE_UNAVAILABLE",
         message: "无法连接本地 Taskboard 服务，请重新通过 Taskboard 启动 Codex。",
+        details: { path },
       },
-    });
+    }, { path });
   }
   let body: T & ApiErrorBody;
   try {
     body = await response.json() as T & ApiErrorBody;
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") throw error;
+    if (isAbortError(error)) throw error;
     body = {} as T & ApiErrorBody;
   }
 
-  if (!response.ok) throw new ApiError(response.status, body);
+  if (!response.ok) throw new ApiError(response.status, body, { path });
   return body;
 }
 
@@ -111,6 +129,18 @@ export async function chooseLocalDirectory(): Promise<string | null> {
     method: "POST",
   });
   return data.workspacePath;
+}
+
+export async function chooseAgentTemplateFile(): Promise<string | null> {
+  return (await request<{ filePath: string | null }>("/api/local/agent-template-file-picker", {
+    method: "POST",
+  })).filePath;
+}
+
+export async function chooseAgentSkillDirectory(): Promise<AgentSkillDirectory | null> {
+  return (await request<{ skill: AgentSkillDirectory | null }>("/api/local/skill-directory-picker", {
+    method: "POST",
+  })).skill;
 }
 
 export interface LocalWorkspaceCheck {
@@ -438,6 +468,40 @@ export async function listKnowledgeProposals(
   return data.proposals;
 }
 
+export async function listProjectInteractions(
+  projectId: string,
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<ProjectInteraction[]> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  const data = await request<{ interactions: ProjectInteraction[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/interactions?${query}`,
+    { signal },
+  );
+  return data.interactions;
+}
+
+export async function createKnowledgeCandidate(
+  projectId: string,
+  input: {
+    title: string;
+    summary?: string;
+    content: string;
+    targetPath?: string;
+    interactionId?: string;
+    sources?: ProjectInteractionSource[];
+  },
+): Promise<KnowledgeProposal> {
+  const data = await request<{ proposal: KnowledgeProposal }>(
+    `/api/projects/${encodeURIComponent(projectId)}/knowledge-candidates`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return data.proposal;
+}
+
 export async function getKnowledgeSourceVersions(
   projectId: string,
   signal?: AbortSignal,
@@ -503,14 +567,18 @@ export async function publishKnowledgeProposal(
   proposal: KnowledgeProposal,
   workspacePath?: string,
 ): Promise<{
-  publishedAt: string;
-  changes: Array<{ targetPath: string; operation: string; digest: string | null }>;
+  receipt: {
+    publishedAt: string;
+    changes: Array<{ targetPath: string; operation: string; digest: string | null }>;
+  };
+  proposal: KnowledgeProposal;
 }> {
-  const data = await request<{
+  return request<{
     receipt: {
       publishedAt: string;
       changes: Array<{ targetPath: string; operation: string; digest: string | null }>;
     };
+    proposal: KnowledgeProposal;
   }>(`/api/local/projects/${encodeURIComponent(projectId)}/knowledge/publish`, {
     method: "POST",
     body: JSON.stringify({
@@ -518,7 +586,6 @@ export async function publishKnowledgeProposal(
       proposal: { id: proposal.id, version: proposal.version, changes: proposal.changes },
     }),
   });
-  return data.receipt;
 }
 
 export async function listKnowledgeQuestionnaires(projectId: string): Promise<KnowledgeQuestionnaire[]> {
@@ -538,6 +605,62 @@ export async function listTasks(projectId?: string, signal?: AbortSignal): Promi
   if (projectId) params.set("projectId", projectId);
   const data = await request<{ tasks: Task[] }>(`/api/tasks?${params}`, { signal });
   return data.tasks;
+}
+
+export async function listAgentTemplates(signal?: AbortSignal): Promise<AgentTemplate[]> {
+  return (await request<{ agents: AgentTemplate[] }>("/api/agents", { signal })).agents;
+}
+
+export async function createAgentTemplate(
+  input: Pick<AgentTemplate, "name" | "templateType" | "templateValue" | "skillPaths">,
+): Promise<AgentTemplate> {
+  return (await request<{ agent: AgentTemplate }>("/api/agents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })).agent;
+}
+
+export async function updateAgentTemplate(
+  agent: AgentTemplate,
+  input: Pick<AgentTemplate, "name" | "templateType" | "templateValue" | "skillPaths">,
+): Promise<AgentTemplate> {
+  return (await request<{ agent: AgentTemplate }>(`/api/agents/${encodeURIComponent(agent.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ version: agent.version, ...input }),
+  })).agent;
+}
+
+export async function deleteAgentTemplate(agent: AgentTemplate): Promise<void> {
+  await request(`/api/agents/${encodeURIComponent(agent.id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ version: agent.version }),
+  });
+}
+
+export async function listProjectAgentIds(projectId: string, signal?: AbortSignal): Promise<string[]> {
+  return (await request<{ agentIds: string[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/agents`,
+    { signal },
+  )).agentIds;
+}
+
+export async function setProjectAgentIds(projectId: string, agentIds: string[]): Promise<string[]> {
+  return (await request<{ agentIds: string[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/agents`,
+    { method: "PUT", body: JSON.stringify({ agentIds }) },
+  )).agentIds;
+}
+
+export async function resolveAgentInstruction(input: {
+  taskId: string;
+  commentId?: string;
+  workspacePath: string;
+  instruction: string;
+}): Promise<string> {
+  return (await request<{ instruction: string }>("/api/agent-instruction", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })).instruction;
 }
 
 export async function createTask(projectId: string, draft: TaskDraft, threadId?: string): Promise<Task> {
@@ -733,12 +856,17 @@ export async function listComments(taskId: string, signal?: AbortSignal): Promis
     : [];
 }
 
-export async function createComment(taskId: string, body: string, threadId?: string): Promise<Comment> {
+export async function createComment(
+  taskId: string,
+  body: string,
+  threadId?: string,
+  agentId?: string | null,
+): Promise<Comment> {
   const data = await request<{ comment: Comment }>(
     `/api/tasks/${encodeURIComponent(taskId)}/comments`,
     {
       method: "POST",
-      body: JSON.stringify({ body, ...(threadId ? { threadId } : {}) }),
+      body: JSON.stringify({ body, ...(threadId ? { threadId } : {}), ...(agentId ? { agentId } : {}) }),
     },
   );
   return {

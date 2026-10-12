@@ -9,6 +9,8 @@ launcher_bundle_id="io.github.ohluckychen.codex-taskboard.launcher"
 launch_agent_label="io.github.ohluckychen.codex-taskboard.supervisor"
 launch_agent_template="$project_root/macos/${launch_agent_label}.plist"
 launch_agent="$HOME/Library/LaunchAgents/${launch_agent_label}.plist"
+launch_agent_target="$project_root/scripts/codex-taskboard-supervisor.sh"
+dashi_data_dir="$project_root/.data"
 dock_backup="$project_root/.data/com.apple.dock.before-codex-taskboard.plist"
 dock_work="$(/usr/bin/mktemp /tmp/codex-taskboard-dock.XXXXXX)"
 user_id="$(/usr/bin/id -u)"
@@ -45,6 +47,25 @@ fi
   "$project_root/scripts/codex-taskboard-launcher.sh" \
   "$project_root/scripts/codex-taskboard-supervisor.sh" \
   "$launcher_app/Contents/MacOS/codex-taskboard"
+
+cleanup_conflicting_launch_agent() {
+  local candidate="$1"
+  local label program_arg data_dir port
+  label="$(/usr/libexec/PlistBuddy -c "Print :Label" "$candidate" 2>/dev/null || true)"
+  [[ -n "$label" && "$label" != "$launch_agent_label" ]] || return 0
+  program_arg="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:1" "$candidate" 2>/dev/null || true)"
+  data_dir="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:CODEX_TASKBOARD_DATA_DIR" "$candidate" 2>/dev/null || true)"
+  port="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:CODEX_TASKBOARD_PORT" "$candidate" 2>/dev/null || true)"
+  if [[ "$program_arg" == "$launch_agent_target" || ( "$data_dir" == "$dashi_data_dir" && "${port:-47823}" == "47823" ) ]]; then
+    /bin/launchctl bootout "gui/${user_id}" "$candidate" >/dev/null 2>&1 || true
+    /bin/rm -f "$candidate"
+  fi
+}
+
+for candidate in "$HOME"/Library/LaunchAgents/*taskboard*.plist; do
+  [[ -e "$candidate" ]] || continue
+  cleanup_conflicting_launch_agent "$candidate"
+done
 
 /bin/cp "$launch_agent_template" "$launch_agent"
 /usr/bin/plutil -replace ProgramArguments -json \

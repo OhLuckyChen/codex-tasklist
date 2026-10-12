@@ -32,6 +32,8 @@ Promotion requires all of the following:
 - `docs/knowledge/code-map.md`: main entry points, module responsibilities, and where to start common changes.
 - `docs/knowledge/key-flows.md`: the small number of end-to-end flows that are central to the product.
 - `docs/knowledge/engineering-notes.md`: build, operation, constraints, recurring failure modes, and verified lessons.
+- `docs/knowledge/data-boundaries.md`: state authority, object ownership, persistence boundaries, projections, caches, and external data contracts.
+- `docs/knowledge/interfaces-and-entrypoints.md`: critical user, API, CLI, script, job, event, configuration, and public function entry points with purpose and success semantics.
 - `docs/knowledge/designs/<topic>.md`: a technical design that is implemented or explicitly accepted and still useful.
 - `docs/knowledge/decisions/<topic>.md`: a durable decision, alternatives considered, status, and consequences.
 - `docs/knowledge/flows/<topic>.md`: a detailed specialist flow that would overload `key-flows.md`.
@@ -46,7 +48,10 @@ Pre-index files live under `.taskboard/knowledge-index/`. They are compact JSON 
 
 - `.taskboard/knowledge-index/manifest.json`: schema version, project summary, generated time, scan scope, excluded paths, and source revisions when available.
 - `.taskboard/knowledge-index/files.json`: file records with path, type, language, size, mtime when available, keywords, owning component, and freshness or revision when available.
-- `.taskboard/knowledge-index/symbols.json`: functions, classes, API routes, CLI commands, scripts, config keys, and public request/response shapes with path, line, signature or route, and keywords.
+- `.taskboard/knowledge-index/symbols.json`: functions, classes, API routes, CLI commands, scripts, config keys, and public request/response shapes with path, line, signature or route, method, request fields, response fields, importance, evidence status, linked knowledge, and keywords.
+- `.taskboard/knowledge-index/entrypoints.json`: user, API, CLI, script, job, event, configuration, and public function entry points with business/runtime purpose, full callable route including deployment prefix or compatibility aliases, method, required request fields, success semantics, importance, evidence status, and linked knowledge.
+- `.taskboard/knowledge-index/objects.json`: core objects with stable ID, authority, creators/updaters, state source, states, invariants, evidence, and confidence.
+- `.taskboard/knowledge-index/flows.json`: central flows with trigger, entry point, components, state changes, success semantics, failure semantics, evidence, and confidence.
 - `.taskboard/knowledge-index/docs.json`: README, docs, published knowledge pages, and high-value Taskboard proposal summaries with title, source, keywords, summary, and health or proposal status.
 - `.taskboard/knowledge-index/recent.json`: recent git or mtime-based changes with path, changed_at, source, status, and reason.
 
@@ -84,7 +89,7 @@ Write user-facing knowledge pages in Chinese unless the project already has a st
 
 ## 5. Pre-index format
 
-Pre-index files must be valid JSON, not Markdown. Prefer arrays for `files.json`, `symbols.json`, `docs.json`, and `recent.json`. Keep entries concise and project-relative.
+Pre-index files must be valid JSON, not Markdown. Use an object for `manifest.json`; use arrays for `files.json`, `symbols.json`, `entrypoints.json`, `objects.json`, `flows.json`, `docs.json`, and `recent.json`. Keep entries concise and project-relative.
 
 Example `symbols.json` entry:
 
@@ -93,15 +98,59 @@ Example `symbols.json` entry:
   "path": "app/api/repowiki_download.py",
   "name": "download_repowiki_files",
   "kind": "api_route",
+  "contractType": "api_route",
+  "importance": "critical",
+  "evidenceStatus": "confirmed",
   "language": "python",
   "line": 42,
-  "method": "POST",
-  "route": "/aicodingkbmgr/repowiki/download",
+  "method": ["GET", "POST"],
+  "route": "/aicodingkbmgr/engineering-doc/download/files",
+  "aliases": ["/engineering-doc/download/files"],
+  "requestFields": ["mode", "domain_id", "smileId", "workspace"],
+  "responseFields": ["mode", "domain_id", "workspace", "total", "files"],
   "signature": "download_repowiki_files(request: RepoWikiDownloadRequest)",
+  "businessPurpose": "Downloads a RepoWiki model manifest into the configured workspace.",
+  "runtimePurpose": "Validates request parameters and dispatches the model download workflow.",
+  "successSemantics": "The expected model files exist locally and the response points to the generated manifest.",
+  "linkedKnowledge": ["docs/knowledge/interfaces-and-entrypoints.md", "docs/knowledge/key-flows.md"],
   "keywords": ["repowiki", "download", "workspace", "smileId"],
   "summary": "Handles RepoWiki manifest download requests and routes by workspace or Smile ID."
 }
 ```
+
+Example `objects.json` entry:
+
+```json
+{
+  "name": "RepoWiki import batch",
+  "stableId": "batch_id",
+  "authority": "database table or manifest file that owns the batch state",
+  "createdBy": ["app/api/repowiki_download.py"],
+  "stateSource": "project-relative/path/to/state-owner",
+  "states": ["created", "downloading", "published", "rag_completed", "failed"],
+  "invariants": ["published does not imply RAG completed"],
+  "evidence": [{ "type": "file", "ref": "app/api/repowiki_download.py", "symbol": "download_repowiki_files" }],
+  "confidence": "confirmed"
+}
+```
+
+Example `flows.json` entry:
+
+```json
+{
+  "name": "RepoWiki download and publish",
+  "trigger": "User or agent calls the RepoWiki download entry point",
+  "entrypoint": "POST /aicodingkbmgr/repowiki/download",
+  "components": ["API route", "download script", "workspace manifest", "RAG refresh trigger"],
+  "stateChanges": ["download manifest is created", "model files are written", "publish status changes independently from RAG completion"],
+  "successSemantics": "The requested model is downloaded and the publish/RAG statuses are separately observable.",
+  "failureSemantics": "Partial RAG completion remains pending and must not be reported as full publication success.",
+  "evidence": [{ "type": "file", "ref": "app/api/repowiki_download.py" }],
+  "confidence": "confirmed"
+}
+```
+
+`importance` is `critical`, `important`, or `supporting`. `evidenceStatus` and `confidence` are `confirmed`, `inferred`, or `pending`. A `critical` symbol or entry point must include `linkedKnowledge` pointing to one or more `docs/knowledge/*.md` pages. API route entries must include `line`, `method` or `methods`, `route`, and `requestFields`; use `aliases` for compatibility paths and `responseFields` when the public response shape is relevant. Dangerous operations must record acknowledgement fields, status preconditions, and safety consequences.
 
 ## 6. Proposal format
 
@@ -140,8 +189,12 @@ An initial proposal is complete when it lets a new maintainer answer, with evide
 - Which constraints, failure modes, and operating practices repeatedly matter.
 - Which accepted designs and decisions remain relevant.
 - Which concrete files, symbols, routes, scripts, docs, and recent changes are likely entry points for future questions.
+- Which core objects own project state, where their authority lives, what projections or caches are downstream, and which object facts remain pending.
+- Which critical entry points mutate or publish state, what success means, and which knowledge pages explain them.
 
 Completeness does not mean documenting every file, class, endpoint, or historical Issue.
+
+For `INIT`, the proposal must include the eight core pages listed in the page taxonomy and all eight pre-index files. `objects.json` and `flows.json` each need at least three entries for non-trivial projects. If the project genuinely has fewer objects or flows, submit a failure with the evidence instead of padding fake entries.
 
 ## 8. Incremental maintenance
 
